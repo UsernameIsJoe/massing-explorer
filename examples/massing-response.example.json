@@ -1,0 +1,58 @@
+{
+  "version": "1.0",
+  "units": "meters",
+  "rationale": "L-shaped tower maximizes south daylight while respecting north neighbor shadow line. Podium at street level for retail activation.",
+  "proposals": [
+    {
+      "id": "option_a",
+      "name": "L-Tower with Podium",
+      "gfa": 8200,
+      "far_achieved": 3.42,
+      "coverage": 0.58,
+      "volumes": [
+        {
+          "name": "podium",
+          "use": "retail",
+          "footprint": [
+            [5, 5, 0],
+            [55, 5, 0],
+            [55, 20, 0],
+            [5, 20, 0]
+          ],
+          "height": 6,
+          "base_elevation": 0,
+          "floors": 1,
+          "floor_to_floor": 6
+        },
+        {
+          "name": "tower_wing_south",
+          "use": "office",
+          "footprint": [
+            [5, 20, 0],
+            [30, 20, 0],
+            [30, 35, 0],
+            [5, 35, 0]
+          ],
+          "height": 54,
+          "base_elevation": 6,
+          "floors": 16,
+          "floor_to_floor": 3.375
+        },
+        {
+          "name": "tower_wing_east",
+          "use": "office",
+          "footprint": [
+            [30, 20, 0],
+            [45, 20, 0],
+            [45, 35, 0],
+            [30, 35, 0]
+          ],
+          "height": 42,
+          "base_elevation": 6,
+          "floors": 12,
+          "floor_to_floor": 3.5
+        }
+      ]
+    }
+  ]
+}

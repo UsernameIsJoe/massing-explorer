@@ -1,0 +1,2 @@
+jsonschema>=4.0.0
+rhino3dm>=8.0.0

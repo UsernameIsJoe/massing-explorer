@@ -1,0 +1,164 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/UsernameIsJoe/massing-explorer/schemas/site-context.schema.json",
+  "title": "SiteContext",
+  "description": "Structured site conditions exported from Rhino for LLM/ML massing workflows.",
+  "type": "object",
+  "required": ["version", "units", "site_boundary", "buildings"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "units": {
+      "type": "string",
+      "enum": ["meters", "millimeters", "feet", "inches"]
+    },
+    "north_vector": {
+      "type": "array",
+      "description": "World XY direction of project north as [x, y].",
+      "items": { "type": "number" },
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "site_boundary": {
+      "type": "object",
+      "required": ["vertices"],
+      "properties": {
+        "vertices": {
+          "type": "array",
+          "description": "Closed polygon vertices in world XY, counter-clockwise.",
+          "items": {
+            "type": "array",
+            "items": { "type": "number" },
+            "minItems": 2,
+            "maxItems": 3
+          },
+          "minItems": 3
+        },
+        "area": { "type": "number" },
+        "layer": { "type": "string" }
+      }
+    },
+    "buildings": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/building" }
+    },
+    "setbacks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "vertices"],
+        "properties": {
+          "name": { "type": "string" },
+          "vertices": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": { "type": "number" },
+              "minItems": 2,
+              "maxItems": 3
+            }
+          },
+          "layer": { "type": "string" }
+        }
+      }
+    },
+    "roads": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "centerline"],
+        "properties": {
+          "name": { "type": "string" },
+          "centerline": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": { "type": "number" },
+              "minItems": 2,
+              "maxItems": 3
+            },
+            "minItems": 2
+          },
+          "width": { "type": "number" },
+          "layer": { "type": "string" }
+        }
+      }
+    },
+    "terrain": {
+      "type": "object",
+      "properties": {
+        "sample_points": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": { "type": "number" },
+            "minItems": 3,
+            "maxItems": 3
+          }
+        },
+        "layer": { "type": "string" }
+      }
+    },
+    "zoning": {
+      "type": "object",
+      "properties": {
+        "max_height": { "type": "number" },
+        "far": { "type": "number" },
+        "max_coverage": { "type": "number" },
+        "notes": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "definitions": {
+    "building": {
+      "type": "object",
+      "required": ["id", "footprint", "height"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "layer": { "type": "string" },
+        "footprint": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": { "type": "number" },
+            "minItems": 2,
+            "maxItems": 3
+          },
+          "minItems": 3
+        },
+        "height": { "type": "number" },
+        "floors": { "type": "integer" },
+        "bbox": {
+          "type": "object",
+          "properties": {
+            "min": {
+              "type": "array",
+              "items": { "type": "number" },
+              "minItems": 3,
+              "maxItems": 3
+            },
+            "max": {
+              "type": "array",
+              "items": { "type": "number" },
+              "minItems": 3,
+              "maxItems": 3
+            }
+          }
+        },
+        "footprint_area": { "type": "number" },
+        "user_strings": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    }
+  }
+}

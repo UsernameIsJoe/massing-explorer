@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Rhino
+*.3dmbak
+*.rhl
+
+# Local exports (keep examples/)
+site-context.json
+massing-response.json
+output/
