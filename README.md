@@ -96,7 +96,7 @@ Full rationale: [docs/DECISIONS.md](docs/DECISIONS.md)
 | Phase | Focus | Status |
 |-------|-------|--------|
 | **1** | Excel ingest, GSF engine, config file, CLI, text output | **Complete** |
-| **2** | Ollama chat loop, grouping, story count, state memory | Not started |
+| **2** | Ollama chat loop, grouping, story count, state memory | **Complete** |
 | **3** | Footprint solver, anchor room fit, double-height, stepped floors | Not started |
 | **4** | Paired masses, site limits from config/chat | Not started |
 | **5** | Rhino massing geometry export | Not started |
@@ -152,6 +152,14 @@ python -m massing_explorer ingest <program.xlsx|program.csv> -c config/project.e
 
 # Save report and JSON
 python -m massing_explorer ingest program.xlsx -o output/report.txt -j output/program.json
+
+# Start a chat study (requires Ollama running locally)
+python -m massing_explorer chat --study underwood -p examples/underwood_elementary_space_summary.xlsx -c config/project.example.yaml
+
+# Resume an existing study
+python -m massing_explorer chat --study underwood
+
+# In-chat commands: /status  /grouping  /quit
 
 # Show project config (anchor rooms, grossing factors)
 python -m massing_explorer config config/project.example.yaml

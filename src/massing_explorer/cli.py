@@ -10,6 +10,52 @@ from .load import load_program_file
 from .report import format_program_report
 
 
+def cmd_chat(args: argparse.Namespace) -> int:
+    from .chat import run_chat_loop
+    from .ollama_client import OllamaClient, OllamaError
+    from .session import StudySession, slugify_study_id
+
+    study_id = slugify_study_id(args.study)
+
+    try:
+        if args.program:
+            program = load_program_file(args.program, config_path=args.config)
+            session = StudySession(
+                study_id=study_id,
+                program=program,
+                config_path=args.config or "",
+                model=args.model,
+            )
+            session.save()
+            print(f"Created study '{study_id}' from {args.program}")
+        else:
+            session = StudySession.load(study_id)
+            if args.model:
+                session.model = args.model
+            print(f"Resumed study '{study_id}'")
+    except FileNotFoundError as e:
+        print(f"Error: {e}")
+        print("Start a new study with: chat --study NAME --program FILE.xlsx")
+        return 1
+
+    client = OllamaClient(model=session.model)
+    try:
+        models = client.list_models()
+        if models and session.model not in models:
+            # Allow partial match (e.g. llama3.1 vs llama3.1:8b)
+            match = next((m for m in models if m.startswith(session.model)), None)
+            if match:
+                client.model = match
+                session.model = match
+            else:
+                print(f"Warning: model '{session.model}' not in Ollama. Available: {models[:5]}")
+    except OllamaError as e:
+        print(f"Warning: {e}")
+
+    run_chat_loop(session, client)
+    return 0
+
+
 def cmd_ingest(args: argparse.Namespace) -> int:
     study = load_program_file(args.program, config_path=args.config)
     report = format_program_report(study)
@@ -68,6 +114,15 @@ def build_parser() -> argparse.ArgumentParser:
     cfg = sub.add_parser("config", help="Show loaded project config")
     cfg.add_argument("config", help="Path to project YAML")
     cfg.set_defaults(func=cmd_config_check)
+
+    chat = sub.add_parser("chat", help="Chat with local LLM about program grouping")
+    chat.add_argument("--study", "-s", required=True, help="Study ID (saved under studies/)")
+    chat.add_argument("--program", "-p", help="Program Excel/CSV (required for new study)")
+    chat.add_argument("--config", "-c", help="Project config YAML")
+    chat.add_argument(
+        "--model", "-m", default="llama3.1", help="Ollama model name (default: llama3.1)"
+    )
+    chat.set_defaults(func=cmd_chat)
 
     return parser
 

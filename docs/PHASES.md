@@ -40,12 +40,12 @@ Step-by-step build plan. Do not skip validation gates between phases.
 
 ### Deliverables
 
-- [ ] Ollama client wrapper (model configurable)
-- [ ] Study state object (program, groupings, constraints, messages)
-- [ ] State persistence to disk (`studies/<id>/state.json`)
-- [ ] System prompt: LLM role = reasoner, must call engine tools for math
-- [ ] Tool interface: `get_department_summary`, `set_grouping`, `set_story_count`
-- [ ] CLI chat: `python -m massing_explorer chat --study school_demo`
+- [x] Ollama client wrapper (model configurable)
+- [x] Study state object (program, groupings, constraints, messages)
+- [x] State persistence to disk (`studies/<id>/state.json`)
+- [x] System prompt: LLM role = reasoner, must call engine tools for math
+- [x] Tool interface: `get_department_summary`, `set_grouping`, `set_story_count`, `set_constraint`, `add_adjacency_note`, `mark_double_height`
+- [x] CLI chat: `python -m massing_explorer chat --study school_demo`
 
 ### Test criteria
 
