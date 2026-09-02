@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "massing-explorer"
+version = "0.1.0"
+description = "Program-to-massing dimension study with local LLM reasoning"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "openpyxl>=3.1.0",
+    "pyyaml>=6.0",
+    "jsonschema>=4.0.0",
+]
+
+[project.scripts]
+massing-explorer = "massing_explorer.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

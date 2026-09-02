@@ -10,13 +10,13 @@ Step-by-step build plan. Do not skip validation gates between phases.
 
 ### Deliverables
 
-- [ ] `src/` package scaffold
-- [ ] Excel/CSV parser (assumed column schema)
-- [ ] Program verification (room areas × qty → department totals → grand total)
-- [ ] GSF calculator with configurable `area_adjustment` and `grossing_factor`
-- [ ] `config/project.yaml` loader (grossing, anchor rooms, planning limits)
-- [ ] CLI: `python -m massing_explorer ingest program.csv`
-- [ ] Text report: departments, NFA, target GSF per department
+- [x] `src/` package scaffold
+- [x] Excel/CSV parser (flexible column + section detection)
+- [x] Program verification (room areas × qty → department totals → grand total)
+- [x] GSF calculator with configurable `area_adjustment` and `grossing_factor`
+- [x] `config/project.yaml` loader (grossing, anchor rooms, planning limits)
+- [x] CLI: `python -m massing_explorer ingest program.xlsx`
+- [x] Text report: departments, NFA, target GSF per department
 
 ### Test criteria
 

@@ -95,7 +95,7 @@ Full rationale: [docs/DECISIONS.md](docs/DECISIONS.md)
 
 | Phase | Focus | Status |
 |-------|-------|--------|
-| **1** | Excel ingest, GSF engine, config file, CLI, text output | Not started |
+| **1** | Excel ingest, GSF engine, config file, CLI, text output | **Complete** |
 | **2** | Ollama chat loop, grouping, story count, state memory | Not started |
 | **3** | Footprint solver, anchor room fit, double-height, stepped floors | Not started |
 | **4** | Paired masses, site limits from config/chat | Not started |
@@ -111,21 +111,22 @@ Live progress log: [docs/PROGRESS.md](docs/PROGRESS.md)
 
 ```
 massing-explorer/
+├── src/massing_explorer/
+│   ├── cli.py              # CLI entry
+│   ├── config.py           # YAML config loader
+│   ├── load.py             # Program file loader
+│   ├── models.py           # ProgramStudy, Room, Department
+│   ├── report.py           # Text report formatter
+│   └── parser/
+│       ├── columns.py      # Flexible column detection
+│       ├── tabular.py      # Row parser (hierarchical + flat)
+│       └── excel.py        # Excel/CSV file reader
+├── tests/test_phase1.py
 ├── docs/
-│   ├── DECISIONS.md      # Locked design decisions
-│   ├── PHASES.md         # Phase plan + test criteria
-│   └── PROGRESS.md       # Running log of work, problems, discussions
 ├── config/
-│   └── project.example.yaml
 ├── schemas/
-│   ├── program-study.schema.json
-│   └── massing-study.schema.json
-├── examples/
-│   └── program.example.csv
-└── README.md
+└── examples/
 ```
-
-Code will land under `src/` as each phase is implemented.
 
 ---
 
@@ -137,7 +138,30 @@ The 15-step program-to-massing study workflow this project automates is document
 
 ## Getting started
 
-_Not yet — Phase 1 in progress. See [docs/PROGRESS.md](docs/PROGRESS.md)._
+```bash
+pip install -e .
+python -m massing_explorer ingest examples/underwood_elementary_space_summary.xlsx -c config/project.example.yaml
+python -m unittest tests.test_phase1 -v
+```
+
+### CLI commands
+
+```bash
+# Parse program file and print report
+python -m massing_explorer ingest <program.xlsx|program.csv> -c config/project.example.yaml
+
+# Save report and JSON
+python -m massing_explorer ingest program.xlsx -o output/report.txt -j output/program.json
+
+# Show project config (anchor rooms, grossing factors)
+python -m massing_explorer config config/project.example.yaml
+```
+
+The Excel parser auto-detects header rows and column names from keywords — it is not hardcoded to any single file format. It handles:
+
+- Hierarchical schedules (department header rows + room rows), like MSBA space summaries
+- Flat CSV files with a `department` column
+- Footer rows with declared NFA, GFA, and grossing factor
 
 ---
 
