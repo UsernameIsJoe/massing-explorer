@@ -1,0 +1,50 @@
+# Massing Explorer — project configuration
+# Copy to project.yaml and edit per study.
+
+units: feet
+area_unit: sf
+
+# GSF calculation: Target GSF = Program Area × area_adjustment × grossing_factor
+grossing:
+  area_adjustment: 1.15
+  grossing_factor: 1.50
+
+# GSF validation tolerance (fraction, e.g. 0.03 = ±3%)
+gsf_tolerance: 0.03
+
+# Planning dimensions (optional defaults; can be overridden in chat)
+planning_limits:
+  academic_width_ft: 80
+  max_building_length_ft: null
+  max_building_width_ft: null
+
+# Site envelope (optional — stated constraints, no Rhino geometry)
+site:
+  max_total_length_ft: null
+  max_total_width_ft: null
+  notes: ""
+
+# Anchor rooms — clear dimensional requirements (independent of grossed program area)
+anchor_rooms:
+  gym:
+    min_width_ft: 60
+    min_length_ft: 100
+    double_height: true
+  auditorium:
+    min_width_ft: 50
+    min_length_ft: 80
+    double_height: true
+  cafeteria:
+    min_width_ft: 40
+    min_length_ft: 60
+    double_height: false
+
+# Department → default mass grouping hints (optional; LLM may override via chat)
+default_groupings: []
+
+# Adjacency preferences (optional hints for LLM)
+adjacencies:
+  - departments: [art, music]
+    strength: preferred
+  - departments: [health_pe, dining]
+    strength: preferred

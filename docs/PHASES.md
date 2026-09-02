@@ -1,0 +1,164 @@
+# Phased implementation plan
+
+Step-by-step build plan. Do not skip validation gates between phases.
+
+---
+
+## Phase 1 — Program engine (no LLM)
+
+**Goal:** Read a program file, compute GSF, verify totals, emit a text summary.
+
+### Deliverables
+
+- [ ] `src/` package scaffold
+- [ ] Excel/CSV parser (assumed column schema)
+- [ ] Program verification (room areas × qty → department totals → grand total)
+- [ ] GSF calculator with configurable `area_adjustment` and `grossing_factor`
+- [ ] `config/project.yaml` loader (grossing, anchor rooms, planning limits)
+- [ ] CLI: `python -m massing_explorer ingest program.csv`
+- [ ] Text report: departments, NFA, target GSF per department
+
+### Test criteria
+
+| Test | Pass condition |
+|------|----------------|
+| Parse example CSV | All rooms loaded, departments grouped |
+| Verify totals | Engine-detected sum matches declared department total (±0 SF) |
+| GSF calc | School example: program × 1.15 × 1.50 matches hand calculation |
+| Config load | Anchor room `gym: 60×100` readable from YAML |
+| CLI runs | Exit 0, report printed |
+
+### Example input
+
+`examples/program.example.csv` — simplified school program.
+
+---
+
+## Phase 2 — LLM chat loop (Ollama)
+
+**Goal:** Conversational grouping and story-count proposals with persistent study state.
+
+### Deliverables
+
+- [ ] Ollama client wrapper (model configurable)
+- [ ] Study state object (program, groupings, constraints, messages)
+- [ ] State persistence to disk (`studies/<id>/state.json`)
+- [ ] System prompt: LLM role = reasoner, must call engine tools for math
+- [ ] Tool interface: `get_department_summary`, `set_grouping`, `set_story_count`
+- [ ] CLI chat: `python -m massing_explorer chat --study school_demo`
+
+### Test criteria
+
+| Test | Pass condition |
+|------|----------------|
+| Ollama connect | Ping local model, get response |
+| Grouping proposal | LLM groups departments into 3+ masses from example program |
+| State recall | Second message references prior grouping without re-stating |
+| No LLM math | LLM never returns GSF numbers not produced by engine tool |
+
+---
+
+## Phase 3 — Dimension solver + validation
+
+**Goal:** Given grouping + story count + constraints, solve footprints and validate.
+
+### Deliverables
+
+- [ ] Footprint solver: `other_side = floor_area / fixed_side`
+- [ ] Per-floor area from story count: `avg_plate = target_gsf / floors`
+- [ ] Stepped floor support (unequal floor areas per level)
+- [ ] Double-height void deduction (chat-flagged rooms)
+- [ ] Anchor room fit check inside proposed rectangle
+- [ ] GSF validation with ±3% tolerance (configurable)
+- [ ] Text massing report:
+  - mass name, W×L per floor
+  - programs per mass / per floor
+  - validation table
+  - compromised anchor rooms list
+
+### Test criteria
+
+| Test | Pass condition |
+|------|----------------|
+| Fixed width 80 ft | Academic GSF 24,000 SF, 3 stories → plate 8,000 SF → L = 100 ft |
+| Gym fit | 60×100 gym fails in 72×90 mass, passes in 100×120 mass |
+| Double-height | Gym on floor 0 voids same footprint on floor 1 |
+| GSF tolerance | 2.5% under target → pass; 5% under → fail |
+| Compromise list | Report names gym when width insufficient |
+
+---
+
+## Phase 4 — Multi-mass + site limits
+
+**Goal:** Paired masses, shared widths, combined length constraints from config/chat.
+
+### Deliverables
+
+- [ ] Paired-mass solver: W = (A₁+A₂)/L_total
+- [ ] Site limit enforcement from config (max length, max width, combined length)
+- [ ] Resize loop: when one dim fixed, recalc other / floors / distribution
+- [ ] Chat commands: "fit two masses in 280 ft total length"
+
+### Test criteria
+
+| Test | Pass condition |
+|------|----------------|
+| Paired masses | Academic 12,000 SF + Support 8,000 SF in 280 ft → W, L₁, L₂ correct |
+| Max length | Mass exceeding limit triggers resize suggestion |
+| Recalc on change | Changing width recalculates GSF and re-validates |
+
+---
+
+## Phase 5 — Rhino export (optional)
+
+**Goal:** Generate editable massing geometry from MassingStudy JSON.
+
+### Deliverables
+
+- [ ] MassingStudy → Rhino script or `.3dm` via rhino3dm
+- [ ] Layers per mass / per program
+- [ ] Extruded volumes per floor plate
+
+### Test criteria
+
+| Test | Pass condition |
+|------|----------------|
+| Import | Open in Rhino 8, masses match reported dimensions |
+| Layers | Programs identifiable by layer/name |
+
+---
+
+## Phase dependency graph
+
+```
+Phase 1 (engine)
+    ↓
+Phase 2 (LLM chat)
+    ↓
+Phase 3 (solver + validation)
+    ↓
+Phase 4 (multi-mass + site)
+    ↓
+Phase 5 (Rhino) — optional
+```
+
+---
+
+## Out of scope (all phases for now)
+
+- Screenshot / vision program ingest
+- Multiple simultaneous massing options
+- Full classroom distribution / bin packing
+- Rhino site context import
+- Web UI
+- Cloud LLM APIs
+- Angled site boundaries
+
+---
+
+## How to advance a phase
+
+1. Implement deliverables
+2. Run all test criteria — document results in [PROGRESS.md](PROGRESS.md)
+3. Note problems / design discussions in PROGRESS.md
+4. Get user review before starting next phase

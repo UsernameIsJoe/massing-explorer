@@ -15,11 +15,9 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Rhino
-*.3dmbak
-*.rhl
+# Study state (local)
+studies/
+config/project.yaml
 
-# Local exports (keep examples/)
-site-context.json
-massing-response.json
+# Local exports
 output/

@@ -1,0 +1,15 @@
+room_name,qty,area_sf,department
+Classroom,24,900,academic
+Special Ed Classroom,4,600,academic
+Science Lab,6,1200,academic
+Gymnasium,1,6000,health_pe
+Locker Room,2,800,health_pe
+Cafeteria,1,4500,dining
+Kitchen,1,2500,dining
+Art Room,2,1000,art
+Music Room,2,900,music
+Admin Office,1,1200,administration
+Nurse Suite,1,400,administration
+Media Center,1,3500,media
+Custodial,1,600,custodial
+Mechanical,1,1500,custodial

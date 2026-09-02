@@ -1,0 +1,81 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "massing-study",
+  "title": "MassingStudy",
+  "description": "Validated conceptual massing study output.",
+  "type": "object",
+  "required": ["version", "units", "masses", "validation"],
+  "properties": {
+    "version": { "type": "string", "const": "1.0" },
+    "units": { "type": "string", "enum": ["feet"] },
+    "study_id": { "type": "string" },
+    "rationale": { "type": "string" },
+    "gsf_tolerance": { "type": "number" },
+    "masses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "departments", "floors", "target_gsf", "actual_gsf"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "departments": { "type": "array", "items": { "type": "string" } },
+          "floors": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["level", "width_ft", "length_ft", "area_sf", "programs"],
+              "properties": {
+                "level": { "type": "integer" },
+                "width_ft": { "type": "number" },
+                "length_ft": { "type": "number" },
+                "area_sf": { "type": "number" },
+                "programs": { "type": "array", "items": { "type": "string" } },
+                "voids": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "room": { "type": "string" },
+                      "width_ft": { "type": "number" },
+                      "length_ft": { "type": "number" }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "target_gsf": { "type": "number" },
+          "actual_gsf": { "type": "number" },
+          "fit_delta_sf": { "type": "number" },
+          "fit_pass": { "type": "boolean" }
+        }
+      }
+    },
+    "validation": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["check", "pass"],
+        "properties": {
+          "check": { "type": "string" },
+          "pass": { "type": "boolean" },
+          "message": { "type": "string" }
+        }
+      }
+    },
+    "compromised_anchor_rooms": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "room": { "type": "string" },
+          "mass_id": { "type": "string" },
+          "required_ft": { "type": "string" },
+          "available_ft": { "type": "string" },
+          "reason": { "type": "string" }
+        }
+      }
+    }
+  }
+}

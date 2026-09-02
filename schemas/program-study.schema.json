@@ -1,0 +1,64 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "program-study",
+  "title": "ProgramStudy",
+  "description": "Parsed and verified architectural program from Excel/CSV.",
+  "type": "object",
+  "required": ["version", "units", "rooms", "departments", "grossing", "totals"],
+  "properties": {
+    "version": { "type": "string", "const": "1.0" },
+    "units": { "type": "string", "enum": ["feet"] },
+    "area_unit": { "type": "string", "enum": ["sf"] },
+    "source_file": { "type": "string" },
+    "grossing": {
+      "type": "object",
+      "required": ["area_adjustment", "grossing_factor"],
+      "properties": {
+        "area_adjustment": { "type": "number", "minimum": 1 },
+        "grossing_factor": { "type": "number", "minimum": 1 }
+      }
+    },
+    "rooms": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["room_name", "qty", "area_sf", "department"],
+        "properties": {
+          "room_name": { "type": "string" },
+          "qty": { "type": "integer", "minimum": 1 },
+          "area_sf": { "type": "number", "minimum": 0 },
+          "department": { "type": "string" },
+          "total_area_sf": { "type": "number" }
+        }
+      }
+    },
+    "departments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "nfa_sf", "target_gsf"],
+        "properties": {
+          "name": { "type": "string" },
+          "nfa_sf": { "type": "number" },
+          "target_gsf": { "type": "number" },
+          "room_count": { "type": "integer" }
+        }
+      }
+    },
+    "totals": {
+      "type": "object",
+      "required": ["nfa_sf", "target_gsf"],
+      "properties": {
+        "nfa_sf": { "type": "number" },
+        "target_gsf": { "type": "number" }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "properties": {
+        "passed": { "type": "boolean" },
+        "messages": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}
