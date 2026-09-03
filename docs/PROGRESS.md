@@ -5,6 +5,79 @@ Update this file at the end of every work session.
 
 ---
 
+## 2026-09-03 — Phase 4 complete: paired masses + site limits
+
+### Done
+
+- **Paired-mass solver** (`solve_paired_masses`): masses that sit side by side share
+  a width solved from their combined floor plate area and a stated total length.
+  `W = (P₁ + P₂ + …) / L_total`, then `Lᵢ = Pᵢ / W`. Lengths sum back to `L_total`
+  exactly, and each mass keeps its own required area.
+- **`plate_area()` extracted** so pairing and single-mass solving share one
+  definition of "floor plate needed," including the void carry on multi-story masses.
+- **`MassPairing` state** on `StudySession`, persisted with the study.
+- **Site limits** (`_site_limits`) merged from config (`planning_limits`, `site`)
+  and chat constraints, with chat taking priority. Checks per-mass length, per-mass
+  width, per-pairing combined length, and site-wide combined length.
+- **Resize suggestions** (`ResizeSuggestion`): when a mass busts a length limit the
+  engine offers two concrete outs — a story count that fits, or a width that fits.
+- **Resize loop** (`resize_mass` tool): change width and/or stories, then re-solve
+  and re-validate in a single call so the LLM can apply a suggestion directly.
+- **LLM tools:** `pair_masses`, `clear_pairings`, `resize_mass`. System prompt updated
+  to route "fit two masses in 280 ft" to the engine instead of LLM arithmetic.
+- **CLI:** `--pair`, `--pair-length`, `--max-length`, `--max-total-length`.
+- **Site plan visual** (`render_site_plan`): masses laid end-to-end with per-mass
+  dimension lines and the site limit as a pass/fail line. Pairing members are drawn
+  contiguous so a shared width reads as a single bar.
+
+### Test results
+
+| Test | Result | Notes |
+|------|--------|-------|
+| Paired width/lengths | pass | 12,000 + 8,000 SF in 280 ft → W 71.43, L 168 / 112 |
+| Areas preserved | pass | `W × Lᵢ` returns each input area |
+| Three-mass pairing | pass | 9,000 + 6,000 + 3,000 in 300 ft → W 60 |
+| Underwood pairing | pass | academic + support in 280 ft → W 68.1, 164.9 + 115.1 = 280.0 |
+| GSF held under pairing | pass | both paired masses still within ±3% |
+| Length over limit | pass | suggestion offers stories and width |
+| Story suggestion sanity | pass | never suggests the current story count |
+| Width over limit | pass | suggests narrowing, reports resulting length |
+| Resize width | pass | 2× width → half length, GSF unchanged |
+| Resize stories | pass | 3 → 2 stories lengthens plate, GSF unchanged |
+| Clear pairings | pass | falls back to fixed-width constraint chain |
+| Pairing persistence | pass | survives save/load |
+| Site plan visual | pass | PNG written |
+| Full suite | pass | 40 tests |
+
+### Problems
+
+- **Resize story suggestion was under-counting.** It divided target GSF by the plate
+  cap, but a mass with a double-height void carries extra area in its plate, so the
+  HPE/Dining mass was told to "use 2 stories" when it was already 2. Fixed by sizing
+  from actual footprint (`plate × stories`) and floor-clamping to `current + 1`.
+- **A resize test passed for the wrong reason.** Changing academic from 3 stories at
+  80 ft to 2 stories at 120 ft leaves the plate identical (3 × 80 = 2 × 120 = 240),
+  so length correctly did not move. Replaced with two tests that isolate width and
+  story changes separately.
+- **Site plan ordering.** With academic and support paired but HPE unpaired, the
+  unpaired mass was drawn between the two paired ones, hiding the shared width.
+  Masses are now sorted so pairing members stay adjacent.
+
+### Discussions
+
+- Site-wide combined length sums *all* masses end-to-end. That is a deliberately
+  conservative single-row reading of the site; L-shaped or courtyard arrangements
+  would need a real 2D packing step, which is out of scope here.
+- Pairings live in chat state rather than config, since mass ids only exist after
+  grouping. Config carries the site envelope; chat carries which masses share it.
+
+### Next steps
+
+- Phase 5 (optional): Rhino export via rhino3dm — layers per mass/program,
+  extruded volumes per floor plate.
+
+---
+
 ## 2026-09-03 — Phase 3 complete: dimension solver + checkpoint visual
 
 ### Done

@@ -19,6 +19,10 @@ planning_limits:
   max_building_width_ft: null
 
 # Site envelope (optional — stated constraints, no Rhino geometry)
+# max_total_length_ft caps the combined length of all masses.
+# Shared-width pairings between specific masses are set in chat
+# ("fit the academic and support wings in 280 ft") since mass ids
+# are created during grouping.
 site:
   max_total_length_ft: null
   max_total_width_ft: null

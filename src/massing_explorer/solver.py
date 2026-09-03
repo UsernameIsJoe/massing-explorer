@@ -8,6 +8,7 @@ from .massing_models import (
     CompromisedAnchor,
     FloorPlate,
     MassingStudyResult,
+    ResizeSuggestion,
     SolvedMass,
     ValidationCheck,
     VoidRegion,
@@ -22,6 +23,42 @@ def solve_other_side(area_sf: float, fixed_side_ft: float) -> float:
     if area_sf < 0:
         raise ValueError("area_sf must be >= 0")
     return area_sf / fixed_side_ft
+
+
+def solve_paired_width(areas_sf: list[float], total_length_ft: float) -> float:
+    """Shared width for adjacent masses: W = (A1 + A2 + ...) / L_total"""
+    if total_length_ft <= 0:
+        raise ValueError("total_length_ft must be > 0")
+    total_area = sum(areas_sf)
+    if total_area < 0:
+        raise ValueError("areas must be >= 0")
+    return total_area / total_length_ft
+
+
+def solve_paired_masses(
+    areas_sf: list[float],
+    total_length_ft: float,
+) -> tuple[float, list[float]]:
+    """
+    Manual workflow Step 11.
+
+    W = (A1 + A2) / L_total, then L_i = A_i / W.
+    Returns (shared_width_ft, [length_per_mass_ft]).
+    """
+    width = solve_paired_width(areas_sf, total_length_ft)
+    if width <= 0:
+        return 0.0, [0.0 for _ in areas_sf]
+    lengths = [solve_other_side(a, width) for a in areas_sf]
+    return width, lengths
+
+
+def plate_area(target_gsf: float, story_count: int, void_area_sf: float = 0.0) -> float:
+    """Floor plate area needed so n floors minus voids equal target GSF."""
+    story_count = max(1, story_count)
+    if story_count == 1:
+        return target_gsf
+    n_void_floors = 1 if void_area_sf > 0 else 0
+    return (target_gsf + void_area_sf * n_void_floors) / story_count
 
 
 def gsf_fit_pass(actual: float, target: float, tolerance: float = 0.03) -> bool:
@@ -196,13 +233,7 @@ def solve_mass_footprint(
     story_count = max(1, story_count)
     void_area = sum(v.area_sf for v in voids)
 
-    if story_count == 1:
-        plate = target_gsf
-    else:
-        # One void floor between 0 and 1 when voids exist
-        n_void_floors = 1 if void_area > 0 else 0
-        plate = (target_gsf + void_area * n_void_floors) / story_count
-
+    plate = plate_area(target_gsf, story_count, void_area)
     length = solve_other_side(plate, fixed_width_ft)
     floors: list[FloorPlate] = []
 
@@ -280,11 +311,196 @@ def check_anchor_fit(
                     room=a["room_name"],
                     mass_id=mass.id,
                     required_ft=f"{rw:g} x {rl:g}",
-                    available_ft=f"{ground.width_ft:g} x {ground.length_ft:.1f}",
+                    available_ft=f"{ground.width_ft:.1f} x {ground.length_ft:.1f}",
                     reason="clear room dims do not fit ground floor footprint",
                 )
             )
     return compromised
+
+
+def _mass_plate_area(
+    session: StudySession,
+    mass_def: Any,
+    config: dict[str, Any],
+) -> float:
+    target = _mass_target_gsf(session, mass_def.departments)
+    voids = _void_area_for_mass(session, mass_def.departments, config)
+    return plate_area(target, mass_def.story_count, sum(v.area_sf for v in voids))
+
+
+def _resolve_widths(
+    session: StudySession,
+    config: dict[str, Any],
+) -> tuple[dict[str, float], dict[str, str]]:
+    """
+    Width per mass. Paired masses share W = sum(plates) / total_length;
+    unpaired masses fall back to the fixed-width constraint chain.
+    """
+    widths: dict[str, float] = {}
+    pairing_of: dict[str, str] = {}
+    by_id = {m.id: m for m in session.masses}
+
+    for pairing in session.pairings:
+        members = [by_id[mid] for mid in pairing.mass_ids if mid in by_id]
+        if len(members) < 2 or pairing.total_length_ft <= 0:
+            continue
+        plates = [_mass_plate_area(session, m, config) for m in members]
+        shared_width, _ = solve_paired_masses(plates, pairing.total_length_ft)
+        for m in members:
+            widths[m.id] = shared_width
+            pairing_of[m.id] = pairing.id
+
+    for mass_def in session.masses:
+        widths.setdefault(
+            mass_def.id, _resolve_fixed_width(session, mass_def.id, config)
+        )
+    return widths, pairing_of
+
+
+def check_pairing_lengths(
+    session: StudySession,
+    result: MassingStudyResult,
+) -> list[ValidationCheck]:
+    """Combined ground-floor length of each pairing vs its stated total length."""
+    checks: list[ValidationCheck] = []
+    solved_by_id = {m.id: m for m in result.masses}
+
+    for pairing in session.pairings:
+        members = [solved_by_id[mid] for mid in pairing.mass_ids if mid in solved_by_id]
+        if not members or pairing.total_length_ft <= 0:
+            continue
+        combined = sum(m.floors[0].length_ft for m in members if m.floors)
+        ok = combined <= pairing.total_length_ft + 1.0
+        parts = ", ".join(
+            f"{m.name} {m.floors[0].length_ft:.1f} ft" for m in members if m.floors
+        )
+        checks.append(
+            ValidationCheck(
+                check=f"pairing_length:{pairing.id}",
+                passed=ok,
+                message=(
+                    f"{pairing.id}: combined {combined:.1f} ft vs allowed "
+                    f"{pairing.total_length_ft:g} ft at shared width "
+                    f"{members[0].fixed_dim_ft:.1f} ft ({parts})"
+                ),
+            )
+        )
+    return checks
+
+
+def _site_limits(session: StudySession, config: dict[str, Any]) -> dict[str, float]:
+    """Merge site limits from chat constraints (priority) and config."""
+    limits: dict[str, float] = {}
+    planning = config.get("planning_limits", {}) or {}
+    site = config.get("site", {}) or {}
+
+    sources = [
+        ("max_building_length_ft", planning.get("max_building_length_ft")),
+        ("max_building_width_ft", planning.get("max_building_width_ft")),
+        ("max_total_length_ft", site.get("max_total_length_ft")),
+        ("max_total_width_ft", site.get("max_total_width_ft")),
+    ]
+    for key, value in sources:
+        if value is not None:
+            limits[key] = float(value)
+
+    for key in (
+        "max_building_length_ft",
+        "max_building_width_ft",
+        "max_total_length_ft",
+        "max_total_width_ft",
+        "max_length_ft",
+        "max_width_ft",
+    ):
+        value = session.constraints.get(key)
+        if value is not None:
+            canonical = {
+                "max_length_ft": "max_building_length_ft",
+                "max_width_ft": "max_building_width_ft",
+            }.get(key, key)
+            limits[canonical] = float(value)
+
+    return limits
+
+
+def check_site_limits(
+    mass: SolvedMass,
+    limits: dict[str, float],
+    target_gsf: float,
+) -> tuple[list[ValidationCheck], list[ResizeSuggestion]]:
+    """Check per-mass length/width vs site limits; suggest resize when over."""
+    checks: list[ValidationCheck] = []
+    suggestions: list[ResizeSuggestion] = []
+    if not mass.floors:
+        return checks, suggestions
+
+    ground = mass.floors[0]
+    max_len = limits.get("max_building_length_ft")
+    max_wid = limits.get("max_building_width_ft")
+
+    if max_len is not None:
+        over = ground.length_ft > max_len + 1e-6
+        checks.append(
+            ValidationCheck(
+                check=f"site_length:{mass.id}",
+                passed=not over,
+                message=(
+                    f"{mass.name}: length {ground.length_ft:.1f} ft vs max {max_len:g} ft"
+                ),
+            )
+        )
+        if over:
+            stories = len(mass.floors)
+            plate_cap = ground.width_ft * max_len
+            # Total footprint the mass needs (includes void area carried in the
+            # plate), not just target GSF, so voided masses get honest advice.
+            needed_footprint = ground.area_sf * stories
+            needed_stories = (
+                max(stories + 1, math.ceil(needed_footprint / plate_cap))
+                if plate_cap > 0
+                else stories + 1
+            )
+            needed_width = ground.area_sf / max_len if max_len > 0 else ground.width_ft
+            suggestions.append(
+                ResizeSuggestion(
+                    mass_id=mass.id,
+                    issue=(
+                        f"length {ground.length_ft:.1f} ft exceeds max {max_len:g} ft"
+                    ),
+                    suggestion=(
+                        f"Use {needed_stories} stories at {ground.width_ft:.1f} ft wide, "
+                        f"or widen to {needed_width:.1f} ft to hold {max_len:g} ft length"
+                    ),
+                    option_stories=needed_stories,
+                    option_width_ft=needed_width,
+                )
+            )
+
+    if max_wid is not None:
+        over = ground.width_ft > max_wid + 1e-6
+        checks.append(
+            ValidationCheck(
+                check=f"site_width:{mass.id}",
+                passed=not over,
+                message=(
+                    f"{mass.name}: width {ground.width_ft:.1f} ft vs max {max_wid:g} ft"
+                ),
+            )
+        )
+        if over:
+            suggestions.append(
+                ResizeSuggestion(
+                    mass_id=mass.id,
+                    issue=f"width {ground.width_ft:.1f} ft exceeds max {max_wid:g} ft",
+                    suggestion=(
+                        f"Narrow to {max_wid:g} ft; length becomes "
+                        f"{ground.area_sf / max_wid:.1f} ft"
+                    ),
+                    option_width_ft=max_wid,
+                )
+            )
+
+    return checks, suggestions
 
 
 def solve_massing_study(
@@ -319,9 +535,12 @@ def solve_massing_study(
         )
         return result
 
+    limits = _site_limits(session, config)
+    widths, pairing_of = _resolve_widths(session, config)
+
     for mass_def in session.masses:
         target = _mass_target_gsf(session, mass_def.departments)
-        width = _resolve_fixed_width(session, mass_def.id, config)
+        width = widths[mass_def.id]
         voids = _void_area_for_mass(session, mass_def.departments, config)
         floors, actual = solve_mass_footprint(
             target_gsf=target,
@@ -349,8 +568,13 @@ def solve_massing_study(
             fit_pass=fit_ok,
             fixed_side="width",
             fixed_dim_ft=width,
+            pairing_id=pairing_of.get(mass_def.id, ""),
         )
         result.masses.append(solved)
+
+        site_checks, site_suggestions = check_site_limits(solved, limits, target)
+        result.validation.extend(site_checks)
+        result.resize_suggestions.extend(site_suggestions)
 
         result.validation.append(
             ValidationCheck(
@@ -383,10 +607,26 @@ def solve_massing_study(
                         passed=True,
                         message=(
                             f"{a['room_name']} ({a['min_width_ft']:g}x{a['min_length_ft']:g}) "
-                            f"fits in {solved.floors[0].width_ft:g}x{solved.floors[0].length_ft:.1f}"
+                            f"fits in {solved.floors[0].width_ft:.1f}x{solved.floors[0].length_ft:.1f}"
                         ),
                     )
                 )
+
+    result.validation.extend(check_pairing_lengths(session, result))
+
+    max_total = limits.get("max_total_length_ft")
+    if max_total is not None and result.masses:
+        combined = sum(m.floors[0].length_ft for m in result.masses if m.floors)
+        result.validation.append(
+            ValidationCheck(
+                check="site_total_length",
+                passed=combined <= max_total + 1.0,
+                message=(
+                    f"All masses combined length {combined:.1f} ft vs site max "
+                    f"{max_total:g} ft"
+                ),
+            )
+        )
 
     unassigned = get_unassigned(session)
     if unassigned:
@@ -396,6 +636,11 @@ def solve_massing_study(
                 passed=False,
                 message=f"Unassigned departments: {', '.join(unassigned)}",
             )
+        )
+
+    if session.pairings:
+        result.rationale += (
+            " Paired masses share a width solved from combined area / total length."
         )
 
     return result

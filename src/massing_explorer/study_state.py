@@ -33,6 +33,33 @@ class MassGrouping:
 
 
 @dataclass
+class MassPairing:
+    """Two or more masses that share a width and fit a combined length."""
+
+    id: str
+    mass_ids: list[str] = field(default_factory=list)
+    total_length_ft: float = 0.0
+    notes: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "mass_ids": self.mass_ids,
+            "total_length_ft": self.total_length_ft,
+            "notes": self.notes,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> MassPairing:
+        return cls(
+            id=data["id"],
+            mass_ids=list(data.get("mass_ids", [])),
+            total_length_ft=float(data.get("total_length_ft", 0.0)),
+            notes=str(data.get("notes", "")),
+        )
+
+
+@dataclass
 class ChatMessage:
     role: str
     content: str

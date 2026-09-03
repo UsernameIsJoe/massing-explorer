@@ -98,7 +98,7 @@ Full rationale: [docs/DECISIONS.md](docs/DECISIONS.md)
 | **1** | Excel ingest, GSF engine, config file, CLI, text output | **Complete** |
 | **2** | Ollama chat loop, grouping, story count, state memory | **Complete** |
 | **3** | Footprint solver, anchor room fit, double-height, stepped floors | **Complete** |
-| **4** | Paired masses, site limits from config/chat | Not started |
+| **4** | Paired masses, site limits from config/chat, resize loop | **Complete** |
 | **5** | Rhino massing geometry export | Not started |
 
 Details and test criteria: [docs/PHASES.md](docs/PHASES.md)
@@ -116,12 +116,19 @@ massing-explorer/
 │   ├── config.py           # YAML config loader
 │   ├── load.py             # Program file loader
 │   ├── models.py           # ProgramStudy, Room, Department
+│   ├── massing_models.py   # SolvedMass, FloorPlate, validation, suggestions
+│   ├── solver.py           # Footprint, pairing, void, site limit solver
+│   ├── session.py          # StudySession state + persistence
+│   ├── study_state.py      # MassGrouping, MassPairing, ChatMessage
+│   ├── tools.py            # Engine functions the LLM may call
+│   ├── ollama_client.py    # Local LLM client
+│   ├── visual.py           # Plan/elevation + site plan PNGs
 │   ├── report.py           # Text report formatter
 │   └── parser/
 │       ├── columns.py      # Flexible column detection
 │       ├── tabular.py      # Row parser (hierarchical + flat)
 │       └── excel.py        # Excel/CSV file reader
-├── tests/test_phase1.py
+├── tests/                  # test_phase1 … test_phase4
 ├── docs/
 ├── config/
 ├── schemas/
@@ -141,7 +148,7 @@ The 15-step program-to-massing study workflow this project automates is document
 ```bash
 pip install -e .
 python -m massing_explorer ingest examples/underwood_elementary_space_summary.xlsx -c config/project.example.yaml
-python -m unittest tests.test_phase1 -v
+python -m unittest discover -s tests
 ```
 
 ### CLI commands
@@ -164,6 +171,12 @@ python -m massing_explorer solve --study underwood_checkpoint ^
   -p examples/underwood_elementary_space_summary.xlsx ^
   -c config/project.example.yaml ^
   --demo-grouping ^
+  --visual output/massing_checkpoint.png
+
+# Two masses sharing a width inside a total length, with site caps
+python -m massing_explorer solve --study underwood_checkpoint ^
+  --pair academic,support --pair-length 280 ^
+  --max-length 200 --max-total-length 420 ^
   --visual output/massing_checkpoint.png
 
 # In-chat commands: /status  /grouping  /solve  /quit

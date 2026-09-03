@@ -90,18 +90,24 @@ Step-by-step build plan. Do not skip validation gates between phases.
 
 ### Deliverables
 
-- [ ] Paired-mass solver: W = (A₁+A₂)/L_total
-- [ ] Site limit enforcement from config (max length, max width, combined length)
-- [ ] Resize loop: when one dim fixed, recalc other / floors / distribution
-- [ ] Chat commands: "fit two masses in 280 ft total length"
+- [x] Paired-mass solver: W = (A₁+A₂)/L_total, then Lᵢ = Aᵢ/W (`solve_paired_masses`)
+- [x] Site limit enforcement from config + chat (max length, max width, combined length)
+- [x] Resize loop: `resize_mass` changes width/stories, then re-solves and re-validates
+- [x] Resize suggestions when a mass busts a limit (add stories, or widen)
+- [x] Chat tools: `pair_masses`, `clear_pairings`, `resize_mass`
+- [x] CLI: `--pair`, `--pair-length`, `--max-length`, `--max-total-length`
+- [x] Site plan visual with pairing members drawn contiguous against the limit line
 
 ### Test criteria
 
-| Test | Pass condition |
-|------|----------------|
-| Paired masses | Academic 12,000 SF + Support 8,000 SF in 280 ft → W, L₁, L₂ correct |
-| Max length | Mass exceeding limit triggers resize suggestion |
-| Recalc on change | Changing width recalculates GSF and re-validates |
+| Test | Pass condition | Result |
+|------|----------------|--------|
+| Paired masses | Academic 12,000 SF + Support 8,000 SF in 280 ft → W, L₁, L₂ correct | PASS — W = 71.43, L₁ = 168, L₂ = 112 |
+| Max length | Mass exceeding limit triggers resize suggestion | PASS — suggests added stories or wider plate |
+| Recalc on change | Changing width recalculates GSF and re-validates | PASS — 2× width halves length, GSF held |
+| Pairing persistence | Pairings survive save/load | PASS |
+
+**Status: complete** — 40 tests passing.
 
 ---
 

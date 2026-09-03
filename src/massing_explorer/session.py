@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import Department, GrossingConfig, ProgramStudy, Room
-from .study_state import ChatMessage, MassGrouping
+from .study_state import ChatMessage, MassGrouping, MassPairing
 
 
 STUDIES_DIR = Path("studies")
@@ -24,6 +24,7 @@ class StudySession:
     adjacency_notes: list[str] = field(default_factory=list)
     messages: list[ChatMessage] = field(default_factory=list)
     double_height_rooms: list[str] = field(default_factory=list)
+    pairings: list[MassPairing] = field(default_factory=list)
     last_massing: dict[str, Any] | None = None
 
     @property
@@ -47,6 +48,7 @@ class StudySession:
             "constraints": self.constraints,
             "adjacency_notes": self.adjacency_notes,
             "double_height_rooms": self.double_height_rooms,
+            "pairings": [p.to_dict() for p in self.pairings],
             "last_massing": self.last_massing,
             "messages": [m.to_dict() for m in self.messages],
         }
@@ -95,6 +97,7 @@ class StudySession:
             constraints=data.get("constraints", {}),
             adjacency_notes=data.get("adjacency_notes", []),
             double_height_rooms=data.get("double_height_rooms", []),
+            pairings=[MassPairing.from_dict(p) for p in data.get("pairings", [])],
             last_massing=data.get("last_massing"),
             messages=[ChatMessage.from_dict(m) for m in data.get("messages", [])],
         )

@@ -80,6 +80,28 @@ class ValidationCheck:
 
 
 @dataclass
+class ResizeSuggestion:
+    mass_id: str
+    issue: str
+    suggestion: str
+    option_stories: int | None = None
+    option_width_ft: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "mass_id": self.mass_id,
+            "issue": self.issue,
+            "suggestion": self.suggestion,
+            "option_stories": self.option_stories,
+            "option_width_ft": (
+                round(self.option_width_ft, 2)
+                if self.option_width_ft is not None
+                else None
+            ),
+        }
+
+
+@dataclass
 class SolvedMass:
     id: str
     name: str
@@ -91,6 +113,7 @@ class SolvedMass:
     fit_pass: bool
     fixed_side: str = "width"
     fixed_dim_ft: float = 0.0
+    pairing_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -104,6 +127,7 @@ class SolvedMass:
             "fit_pass": self.fit_pass,
             "fixed_side": self.fixed_side,
             "fixed_dim_ft": round(self.fixed_dim_ft, 2),
+            "pairing_id": self.pairing_id,
         }
 
 
@@ -116,6 +140,7 @@ class MassingStudyResult:
     masses: list[SolvedMass] = field(default_factory=list)
     validation: list[ValidationCheck] = field(default_factory=list)
     compromised_anchor_rooms: list[CompromisedAnchor] = field(default_factory=list)
+    resize_suggestions: list[ResizeSuggestion] = field(default_factory=list)
     rationale: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -130,4 +155,5 @@ class MassingStudyResult:
             "compromised_anchor_rooms": [
                 c.to_dict() for c in self.compromised_anchor_rooms
             ],
+            "resize_suggestions": [s.to_dict() for s in self.resize_suggestions],
         }

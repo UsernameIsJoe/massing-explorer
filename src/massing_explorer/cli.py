@@ -83,8 +83,8 @@ def cmd_solve(args: argparse.Namespace) -> int:
     from .report import format_massing_report
     from .session import StudySession, slugify_study_id
     from .solver import solve_massing_study
-    from .tools import set_grouping
-    from .visual import render_massing_visual
+    from .tools import pair_masses, set_grouping
+    from .visual import render_massing_visual, render_site_plan
 
     study_id = slugify_study_id(args.study)
 
@@ -159,6 +159,21 @@ def cmd_solve(args: argparse.Namespace) -> int:
         session.constraints["academic_width_ft"] = args.width
     if args.tolerance is not None:
         session.constraints["gsf_tolerance"] = args.tolerance
+    if args.max_length is not None:
+        session.constraints["max_building_length_ft"] = args.max_length
+    if args.max_total_length is not None:
+        session.constraints["max_total_length_ft"] = args.max_total_length
+
+    if args.pair:
+        mass_ids = [m.strip() for m in args.pair.split(",") if m.strip()]
+        pair_result = pair_masses(session, mass_ids, args.pair_length)
+        if not pair_result.get("ok"):
+            print(f"Pairing error: {pair_result.get('error')}")
+            return 1
+        print(
+            f"Paired {', '.join(mass_ids)} in {args.pair_length:g} ft -> "
+            f"shared width {pair_result['shared_width_ft']:g} ft"
+        )
 
     result = solve_massing_study(session, config_path=session.config_path or None)
     session.last_massing = result.to_dict()
@@ -181,6 +196,12 @@ def cmd_solve(args: argparse.Namespace) -> int:
         try:
             render_massing_visual(result, visual_path)
             print(f"Visual: {visual_path}")
+            site_path = visual_path.with_name(f"{visual_path.stem}_site{visual_path.suffix}")
+            limit = session.constraints.get("max_total_length_ft") or (
+                args.pair_length if args.pair else None
+            )
+            render_site_plan(result, site_path, float(limit) if limit else None)
+            print(f"Site plan: {site_path}")
         except ImportError as e:
             print(f"Visual skipped: {e}")
 
@@ -246,6 +267,24 @@ def build_parser() -> argparse.ArgumentParser:
     solve.add_argument("--width", type=float, help="Fixed width (ft) for all masses")
     solve.add_argument(
         "--tolerance", type=float, help="GSF tolerance fraction (default 0.03)"
+    )
+    solve.add_argument(
+        "--pair",
+        help="Comma-separated mass ids to share a width, e.g. academic,support",
+    )
+    solve.add_argument(
+        "--pair-length",
+        type=float,
+        default=0.0,
+        help="Total combined length (ft) for --pair masses",
+    )
+    solve.add_argument(
+        "--max-length", type=float, help="Max length (ft) allowed per mass"
+    )
+    solve.add_argument(
+        "--max-total-length",
+        type=float,
+        help="Max combined length (ft) for all masses on the site",
     )
     solve.add_argument(
         "--visual",

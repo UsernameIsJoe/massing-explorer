@@ -29,9 +29,10 @@ def format_massing_report(result: MassingStudyResult) -> str:
         fit = "PASS" if mass.fit_pass else "FAIL"
         lines.append(f"MASS: {mass.name} [{mass.id}]")
         lines.append(f"  Departments: {', '.join(mass.departments)}")
+        pair_note = f" | Paired: {mass.pairing_id}" if mass.pairing_id else ""
         lines.append(
-            f"  Fixed {mass.fixed_side}: {mass.fixed_dim_ft:g} ft | "
-            f"Stories: {len(mass.floors)}"
+            f"  Fixed {mass.fixed_side}: {mass.fixed_dim_ft:.1f} ft | "
+            f"Stories: {len(mass.floors)}{pair_note}"
         )
         lines.append(
             f"  Target GSF: {mass.target_gsf:,.0f} | Actual: {mass.actual_gsf:,.0f} | "
@@ -47,7 +48,7 @@ def format_massing_report(result: MassingStudyResult) -> str:
                     f"(-{sum(v.area_sf for v in fl.voids):,.0f} SF)"
                 )
             lines.append(
-                f"    L{fl.level}: {fl.width_ft:g} x {fl.length_ft:.1f} ft = "
+                f"    L{fl.level}: {fl.width_ft:.1f} x {fl.length_ft:.1f} ft = "
                 f"{fl.area_sf:,.0f} SF footprint, {fl.usable_area_sf:,.0f} SF usable"
                 f"{void_note}"
             )
@@ -70,6 +71,13 @@ def format_massing_report(result: MassingStudyResult) -> str:
             )
     else:
         lines.append("COMPROMISED ANCHOR ROOMS: none")
+
+    if result.resize_suggestions:
+        lines.append("")
+        lines.append("RESIZE SUGGESTIONS")
+        for s in result.resize_suggestions:
+            lines.append(f"  - [{s.mass_id}] {s.issue}")
+            lines.append(f"    -> {s.suggestion}")
 
     lines.append("")
     lines.append("=" * 72)

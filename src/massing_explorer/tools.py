@@ -153,6 +153,106 @@ def mark_double_height(session: StudySession, room_name: str) -> dict[str, Any]:
     return {"ok": True, "double_height_rooms": session.double_height_rooms}
 
 
+def pair_masses(
+    session: StudySession,
+    mass_ids: list[str],
+    total_length_ft: float,
+    pairing_id: str | None = None,
+) -> dict[str, Any]:
+    """
+    Constrain two or more adjacent masses to a shared width inside a total length.
+
+    Engine solves W = sum(floor plates) / total_length, then L_i = plate_i / W.
+    """
+    from .config import load_project_config
+    from .solver import _mass_plate_area, solve_paired_masses
+    from .study_state import MassPairing
+
+    known = {m.id: m for m in session.masses}
+    missing = [mid for mid in mass_ids if mid not in known]
+    if missing:
+        return {
+            "ok": False,
+            "error": f"Unknown mass id(s): {', '.join(missing)}",
+            "known_mass_ids": list(known),
+        }
+    if len(mass_ids) < 2:
+        return {"ok": False, "error": "Pairing needs at least two mass ids"}
+    if total_length_ft <= 0:
+        return {"ok": False, "error": "total_length_ft must be > 0"}
+
+    pid = pairing_id or "+".join(mass_ids)
+    session.pairings = [p for p in session.pairings if p.id != pid]
+    session.pairings.append(
+        MassPairing(
+            id=pid,
+            mass_ids=list(mass_ids),
+            total_length_ft=float(total_length_ft),
+        )
+    )
+    session.save()
+
+    config = load_project_config(session.config_path or None)
+    plates = [_mass_plate_area(session, known[mid], config) for mid in mass_ids]
+    width, lengths = solve_paired_masses(plates, float(total_length_ft))
+
+    return {
+        "ok": True,
+        "pairing_id": pid,
+        "shared_width_ft": round(width, 1),
+        "lengths_ft": {
+            mid: round(length, 1) for mid, length in zip(mass_ids, lengths)
+        },
+        "floor_plates_sf": {
+            mid: round(plate, 1) for mid, plate in zip(mass_ids, plates)
+        },
+        "note": "Call solve_dimensions to produce the full validated study.",
+    }
+
+
+def clear_pairings(session: StudySession) -> dict[str, Any]:
+    session.pairings = []
+    session.save()
+    return {"ok": True, "pairings": []}
+
+
+def resize_mass(
+    session: StudySession,
+    mass_id: str,
+    width_ft: float | None = None,
+    story_count: int | None = None,
+) -> dict[str, Any]:
+    """Change a fixed dimension or story count, then re-solve and re-validate."""
+    known = {m.id for m in session.masses}
+    if mass_id not in known:
+        return {
+            "ok": False,
+            "error": f"Unknown mass id: {mass_id}",
+            "known_mass_ids": sorted(known),
+        }
+    if width_ft is None and story_count is None:
+        return {"ok": False, "error": "Provide width_ft and/or story_count"}
+
+    changes: list[str] = []
+    if width_ft is not None:
+        if width_ft <= 0:
+            return {"ok": False, "error": "width_ft must be > 0"}
+        session.constraints[f"{mass_id}_width_ft"] = float(width_ft)
+        changes.append(f"width -> {width_ft:g} ft")
+    if story_count is not None:
+        if story_count < 1:
+            return {"ok": False, "error": "story_count must be >= 1"}
+        for mass in session.masses:
+            if mass.id == mass_id:
+                mass.story_count = int(story_count)
+        changes.append(f"stories -> {story_count}")
+
+    session.save()
+    solved = solve_dimensions(session)
+    solved["changes"] = changes
+    return solved
+
+
 def solve_dimensions(session: StudySession) -> dict[str, Any]:
     """Solve footprints and validate GSF / anchor rooms. Engine only — no LLM math."""
     from .report import format_massing_report
@@ -162,15 +262,41 @@ def solve_dimensions(session: StudySession) -> dict[str, Any]:
     session.last_massing = result.to_dict()
     session.save()
 
-    # Also write report beside study state
+    report = format_massing_report(result)
     report_path = session.study_dir / "massing_report.txt"
-    report_path.write_text(format_massing_report(result), encoding="utf-8")
+    report_path.write_text(report, encoding="utf-8")
 
+    failed = [v.message for v in result.validation if not v.passed]
+
+    # Failures first, and no raw per-mass dump: the LLM should quote the report
+    # and the failure list rather than picking numbers out of nested JSON.
     return {
         "ok": True,
-        "massing": result.to_dict(),
+        "all_checks_passed": not failed,
+        "failed_checks": failed,
+        "instruction": (
+            "Report every failed check to the user verbatim. Do not describe a "
+            "failing mass as fitting."
+            if failed
+            else "All checks passed."
+        ),
+        "resize_suggestions": [s.to_dict() for s in result.resize_suggestions],
+        "masses": [
+            {
+                "id": m.id,
+                "name": m.name,
+                "stories": len(m.floors),
+                "width_ft": round(m.fixed_dim_ft, 1),
+                "length_ft": round(m.floors[0].length_ft, 1) if m.floors else 0,
+                "target_gsf": round(m.target_gsf),
+                "actual_gsf": round(m.actual_gsf),
+                "gsf_fit_pass": m.fit_pass,
+                "pairing_id": m.pairing_id,
+            }
+            for m in result.masses
+        ],
         "report_path": str(report_path),
-        "summary": format_massing_report(result),
+        "summary": report,
     }
 
 
@@ -296,6 +422,56 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "pair_masses",
+            "description": (
+                "Constrain two or more adjacent masses to share a width and fit a "
+                "combined length, e.g. 'fit the academic and support wings in 280 ft'. "
+                "The engine solves the shared width; never compute it yourself."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mass_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "total_length_ft": {"type": "number"},
+                    "pairing_id": {"type": "string"},
+                },
+                "required": ["mass_ids", "total_length_ft"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "clear_pairings",
+            "description": "Remove all shared-width pairings so masses solve independently.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "resize_mass",
+            "description": (
+                "Change a mass width and/or story count, then re-solve and re-validate "
+                "in one step. Use this to apply resize suggestions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mass_id": {"type": "string"},
+                    "width_ft": {"type": "number"},
+                    "story_count": {"type": "integer"},
+                },
+                "required": ["mass_id"],
+            },
+        },
+    },
 ]
 
 
@@ -318,6 +494,24 @@ def execute_tool(session: StudySession, name: str, arguments: dict[str, Any]) ->
         result = mark_double_height(session, arguments["room_name"])
     elif name == "solve_dimensions":
         result = solve_dimensions(session)
+    elif name == "pair_masses":
+        result = pair_masses(
+            session,
+            [str(m) for m in arguments.get("mass_ids", [])],
+            float(arguments["total_length_ft"]),
+            arguments.get("pairing_id"),
+        )
+    elif name == "clear_pairings":
+        result = clear_pairings(session)
+    elif name == "resize_mass":
+        width = arguments.get("width_ft")
+        stories = arguments.get("story_count")
+        result = resize_mass(
+            session,
+            str(arguments["mass_id"]),
+            float(width) if width is not None else None,
+            int(stories) if stories is not None else None,
+        )
     else:
         result = {"ok": False, "error": f"Unknown tool: {name}"}
 
