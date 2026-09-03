@@ -153,6 +153,27 @@ def mark_double_height(session: StudySession, room_name: str) -> dict[str, Any]:
     return {"ok": True, "double_height_rooms": session.double_height_rooms}
 
 
+def solve_dimensions(session: StudySession) -> dict[str, Any]:
+    """Solve footprints and validate GSF / anchor rooms. Engine only — no LLM math."""
+    from .report import format_massing_report
+    from .solver import solve_massing_study
+
+    result = solve_massing_study(session)
+    session.last_massing = result.to_dict()
+    session.save()
+
+    # Also write report beside study state
+    report_path = session.study_dir / "massing_report.txt"
+    report_path.write_text(format_massing_report(result), encoding="utf-8")
+
+    return {
+        "ok": True,
+        "massing": result.to_dict(),
+        "report_path": str(report_path),
+        "summary": format_massing_report(result),
+    }
+
+
 TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "type": "function",
@@ -263,6 +284,18 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "solve_dimensions",
+            "description": (
+                "Solve footprint W×L for each mass from target GSF and story count. "
+                "Validates GSF fit (±tolerance) and anchor room clear dims. "
+                "Call after groupings and constraints are set. Never invent dimensions."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
 ]
 
 
@@ -283,6 +316,8 @@ def execute_tool(session: StudySession, name: str, arguments: dict[str, Any]) ->
         result = add_adjacency_note(session, arguments["note"])
     elif name == "mark_double_height":
         result = mark_double_height(session, arguments["room_name"])
+    elif name == "solve_dimensions":
+        result = solve_dimensions(session)
     else:
         result = {"ok": False, "error": f"Unknown tool: {name}"}
 

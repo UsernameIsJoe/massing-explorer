@@ -1,6 +1,79 @@
 from __future__ import annotations
 
+from .massing_models import MassingStudyResult
 from .models import ProgramStudy
+
+
+def format_massing_report(result: MassingStudyResult) -> str:
+    lines: list[str] = []
+    lines.append("=" * 72)
+    lines.append("MASSING EXPLORER - DIMENSION STUDY REPORT")
+    lines.append("=" * 72)
+    if result.study_id:
+        lines.append(f"Study: {result.study_id}")
+    lines.append(f"GSF tolerance: +/-{result.gsf_tolerance * 100:.0f}%")
+    if result.rationale:
+        lines.append(f"Method: {result.rationale}")
+    lines.append("")
+
+    if not result.masses:
+        lines.append("No solved masses.")
+        lines.append("")
+        for v in result.validation:
+            icon = "OK" if v.passed else "FAIL"
+            lines.append(f"  [{icon}] {v.message}")
+        lines.append("=" * 72)
+        return "\n".join(lines)
+
+    for mass in result.masses:
+        fit = "PASS" if mass.fit_pass else "FAIL"
+        lines.append(f"MASS: {mass.name} [{mass.id}]")
+        lines.append(f"  Departments: {', '.join(mass.departments)}")
+        lines.append(
+            f"  Fixed {mass.fixed_side}: {mass.fixed_dim_ft:g} ft | "
+            f"Stories: {len(mass.floors)}"
+        )
+        lines.append(
+            f"  Target GSF: {mass.target_gsf:,.0f} | Actual: {mass.actual_gsf:,.0f} | "
+            f"Fit: {mass.fit_delta_sf:+,.0f} [{fit}]"
+        )
+        lines.append("  Floors:")
+        for fl in mass.floors:
+            void_note = ""
+            if fl.voids:
+                names = ", ".join(v.room for v in fl.voids)
+                void_note = (
+                    f"  void: {names} "
+                    f"(-{sum(v.area_sf for v in fl.voids):,.0f} SF)"
+                )
+            lines.append(
+                f"    L{fl.level}: {fl.width_ft:g} x {fl.length_ft:.1f} ft = "
+                f"{fl.area_sf:,.0f} SF footprint, {fl.usable_area_sf:,.0f} SF usable"
+                f"{void_note}"
+            )
+            if fl.programs:
+                lines.append(f"         programs: {', '.join(fl.programs)}")
+        lines.append("")
+
+    lines.append("VALIDATION")
+    for v in result.validation:
+        icon = "OK" if v.passed else "FAIL"
+        lines.append(f"  [{icon}] {v.message}")
+    lines.append("")
+
+    if result.compromised_anchor_rooms:
+        lines.append("COMPROMISED ANCHOR ROOMS")
+        for c in result.compromised_anchor_rooms:
+            lines.append(
+                f"  - {c.room} in [{c.mass_id}]: needs {c.required_ft} ft, "
+                f"available {c.available_ft} ft ({c.reason})"
+            )
+    else:
+        lines.append("COMPROMISED ANCHOR ROOMS: none")
+
+    lines.append("")
+    lines.append("=" * 72)
+    return "\n".join(lines)
 
 
 def format_program_report(study: ProgramStudy) -> str:

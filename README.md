@@ -97,7 +97,7 @@ Full rationale: [docs/DECISIONS.md](docs/DECISIONS.md)
 |-------|-------|--------|
 | **1** | Excel ingest, GSF engine, config file, CLI, text output | **Complete** |
 | **2** | Ollama chat loop, grouping, story count, state memory | **Complete** |
-| **3** | Footprint solver, anchor room fit, double-height, stepped floors | Not started |
+| **3** | Footprint solver, anchor room fit, double-height, stepped floors | **Complete** |
 | **4** | Paired masses, site limits from config/chat | Not started |
 | **5** | Rhino massing geometry export | Not started |
 
@@ -159,7 +159,14 @@ python -m massing_explorer chat --study underwood -p examples/underwood_elementa
 # Resume an existing study
 python -m massing_explorer chat --study underwood
 
-# In-chat commands: /status  /grouping  /quit
+# Solve footprints + validation (+ optional PNG visual)
+python -m massing_explorer solve --study underwood_checkpoint ^
+  -p examples/underwood_elementary_space_summary.xlsx ^
+  -c config/project.example.yaml ^
+  --demo-grouping ^
+  --visual output/massing_checkpoint.png
+
+# In-chat commands: /status  /grouping  /solve  /quit
 
 # Show project config (anchor rooms, grossing factors)
 python -m massing_explorer config config/project.example.yaml

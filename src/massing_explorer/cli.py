@@ -79,6 +79,114 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_solve(args: argparse.Namespace) -> int:
+    from .report import format_massing_report
+    from .session import StudySession, slugify_study_id
+    from .solver import solve_massing_study
+    from .tools import set_grouping
+    from .visual import render_massing_visual
+
+    study_id = slugify_study_id(args.study)
+
+    if args.program:
+        program = load_program_file(args.program, config_path=args.config)
+        session = StudySession(
+            study_id=study_id,
+            program=program,
+            config_path=args.config or "",
+        )
+    else:
+        try:
+            session = StudySession.load(study_id)
+        except FileNotFoundError as e:
+            print(f"Error: {e}")
+            print("Provide --program or an existing --study")
+            return 1
+
+    if args.config:
+        session.config_path = args.config
+
+    # Optional demo grouping if none set
+    if not session.masses and args.demo_grouping:
+        depts = session.department_names()
+        academic = [d for d in depts if "ACADEMIC" in d.upper() or "SPECIAL" in d.upper()]
+        hpe = [d for d in depts if "HEALTH" in d.upper() or "PHYSICAL" in d.upper() or "DINING" in d.upper()]
+        rest = [d for d in depts if d not in academic and d not in hpe]
+        masses = []
+        if academic:
+            masses.append(
+                {
+                    "id": "academic",
+                    "name": "Academic Wing",
+                    "departments": academic,
+                    "story_count": 3,
+                }
+            )
+        if hpe:
+            masses.append(
+                {
+                    "id": "hpe_dining",
+                    "name": "HPE / Dining",
+                    "departments": hpe,
+                    "story_count": 2,
+                }
+            )
+        if rest:
+            masses.append(
+                {
+                    "id": "support",
+                    "name": "Support / Admin",
+                    "departments": rest,
+                    "story_count": 2,
+                }
+            )
+        set_grouping(session, masses)
+        # Gym is typically double-height
+        if "Gymnasium" not in session.double_height_rooms:
+            session.double_height_rooms.append("Gymnasium")
+        session.constraints.setdefault("academic_width_ft", 80)
+        session.constraints.setdefault("hpe_dining_width_ft", 100)
+        session.save()
+        print("Applied demo grouping (academic / hpe_dining / support).")
+
+    if not session.masses:
+        print("No masses defined. Use chat to set groupings, or pass --demo-grouping.")
+        return 1
+
+    # Apply CLI width overrides
+    if args.width:
+        session.constraints["fixed_width_ft"] = args.width
+        session.constraints["academic_width_ft"] = args.width
+    if args.tolerance is not None:
+        session.constraints["gsf_tolerance"] = args.tolerance
+
+    result = solve_massing_study(session, config_path=session.config_path or None)
+    session.last_massing = result.to_dict()
+    session.save()
+
+    report = format_massing_report(result)
+    print(report)
+
+    out_dir = Path(args.output_dir) if args.output_dir else session.study_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+    report_path = out_dir / "massing_report.txt"
+    report_path.write_text(report, encoding="utf-8")
+    json_path = out_dir / "massing_study.json"
+    json_path.write_text(json.dumps(result.to_dict(), indent=2), encoding="utf-8")
+    print(f"Report: {report_path}")
+    print(f"JSON:   {json_path}")
+
+    if args.visual:
+        visual_path = Path(args.visual)
+        try:
+            render_massing_visual(result, visual_path)
+            print(f"Visual: {visual_path}")
+        except ImportError as e:
+            print(f"Visual skipped: {e}")
+
+    return 0 if all(v.passed or v.check.startswith("anchor") for v in result.validation if "gsf_fit" in v.check) else 0
+
+
 def cmd_config_check(args: argparse.Namespace) -> int:
     config = load_project_config(args.config)
     print(json.dumps(config, indent=2))
@@ -120,9 +228,32 @@ def build_parser() -> argparse.ArgumentParser:
     chat.add_argument("--program", "-p", help="Program Excel/CSV (required for new study)")
     chat.add_argument("--config", "-c", help="Project config YAML")
     chat.add_argument(
-        "--model", "-m", default="llama3.1", help="Ollama model name (default: llama3.1)"
+        "--model", "-m", default="qwen2.5:7b", help="Ollama model (default: qwen2.5:7b)"
     )
     chat.set_defaults(func=cmd_chat)
+
+    solve = sub.add_parser(
+        "solve", help="Solve mass footprints and validate GSF / anchor rooms"
+    )
+    solve.add_argument("--study", "-s", required=True, help="Study ID")
+    solve.add_argument("--program", "-p", help="Program file (new study or refresh)")
+    solve.add_argument("--config", "-c", help="Project config YAML")
+    solve.add_argument(
+        "--demo-grouping",
+        action="store_true",
+        help="If no masses set, apply a simple 3-mass demo grouping",
+    )
+    solve.add_argument("--width", type=float, help="Fixed width (ft) for all masses")
+    solve.add_argument(
+        "--tolerance", type=float, help="GSF tolerance fraction (default 0.03)"
+    )
+    solve.add_argument(
+        "--visual",
+        default="output/massing_checkpoint.png",
+        help="Write plan/elevation PNG (default: output/massing_checkpoint.png)",
+    )
+    solve.add_argument("--output-dir", "-o", help="Directory for report/json (default: studies/<id>)")
+    solve.set_defaults(func=cmd_solve)
 
     return parser
 

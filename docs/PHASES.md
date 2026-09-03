@@ -64,17 +64,13 @@ Step-by-step build plan. Do not skip validation gates between phases.
 
 ### Deliverables
 
-- [ ] Footprint solver: `other_side = floor_area / fixed_side`
-- [ ] Per-floor area from story count: `avg_plate = target_gsf / floors`
-- [ ] Stepped floor support (unequal floor areas per level)
-- [ ] Double-height void deduction (chat-flagged rooms)
-- [ ] Anchor room fit check inside proposed rectangle
-- [ ] GSF validation with ±3% tolerance (configurable)
-- [ ] Text massing report:
-  - mass name, W×L per floor
-  - programs per mass / per floor
-  - validation table
-  - compromised anchor rooms list
+- [x] Footprint solver: `other_side = floor_area / fixed_side`
+- [x] Per-floor area from story count: `avg_plate = target_gsf / floors`
+- [x] Stepped floor support (unequal floor areas per level)
+- [x] Double-height void deduction (chat-flagged rooms)
+- [x] Anchor room fit check inside proposed rectangle
+- [x] GSF validation with ±3% tolerance (configurable)
+- [x] Text massing report + simple plan/elevation PNG checkpoint
 
 ### Test criteria
 

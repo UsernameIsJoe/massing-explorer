@@ -106,7 +106,7 @@ def run_chat_loop(session: StudySession, client: OllamaClient) -> None:
     print(f"Departments: {len(session.program.departments)}")
     if session.masses:
         print(f"Masses: {len(session.masses)} (resumed from saved state)")
-    print("Commands: /status  /grouping  /quit")
+    print("Commands: /status  /grouping  /solve  /quit")
     print("=" * 60)
 
     while True:
@@ -139,6 +139,12 @@ def run_chat_loop(session: StudySession, client: OllamaClient) -> None:
                 )
             if g["unassigned_departments"]:
                 print(f"  Unassigned: {', '.join(g['unassigned_departments'])}")
+            continue
+        if user_text.lower() == "/solve":
+            from .tools import solve_dimensions
+
+            result = solve_dimensions(session)
+            print(result.get("summary", result))
             continue
 
         try:

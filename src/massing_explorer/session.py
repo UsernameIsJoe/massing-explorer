@@ -18,12 +18,13 @@ class StudySession:
     study_id: str
     program: ProgramStudy
     config_path: str = ""
-    model: str = "llama3.1"
+    model: str = "qwen2.5:7b"
     masses: list[MassGrouping] = field(default_factory=list)
     constraints: dict[str, Any] = field(default_factory=dict)
     adjacency_notes: list[str] = field(default_factory=list)
     messages: list[ChatMessage] = field(default_factory=list)
     double_height_rooms: list[str] = field(default_factory=list)
+    last_massing: dict[str, Any] | None = None
 
     @property
     def study_dir(self) -> Path:
@@ -46,6 +47,7 @@ class StudySession:
             "constraints": self.constraints,
             "adjacency_notes": self.adjacency_notes,
             "double_height_rooms": self.double_height_rooms,
+            "last_massing": self.last_massing,
             "messages": [m.to_dict() for m in self.messages],
         }
 
@@ -87,19 +89,21 @@ class StudySession:
         return cls(
             study_id=data["study_id"],
             config_path=data.get("config_path", ""),
-            model=data.get("model", "llama3.1"),
+            model=data.get("model", "qwen2.5:7b"),
             program=program,
             masses=[MassGrouping.from_dict(m) for m in data.get("masses", [])],
             constraints=data.get("constraints", {}),
             adjacency_notes=data.get("adjacency_notes", []),
             double_height_rooms=data.get("double_height_rooms", []),
+            last_massing=data.get("last_massing"),
             messages=[ChatMessage.from_dict(m) for m in data.get("messages", [])],
         )
 
     def save(self) -> None:
         self.study_dir.mkdir(parents=True, exist_ok=True)
         self.state_path.write_text(
-            json.dumps(self.to_dict(), indent=2), encoding="utf-8"
+            json.dumps(self.to_dict(), indent=2),
+            encoding="utf-8",
         )
 
     @classmethod

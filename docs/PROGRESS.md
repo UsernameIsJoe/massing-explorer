@@ -5,6 +5,51 @@ Update this file at the end of every work session.
 
 ---
 
+## 2026-09-03 — Phase 3 complete: dimension solver + checkpoint visual
+
+### Done
+
+- Footprint solver: `other_side = area / fixed_width`
+- Equal floor plates from `target_gsf / stories`
+- Stepped floors helper (`solve_stepped_floors`)
+- Double-height void deduction on floor above (gym etc.)
+- Anchor room fit (rotation allowed) + compromised list
+- GSF validation with configurable +/-3% tolerance
+- CLI: `python -m massing_explorer solve --study ... --demo-grouping --visual ...`
+- Chat tool: `solve_dimensions` + `/solve` command
+- Checkpoint PNG: plan footprints + schematic elevation
+- 6 Phase 3 tests (21 total suite)
+
+### Test results
+
+| Test | Result | Notes |
+|------|--------|-------|
+| Fixed width 80 ft → L=100 | pass | 24k GSF / 3 stories |
+| Gym fit 60x100 | pass | fails in 72x90, passes in 100x120 |
+| Double-height void | pass | usable floor1 = plate - void |
+| GSF tolerance 2.5% vs 5% | pass | |
+| Compromise list | pass | names gym when too small |
+| Underwood solve + PNG | pass | 3 masses, GSF exact, gym fits |
+
+### Checkpoint demo (Underwood)
+
+- Academic: 80 x 140.4 ft, 3 stories, 33,689 GSF
+- HPE/Dining: 100 x 132.2 ft, 2 stories, gym void on L1 (-6,000 SF)
+- Support: 80 x 98.0 ft, 2 stories
+- Visual: `output/massing_checkpoint.png`
+
+### Current phase
+
+**Phase 4 — Multi-mass + site limits** — not started
+
+### Next steps
+
+1. Paired-mass shared-width solver
+2. Combined length / site limit enforcement
+3. Resize loop when one dimension is fixed
+
+---
+
 ## 2026-09-02 — Phase 2 complete: Ollama chat loop
 
 ### Done
