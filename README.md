@@ -100,7 +100,13 @@ Full rationale: [docs/DECISIONS.md](docs/DECISIONS.md)
 | **3** | Footprint solver, anchor room fit, double-height, stepped floors | **Complete** |
 | **4** | Paired masses, site limits from config/chat, resize loop | **Complete** |
 | **5** | Floor-by-floor program allocation, floor pins | **Complete** |
-| **6** | Rhino massing geometry export | Not started |
+| **6** | Scheme search — finds widths/stories that fit a site envelope | **Complete** |
+| **7** | Rhino massing geometry export | Not started |
+
+Phases 3-5 *evaluate* a scheme you specify: you give widths and story counts and
+the engine tells you which limits break. Phase 6 inverts that and searches for
+the geometry. Every scheme it proposes is re-verified through the same solver
+that writes the reports, so the search cannot claim something the solver rejects.
 
 Details and test criteria: [docs/PHASES.md](docs/PHASES.md)
 
@@ -119,6 +125,7 @@ massing-explorer/
 │   ├── models.py           # ProgramStudy, Room, Department
 │   ├── massing_models.py   # SolvedMass, FloorPlate, validation, suggestions
 │   ├── solver.py           # Footprint, pairing, void, site limit solver
+│   ├── search.py           # Finds widths/stories that fit a site envelope
 │   ├── allocate.py         # Which department sits on which level
 │   ├── session.py          # StudySession state + persistence
 │   ├── study_state.py      # MassGrouping, MassPairing, ChatMessage
@@ -130,7 +137,7 @@ massing-explorer/
 │       ├── columns.py      # Flexible column detection
 │       ├── tabular.py      # Row parser (hierarchical + flat)
 │       └── excel.py        # Excel/CSV file reader
-├── tests/                  # test_phase1 … test_phase4
+├── tests/                  # test_phase1 … test_phase6
 ├── docs/
 ├── config/
 ├── schemas/
@@ -180,6 +187,18 @@ python -m massing_explorer solve --study underwood_checkpoint ^
   --pair academic,support --pair-length 280 ^
   --max-length 200 --max-total-length 420 ^
   --visual output/massing_checkpoint.png
+
+# Ask what WOULD fit, instead of checking a scheme you already picked.
+# `solve` validates widths you supply; `search` finds the widths and story counts.
+python -m massing_explorer search --study underwood_checkpoint ^
+  -c config/project.example.yaml ^
+  --max-total-length 300 --max-length 200 --max-width 100 ^
+  --max-stories 5 --preference low_rise
+
+# Then write one of the listed schemes into the study
+python -m massing_explorer search --study underwood_checkpoint ^
+  --max-total-length 300 --max-length 200 --max-width 100 ^
+  --apply 0 --visual output/searched.png
 
 # In-chat commands: /status  /grouping  /solve  /quit
 

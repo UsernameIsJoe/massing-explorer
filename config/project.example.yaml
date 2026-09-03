@@ -43,6 +43,19 @@ anchor_rooms:
     min_length_ft: 60
     double_height: false
 
+# Daylight — used when searching for schemes. A mass containing any of these
+# departments is penalised for being deeper than preferred_max_width_ft, so the
+# search does not simply make every bar as wide as the zoning allows.
+daylight:
+  preferred_max_width_ft: 90
+  departments:
+    - academic
+    - special education
+    - classroom
+    - art
+    - music
+    - science
+
 # Floor allocation bias — keyword match against department names.
 # Departments matching `ground` claim lower levels first; `upper` are pushed
 # up. Departments owning a double-height room are forced to grade regardless.

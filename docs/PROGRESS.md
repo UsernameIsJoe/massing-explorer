@@ -335,6 +335,108 @@ Superseded by Phase 1 completion above.
 
 ---
 
+## 2026-09-03 — [Phase 6] Scheme search (auto-fit)
+
+### Why this phase happened
+
+The user asked whether the three Underwood scenarios were produced by the script
+alone or whether the assistant had intervened. Answering honestly surfaced a
+real limitation: **the engine had no solver.** It computed dimensions from widths
+and story counts the user supplied and then *checked* them, so the site limits
+never influenced the geometry. Demonstrated directly — the same scheme under
+three different frontage caps:
+
+```
+cap 340 ft -> Academic 70.0x135.7 | Community 100.0x189.0 | total 324.7 ft | PASS
+cap 300 ft -> Academic 70.0x135.7 | Community 100.0x189.0 | total 324.7 ft | FAIL
+cap 250 ft -> Academic 70.0x135.7 | Community 100.0x189.0 | total 324.7 ft | FAIL
+```
+
+Identical geometry, only the verdict changes. So scenarios A and B "passing" was
+partly an artefact of caps chosen loose enough for hand-picked widths, and
+resolving scenario C had needed manual reasoning the engine could not do.
+
+### Done
+
+- New `search.py`: enumerate feasible (stories, width) per mass, pairing-aware,
+  combine with frontage pruning, rank by preference, verify through the solver.
+- `search_site_schemes` / `apply_scheme` tools, `search` CLI command.
+- `daylight` config block; `last_search` persisted on the session.
+- Prompt rules 8b/8c/8d for choosing and calling the tools.
+
+### Test results
+
+| Test | Result | Notes |
+|------|--------|-------|
+| Full suite | pass | 96 tests, 30 new in `test_phase6.py` |
+| Finds what hand-picked widths missed | pass | verified scheme under the 300 ft cap that defeated 70/100 ft |
+| Search/solver agreement | pass | 98/98 candidates accepted by the solver |
+| Scenario C auto-solved | pass | academic 4 st / support 2 st / athletics 3 st at 110 ft, 360 ft total, no failures |
+| Earlier scenarios unchanged | pass | A, B, C reproduce identically after the width-fallback fix |
+| LLM tool selection | pass | 2/2 via `tests/llm_search_check.py` on qwen2.5:7b |
+
+### Problems
+
+1. **Search proposed a scheme the solver rejected** (`95x200.0` against a 200 ft
+   cap). Cause: candidate widths were snapped *down* to two decimals, and a
+   narrower width lengthens the plate past the cap. Fix: round the narrow end of
+   the width range up and the wide end down, and hold the search to at least the
+   solver's strictness (`LIMIT_EPS`). Verification had caught it, but the search
+   should not have offered it.
+
+2. **`spread` was min-max normalised across the candidate set**, so a scheme's
+   score changed depending on what else was in the list, and `balanced` and
+   `compact` returned identical rankings. Fix: absolute metrics only
+   (`total_length / max_total_length`); regression test asserts a score is
+   independent of `top_n`.
+
+3. **Search maxed out every width.** Minimising length always favours the deepest
+   plate allowed, so it wanted a 100 ft classroom bar. Fix: a daylight-depth
+   penalty on masses containing daylight-sensitive departments, weighted equally
+   in all three preference modes because it is buildability rather than taste.
+
+4. **`academic_width_ft` sized every mass.** Found by running the LLM
+   end-to-end: the model set `community_base_width_ft` for a mass whose id is
+   `community`, and `_resolve_fixed_width` fell through its general chain to
+   `academic_width_ft`, silently building the community mass at 70 ft instead of
+   the requested 100 ft. Two fixes: that key now applies only to academic
+   masses, and `set_constraint` rejects a `<x>_width_ft` key matching no mass
+   instead of storing something nothing reads.
+
+5. **Three tools claimed compliance with limits they never checked.** Same
+   failure class in three places, each found by testing rather than reading:
+   - `solve_dimensions` silently dropped arguments, so the model believed it had
+     applied widths it never set and reported those invented numbers as solved.
+     Now rejects arguments and names the right tool.
+   - `search_site_schemes` called without a frontage cap returned 400 ft schemes
+     that the model announced as fitting a 300 ft site. Now echoes
+     `limits_applied` / `limits_not_checked` and a `caution`.
+   - `solve_dimensions` reported "all checks passed" for a 324.7 ft scheme
+     against a frontage the user had stated but that was never recorded. Now
+     reports `site_limits_active` / `site_limits_not_set` and the total.
+
+### Discussions
+
+- **Search proposes, solver decides.** Candidates are applied to a deep copy of
+  the session and run through the same `solve_massing_study` that writes the
+  reports. A second dimension path would have been faster but could disagree
+  with the solver, which is exactly the failure the user was probing for.
+- **The deterministic engine has been reliable; the LLM boundary is where the
+  bugs are.** Every problem above is a tool contract that let a caller believe
+  something untrue. Tools now state what they did *not* check.
+- Groupings are still the user's call. The search covers widths and story
+  counts; searching over which departments share a mass is a much larger space
+  and is deliberately left out.
+
+### Next steps
+
+- Optional Phase 7: Rhino export.
+- Possible: make `resize_mass` suggestions pairing-aware (a pairing pins total
+  length, so extra stories only redistribute length within it) — largely
+  superseded by the search, which handles this case directly.
+
+---
+
 ## Template for future entries
 
 ```markdown

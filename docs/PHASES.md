@@ -148,7 +148,53 @@ keyword heuristic that listed every department on every floor.
 
 ---
 
-## Phase 6 — Rhino export (optional)
+## Phase 6 — Scheme search (auto-fit) [COMPLETE]
+
+**Goal:** Answer "what would fit?", not just "does this fit?". Phases 3-5 only
+ever *evaluated* a scheme the user specified; the site limits were checks that
+never influenced the geometry. This phase searches for the geometry.
+
+Free variables are story count and width per mass. Everything else follows
+(`plate = target GSF / stories`, `length = plate / width`), so a mass is
+feasible when one width satisfies both caps at once:
+`plate / max_length <= width <= max_width`. For a pairing the shared frontage
+fixes the width outright, so only the story counts vary.
+
+### Deliverables
+
+- [x] `SiteEnvelope` / `MassOption` / `SchemeCandidate` models
+- [x] Feasible width-and-story enumeration per mass, pairing-aware
+- [x] Combination search with frontage pruning and a hard candidate bound
+- [x] Ranking by `balanced` / `low_rise` / `compact`, plus a daylight-depth
+      penalty so the search does not simply max out every width
+- [x] **Every returned candidate re-verified through `solve_massing_study`**
+- [x] `search_site_schemes` + `apply_scheme` tools, `search` CLI command
+
+### The trust rule
+
+The search only *proposes*. Each candidate is applied to a throwaway copy of the
+session and run through the same `solve_massing_study` that writes the reports;
+anything it rejects is discarded. There is deliberately no second dimension or
+validation path that could disagree with the solver, and the search is kept at
+least as strict as the solver on every shared limit.
+
+### Test criteria
+
+| Test | Pass condition | Result |
+|------|----------------|--------|
+| Finds what hand-picked widths missed | 70/100 ft needs 324.7 ft; under a 300 ft cap the search returns a verified scheme | PASS |
+| Search/solver agreement | all 98 candidates in a full enumeration pass the solver | PASS |
+| Caps respected | no candidate exceeds width, length, story or frontage caps | PASS |
+| Infeasible envelope | returns no candidates plus a note naming the shortest possible layout | PASS |
+| Preference matters | `low_rise` is shorter and longer than `compact` | PASS |
+| Daylight | classroom bar stays <= 90 ft even when 120 ft is allowed | PASS |
+| Score stability | a scheme's score does not change with `top_n` | PASS |
+| Pairing | members share one width and sum to the stated frontage | PASS |
+| Scenario C | the case that needed manual reasoning now solves automatically | PASS |
+
+---
+
+## Phase 7 — Rhino export (optional)
 
 **Goal:** Generate editable massing geometry from MassingStudy JSON.
 
@@ -180,7 +226,9 @@ Phase 4 (multi-mass + site)
     ↓
 Phase 5 (program per level)
     ↓
-Phase 6 (Rhino) — optional
+Phase 6 (scheme search / auto-fit)
+    ↓
+Phase 7 (Rhino) — optional
 ```
 
 ---
@@ -191,6 +239,8 @@ Phase 6 (Rhino) — optional
 - Multiple simultaneous massing options
 - Room-level 2D layout within a floor plate (allocation is by area, and room
   names per floor are indicative only)
+- Searching over *groupings* — Phase 6 searches widths and story counts, but
+  which departments share a mass is still the user's call
 - L-shaped / courtyard site packing (combined length is read as a single row)
 - Rhino site context import
 - Web UI

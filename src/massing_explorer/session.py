@@ -27,6 +27,7 @@ class StudySession:
     pairings: list[MassPairing] = field(default_factory=list)
     floor_pins: dict[str, int] = field(default_factory=dict)
     last_massing: dict[str, Any] | None = None
+    last_search: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def study_dir(self) -> Path:
@@ -52,6 +53,7 @@ class StudySession:
             "pairings": [p.to_dict() for p in self.pairings],
             "floor_pins": self.floor_pins,
             "last_massing": self.last_massing,
+            "last_search": self.last_search,
             "messages": [m.to_dict() for m in self.messages],
         }
 
@@ -102,6 +104,7 @@ class StudySession:
             pairings=[MassPairing.from_dict(p) for p in data.get("pairings", [])],
             floor_pins={k: int(v) for k, v in (data.get("floor_pins") or {}).items()},
             last_massing=data.get("last_massing"),
+            last_search=data.get("last_search") or [],
             messages=[ChatMessage.from_dict(m) for m in data.get("messages", [])],
         )
 

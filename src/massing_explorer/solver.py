@@ -96,17 +96,27 @@ def _resolve_fixed_width(
 ) -> float:
     """Prefer mass-specific constraint, then global constraints, then config defaults."""
     c = session.constraints
-    for key in (
-        f"{mass_id}_width_ft",
-        "fixed_width_ft",
-        "academic_width_ft",
-        "max_building_width_ft",
-    ):
+    # `academic_width_ft` is a per-mass key carried over from the manual
+    # workflow, so it must only size an academic mass. Left in the general
+    # chain, one mistyped key silently gave every other mass the academic
+    # width instead of the width the user asked for.
+    is_academic = "academic" in mass_id.lower()
+    keys = [f"{mass_id}_width_ft", "fixed_width_ft"]
+    if is_academic:
+        keys.append("academic_width_ft")
+    keys.append("max_building_width_ft")
+
+    for key in keys:
         if key in c and c[key] is not None:
             return float(c[key])
 
     planning = config.get("planning_limits", {})
-    for key in ("academic_width_ft", "max_building_width_ft"):
+    config_keys = (
+        ("academic_width_ft", "max_building_width_ft")
+        if is_academic
+        else ("max_building_width_ft",)
+    )
+    for key in config_keys:
         if planning.get(key) is not None:
             return float(planning[key])
 

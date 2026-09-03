@@ -208,6 +208,96 @@ def cmd_solve(args: argparse.Namespace) -> int:
     return 0 if all(v.passed or v.check.startswith("anchor") for v in result.validation if "gsf_fit" in v.check) else 0
 
 
+def cmd_search(args: argparse.Namespace) -> int:
+    from .search import SiteEnvelope, apply_scheme, search_schemes
+    from .session import StudySession, slugify_study_id
+    from .solver import solve_massing_study
+    from .report import format_massing_report
+    from .visual import render_massing_visual, render_site_plan
+
+    study_id = slugify_study_id(args.study)
+    if args.program:
+        program = load_program_file(args.program, config_path=args.config)
+        session = StudySession(
+            study_id=study_id, program=program, config_path=args.config or ""
+        )
+    else:
+        try:
+            session = StudySession.load(study_id)
+        except FileNotFoundError as e:
+            print(f"Error: {e}")
+            print("Provide --program or an existing --study")
+            return 1
+
+    if args.config:
+        session.config_path = args.config
+    if not session.masses:
+        print("No masses defined. Use chat or `solve --demo-grouping` first.")
+        return 1
+
+    envelope = SiteEnvelope(
+        max_building_length_ft=args.max_length,
+        max_building_width_ft=args.max_width,
+        max_total_length_ft=args.max_total_length,
+        max_stories=args.max_stories,
+    )
+    print("SITE ENVELOPE")
+    for key, value in envelope.to_dict().items():
+        print(f"  {key}: {value}")
+    print(f"  preference: {args.preference}\n")
+
+    candidates, notes = search_schemes(
+        session,
+        envelope,
+        preference=args.preference,
+        top_n=args.top,
+        config_path=session.config_path or None,
+    )
+    for note in notes:
+        print(f"  note: {note}")
+
+    if not candidates:
+        print("\nNo scheme fits this envelope.")
+        return 1
+
+    print(f"{len(candidates)} verified scheme(s), best first:\n")
+    for i, cand in enumerate(candidates):
+        print(f"  [{i}] {cand.summary()}")
+        print(
+            f"      mean stories {cand.metrics['mean_stories']:.1f} | "
+            f"score {cand.score:.3f}"
+        )
+
+    if args.apply is None:
+        print("\nRe-run with --apply <index> to write one into the study.")
+        return 0
+
+    if args.apply < 0 or args.apply >= len(candidates):
+        print(f"\n--apply must be 0..{len(candidates) - 1}")
+        return 1
+
+    chosen = candidates[args.apply]
+    apply_scheme(session, chosen)
+    print(f"\nApplied [{args.apply}] {chosen.summary()}")
+
+    result = solve_massing_study(session, config_path=session.config_path or None)
+    session.last_massing = result.to_dict()
+    session.save()
+    report = format_massing_report(result)
+    print(report)
+
+    if args.visual:
+        path = Path(args.visual)
+        try:
+            render_massing_visual(result, path)
+            site = path.with_name(f"{path.stem}_site{path.suffix}")
+            render_site_plan(result, site, envelope.max_total_length_ft)
+            print(f"Visual: {path}\nSite plan: {site}")
+        except ImportError as e:
+            print(f"Visual skipped: {e}")
+    return 0
+
+
 def cmd_config_check(args: argparse.Namespace) -> int:
     config = load_project_config(args.config)
     print(json.dumps(config, indent=2))
@@ -293,6 +383,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     solve.add_argument("--output-dir", "-o", help="Directory for report/json (default: studies/<id>)")
     solve.set_defaults(func=cmd_solve)
+
+    search = sub.add_parser(
+        "search", help="Find story counts and widths that fit a site envelope"
+    )
+    search.add_argument("--study", "-s", required=True, help="Study ID")
+    search.add_argument("--program", "-p", help="Program file (new study)")
+    search.add_argument("--config", "-c", help="Project config YAML")
+    search.add_argument(
+        "--max-total-length", type=float, help="Max combined length (ft) on the site"
+    )
+    search.add_argument("--max-length", type=float, help="Max length (ft) per mass")
+    search.add_argument("--max-width", type=float, help="Max width (ft) per mass")
+    search.add_argument(
+        "--max-stories", type=int, default=4, help="Story ceiling (default 4)"
+    )
+    search.add_argument(
+        "--preference",
+        default="balanced",
+        choices=["balanced", "low_rise", "compact"],
+        help="Ranking bias (default balanced)",
+    )
+    search.add_argument("--top", type=int, default=3, help="How many schemes to show")
+    search.add_argument(
+        "--apply", type=int, help="Apply scheme by index and print the full report"
+    )
+    search.add_argument("--visual", help="PNG path (only with --apply)")
+    search.set_defaults(func=cmd_search)
 
     return parser
 

@@ -130,11 +130,29 @@ def set_story_count(
     return {"ok": False, "error": f"Mass not found: {mass_id}"}
 
 
+GLOBAL_WIDTH_KEYS = ("fixed_width_ft", "max_building_width_ft", "academic_width_ft")
+
+
 def set_constraint(
     session: StudySession,
     key: str,
     value: Any,
 ) -> dict[str, Any]:
+    # A per-mass width key is "<mass_id>_width_ft". Accepting one that matches
+    # no mass stored a constraint that nothing ever read, so the study kept its
+    # old width while the caller believed the new one had been applied.
+    if key.endswith("_width_ft") and key not in GLOBAL_WIDTH_KEYS:
+        valid = [f"{m.id}_width_ft" for m in session.masses]
+        if key not in valid:
+            return {
+                "ok": False,
+                "error": (
+                    f"'{key}' does not match any mass, so it would be ignored. "
+                    f"Mass ids are: {[m.id for m in session.masses]}."
+                ),
+                "valid_width_keys": valid + list(GLOBAL_WIDTH_KEYS),
+            }
+
     session.constraints[key] = value
     session.save()
     return {"ok": True, "constraints": session.constraints}
@@ -151,6 +169,124 @@ def mark_double_height(session: StudySession, room_name: str) -> dict[str, Any]:
         session.double_height_rooms.append(room_name)
         session.save()
     return {"ok": True, "double_height_rooms": session.double_height_rooms}
+
+
+def search_site_schemes(
+    session: StudySession,
+    max_total_length_ft: float | None = None,
+    max_length_ft: float | None = None,
+    max_width_ft: float | None = None,
+    max_stories: int = 4,
+    preference: str = "balanced",
+    top_n: int = 3,
+) -> dict[str, Any]:
+    """
+    Search story counts and widths that fit a site envelope.
+
+    Unlike solve_dimensions (which checks a scheme you already chose), this
+    finds schemes. Every option returned has been verified through the solver.
+    """
+    from .search import PREFERENCE_WEIGHTS, SiteEnvelope, search_schemes
+
+    if preference not in PREFERENCE_WEIGHTS:
+        return {
+            "ok": False,
+            "error": f"Unknown preference: {preference}",
+            "valid_preferences": sorted(PREFERENCE_WEIGHTS),
+        }
+    if not session.masses:
+        return {"ok": False, "error": "Set groupings before searching for schemes."}
+
+    envelope = SiteEnvelope(
+        max_building_length_ft=max_length_ft,
+        max_building_width_ft=max_width_ft,
+        max_total_length_ft=max_total_length_ft,
+        max_stories=max(1, int(max_stories)),
+    )
+    candidates, notes = search_schemes(
+        session,
+        envelope,
+        preference=preference,
+        top_n=max(1, int(top_n)),
+        config_path=session.config_path or None,
+    )
+
+    session.last_search = [c.to_dict() for c in candidates]
+    session.save()
+
+    # Say plainly which limits were enforced. Without this the model happily
+    # reports a 400 ft scheme as fitting a 300 ft site it never passed in.
+    limits = {
+        "max_total_length_ft": max_total_length_ft,
+        "max_length_ft": max_length_ft,
+        "max_width_ft": max_width_ft,
+    }
+    applied = {k: v for k, v in limits.items() if v is not None}
+    missing = sorted(k for k, v in limits.items() if v is None)
+    caution = None
+    if missing:
+        caution = (
+            f"These limits were NOT applied and NOT checked: {missing}. Do not "
+            f"tell the user a scheme respects any of them. If the user stated "
+            f"one, call search_site_schemes again and pass it."
+        )
+
+    return {
+        "ok": True,
+        "envelope": envelope.to_dict(),
+        "limits_applied": applied,
+        "limits_not_checked": missing,
+        "caution": caution,
+        "preference": preference,
+        "found": len(candidates),
+        "notes": notes,
+        "schemes": [
+            {
+                "index": i,
+                "summary": c.summary(),
+                "total_length_ft": round(c.total_length_ft, 1),
+                "verified": c.verified,
+                "masses": [
+                    {
+                        "mass_id": o.mass_id,
+                        "name": o.mass_name,
+                        "stories": o.stories,
+                        "width_ft": round(o.width_ft, 1),
+                        "length_ft": round(o.length_ft, 1),
+                    }
+                    for o in c.options
+                ],
+            }
+            for i, c in enumerate(candidates)
+        ],
+        "instruction": (
+            "Present these options to the user and ask which to apply, then call "
+            "apply_scheme with its index."
+            if candidates
+            else "No scheme fits. Report the notes and suggest relaxing a limit."
+        ),
+    }
+
+
+def apply_scheme(session: StudySession, index: int = 0) -> dict[str, Any]:
+    """Apply one scheme from the last search, then re-solve and re-validate."""
+    from .search import apply_scheme_from_dict
+
+    if not session.last_search:
+        return {"ok": False, "error": "No search results. Call search_site_schemes first."}
+    if index < 0 or index >= len(session.last_search):
+        return {
+            "ok": False,
+            "error": f"index must be 0..{len(session.last_search) - 1}",
+        }
+
+    applied = apply_scheme_from_dict(session, session.last_search[index])
+    if not applied["ok"]:
+        return {"ok": False, "error": "Scheme did not match any current mass."}
+
+    solved = solve_dimensions(session)
+    solved["changes"] = applied["applied"]
+    return solved
 
 
 def pin_department_to_floor(
@@ -319,12 +455,35 @@ def solve_dimensions(session: StudySession) -> dict[str, Any]:
 
     failed = [v.message for v in result.validation if not v.passed]
 
+    # "All checks passed" is misleading when the limit the user cares about was
+    # never recorded, so spell out which site limits are actually in force.
+    site_keys = (
+        "max_total_length_ft",
+        "max_building_length_ft",
+        "max_building_width_ft",
+    )
+    active = {k: session.constraints[k] for k in site_keys if session.constraints.get(k)}
+    inactive = [k for k in site_keys if k not in active]
+    caution = None
+    if inactive and not failed:
+        caution = (
+            f"No limit is set for {inactive}, so nothing was checked against "
+            f"them. If the user stated one of these, call set_constraint with it "
+            f"and solve again before saying the scheme fits the site."
+        )
+
     # Failures first, and no raw per-mass dump: the LLM should quote the report
     # and the failure list rather than picking numbers out of nested JSON.
     return {
         "ok": True,
         "all_checks_passed": not failed,
         "failed_checks": failed,
+        "site_limits_active": active,
+        "site_limits_not_set": inactive,
+        "caution": caution,
+        "total_ground_length_ft": round(
+            sum(m.floors[0].length_ft for m in result.masses if m.floors), 1
+        ),
         "instruction": (
             "Report every failed check to the user verbatim. Do not describe a "
             "failing mass as fitting."
@@ -518,6 +677,50 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "search_site_schemes",
+            "description": (
+                "Find story counts and widths that FIT a site envelope. Use this "
+                "when the user gives site limits and asks what would work, rather "
+                "than stating widths themselves. solve_dimensions only checks a "
+                "scheme; this one searches for schemes. Every option returned is "
+                "already verified by the solver. Preference is one of: balanced, "
+                "low_rise, compact."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "max_total_length_ft": {"type": "number"},
+                    "max_length_ft": {"type": "number"},
+                    "max_width_ft": {"type": "number"},
+                    "max_stories": {"type": "integer"},
+                    "preference": {
+                        "type": "string",
+                        "enum": ["balanced", "low_rise", "compact"],
+                    },
+                    "top_n": {"type": "integer"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "apply_scheme",
+            "description": (
+                "Apply one scheme from the last search_site_schemes result by its "
+                "index, then re-solve and re-validate."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"index": {"type": "integer"}},
+                "required": ["index"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "pin_department_to_floor",
             "description": (
                 "Force a department onto a specific level when allocating program "
@@ -586,7 +789,25 @@ def execute_tool(session: StudySession, name: str, arguments: dict[str, Any]) ->
     elif name == "mark_double_height":
         result = mark_double_height(session, arguments["room_name"])
     elif name == "solve_dimensions":
-        result = solve_dimensions(session)
+        # solve_dimensions reads widths off the session. Silently dropping
+        # arguments let the model believe it had applied widths it never set,
+        # and then report those invented numbers as solved.
+        if arguments:
+            result = {
+                "ok": False,
+                "error": (
+                    "solve_dimensions takes no arguments; it solves whatever is "
+                    f"already on the study. Ignored: {sorted(arguments)}."
+                ),
+                "next_step": (
+                    "To fix a width, call set_constraint with key "
+                    "'<mass_id>_width_ft' (e.g. 'academic_width_ft') for each "
+                    "mass, then call solve_dimensions again. To have the engine "
+                    "choose widths for you, call search_site_schemes instead."
+                ),
+            }
+        else:
+            result = solve_dimensions(session)
     elif name == "pair_masses":
         result = pair_masses(
             session,
@@ -596,6 +817,18 @@ def execute_tool(session: StudySession, name: str, arguments: dict[str, Any]) ->
         )
     elif name == "clear_pairings":
         result = clear_pairings(session)
+    elif name == "search_site_schemes":
+        result = search_site_schemes(
+            session,
+            max_total_length_ft=arguments.get("max_total_length_ft"),
+            max_length_ft=arguments.get("max_length_ft"),
+            max_width_ft=arguments.get("max_width_ft"),
+            max_stories=int(arguments.get("max_stories", 4)),
+            preference=str(arguments.get("preference", "balanced")),
+            top_n=int(arguments.get("top_n", 3)),
+        )
+    elif name == "apply_scheme":
+        result = apply_scheme(session, int(arguments.get("index", 0)))
     elif name == "pin_department_to_floor":
         result = pin_department_to_floor(
             session, str(arguments["department"]), int(arguments["level"])
