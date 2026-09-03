@@ -5,6 +5,104 @@ Update this file at the end of every work session.
 
 ---
 
+## 2026-09-03 — Phase 5 complete: floor-by-floor program allocation
+
+### Done
+
+Closes requirement #10, "what program inside what mass, and **what program on
+which layer**." The first half worked since Phase 3; the second half was faked —
+`_floor_programs` was keyword bias matching that printed every department on
+every floor with no area split.
+
+- **`allocate.py`** — new allocator. A department's grossed area is poured over
+  levels in placement order and cut only where a floor runs out. Vertical
+  position comes from *placement order*, not from each department hunting its
+  own preferred level.
+- **`ProgramAllocation`** model, plus `FloorPlate.allocations`, `allocated_gsf`
+  and `utilization`.
+- **Quantity expansion** — a program row with qty 18 is 18 placeable rooms.
+- **`floor_preferences`** config keywords decide which departments claim lower
+  levels; defaults are school-oriented and fully overridable.
+- **Void owners forced to grade** — a department owning a double-height room
+  must sit on the ground floor, since the void is cut in the plate above it.
+- **Token-fragment rule** — a floor is left slightly short rather than carrying
+  a meaningless department sliver, but only when the area can go elsewhere.
+- **Validation** — `allocation_conserved` (every department fully placed) and
+  `floor_capacity` (no floor over its usable area).
+- **`pin_department_to_floor` / `unpin_department`** chat tools, with partial
+  name matching and a guard against pinning above the top level.
+- **Report** lists area and utilization per level; the elevation drawing is now
+  split horizontally by program share instead of one flat bar per floor.
+
+Underwood result — every floor exactly 100% utilised, departments contiguous:
+
+```
+Academic  L0 Core Academic 11,230 | L1 Core Academic 11,230
+          L2 Special Education 7,814 + Core Academic 3,416
+HPE       L0 Health/PE 10,868 + Dining 2,348   (gym at grade)
+          L1 Dining 7,215                      (6,000 SF void above gym)
+Support   L0 Media 3,655 + Admin 3,514 + Custodial 669
+          L1 Art/Music 4,312 + Custodial 2,646 + Medical 880
+```
+
+### Test results
+
+| Test | Result | Notes |
+|------|--------|-------|
+| Conservation | pass | every department's GSF fully placed |
+| Floor capacity | pass | 100% on all Underwood floors, none over |
+| Contiguity | pass | Core Academic L0–L1, SpEd alone on L2 |
+| Qty expansion | pass | 18 classrooms distribute across 3 floors |
+| Ground affinity | pass | dining/media low, academic/art high |
+| Config override | pass | affinity keywords swappable per project |
+| Void owner at grade | pass | HPE on L0, void on L1 |
+| Pin overrides affinity | pass | dining pinned upstairs stays upstairs |
+| Pin validation | pass | rejects unknown dept and non-existent level |
+| Pin persistence | pass | survives save/load |
+| Fragment rule | pass | both branches — avoided, and kept when forced |
+| Overflow | pass | area conserved and flagged, never dropped |
+| Live Ollama | pass | qwen2.5 pinned via partial name, re-solved, reported real per-level areas |
+| Full suite | pass | 68 tests, no Phase 1–4 regressions |
+
+### Problems
+
+Three iterations, each caught by a validation check rather than by inspection:
+
+1. **Program rows treated as atomic.** `General Classroom (Grades 1-6)` is one
+   row with qty 18, so 19,665 SF of classrooms could not split and L0 came out
+   at **175%** of capacity. Fixed by expanding qty into room instances.
+2. **Slivers from gap back-filling.** With each department hunting its own
+   preferred level, Core Academic filled top-down leaving gaps that Special
+   Education then back-filled as 103 / 1,069 / 5,986 SF fragments across three
+   floors — technically valid, architecturally meaningless. Fixed by making
+   placement a single bottom-up pour whose *order* encodes verticality.
+3. **Boundary slivers.** Even when contiguous, a department could pick up a
+   ~130 SF tail on the floor below. Added the token-fragment rule. It correctly
+   declines to act when the area is forced: with Media Center pinned to L1
+   consuming 3,655 of 7,838, Art & Music's 4,312 cannot fit above, so its
+   129 SF genuinely belongs on L0.
+
+Also fixed the GSF label overlapping the plan axis label in the visual.
+
+### Discussions
+
+- **Why area, not rooms.** Cutting a continuous area stream at floor boundaries
+  gives exactly-full floors and contiguous departments; first-fitting discrete
+  rooms gives neither. Room names per floor are kept as *indicative* labels
+  (a room straddling a boundary is credited to the floor holding more than half
+  of it) while the allocated GSF is authoritative. Anchor room clear-dimension
+  fit is still checked separately by `check_anchor_fit`.
+- **Exactly-100% floors are an artifact** of sizing the plate as area ÷ stories.
+  That is why the fragment rule is allowed to leave a floor slightly short —
+  the leftover is circulation slop at concept stage, not an error.
+
+### Next steps
+
+- Phase 6 (optional): Rhino export. Allocations now make per-program layers
+  meaningful, which they would not have been before this phase.
+
+---
+
 ## 2026-09-03 — Phase 4 complete: paired masses + site limits
 
 ### Done

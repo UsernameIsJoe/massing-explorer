@@ -21,6 +21,24 @@ class VoidRegion:
 
 
 @dataclass
+class ProgramAllocation:
+    """A department's grossed area placed on one specific floor."""
+
+    department: str
+    gsf: float
+    rooms: list[str] = field(default_factory=list)
+    split: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "department": self.department,
+            "gsf": round(self.gsf, 1),
+            "rooms": self.rooms,
+            "split": self.split,
+        }
+
+
+@dataclass
 class FloorPlate:
     level: int
     width_ft: float
@@ -29,11 +47,23 @@ class FloorPlate:
     programs: list[str] = field(default_factory=list)
     voids: list[VoidRegion] = field(default_factory=list)
     usable_area_sf: float = 0.0
+    allocations: list[ProgramAllocation] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.usable_area_sf == 0.0:
             void_area = sum(v.area_sf for v in self.voids)
             self.usable_area_sf = max(0.0, self.area_sf - void_area)
+
+    @property
+    def allocated_gsf(self) -> float:
+        return sum(a.gsf for a in self.allocations)
+
+    @property
+    def utilization(self) -> float:
+        """Allocated area as a fraction of usable area (1.0 = exactly full)."""
+        if self.usable_area_sf <= 0:
+            return 0.0
+        return self.allocated_gsf / self.usable_area_sf
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -44,6 +74,9 @@ class FloorPlate:
             "usable_area_sf": round(self.usable_area_sf, 1),
             "programs": self.programs,
             "voids": [v.to_dict() for v in self.voids],
+            "allocations": [a.to_dict() for a in self.allocations],
+            "allocated_gsf": round(self.allocated_gsf, 1),
+            "utilization": round(self.utilization, 4),
         }
 
 

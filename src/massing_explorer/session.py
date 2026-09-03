@@ -25,6 +25,7 @@ class StudySession:
     messages: list[ChatMessage] = field(default_factory=list)
     double_height_rooms: list[str] = field(default_factory=list)
     pairings: list[MassPairing] = field(default_factory=list)
+    floor_pins: dict[str, int] = field(default_factory=dict)
     last_massing: dict[str, Any] | None = None
 
     @property
@@ -49,6 +50,7 @@ class StudySession:
             "adjacency_notes": self.adjacency_notes,
             "double_height_rooms": self.double_height_rooms,
             "pairings": [p.to_dict() for p in self.pairings],
+            "floor_pins": self.floor_pins,
             "last_massing": self.last_massing,
             "messages": [m.to_dict() for m in self.messages],
         }
@@ -98,6 +100,7 @@ class StudySession:
             adjacency_notes=data.get("adjacency_notes", []),
             double_height_rooms=data.get("double_height_rooms", []),
             pairings=[MassPairing.from_dict(p) for p in data.get("pairings", [])],
+            floor_pins={k: int(v) for k, v in (data.get("floor_pins") or {}).items()},
             last_massing=data.get("last_massing"),
             messages=[ChatMessage.from_dict(m) for m in data.get("messages", [])],
         )

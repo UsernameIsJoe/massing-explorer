@@ -99,7 +99,8 @@ Full rationale: [docs/DECISIONS.md](docs/DECISIONS.md)
 | **2** | Ollama chat loop, grouping, story count, state memory | **Complete** |
 | **3** | Footprint solver, anchor room fit, double-height, stepped floors | **Complete** |
 | **4** | Paired masses, site limits from config/chat, resize loop | **Complete** |
-| **5** | Rhino massing geometry export | Not started |
+| **5** | Floor-by-floor program allocation, floor pins | **Complete** |
+| **6** | Rhino massing geometry export | Not started |
 
 Details and test criteria: [docs/PHASES.md](docs/PHASES.md)
 
@@ -118,6 +119,7 @@ massing-explorer/
 │   ├── models.py           # ProgramStudy, Room, Department
 │   ├── massing_models.py   # SolvedMass, FloorPlate, validation, suggestions
 │   ├── solver.py           # Footprint, pairing, void, site limit solver
+│   ├── allocate.py         # Which department sits on which level
 │   ├── session.py          # StudySession state + persistence
 │   ├── study_state.py      # MassGrouping, MassPairing, ChatMessage
 │   ├── tools.py            # Engine functions the LLM may call

@@ -2,7 +2,38 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .massing_models import MassingStudyResult
+from .massing_models import MassingStudyResult, SolvedMass
+
+DEPT_PALETTE = (
+    "#4C78A8",
+    "#F58518",
+    "#54A24B",
+    "#E45756",
+    "#B279A2",
+    "#72B7B2",
+    "#EECA3B",
+    "#9D755D",
+    "#BAB0AC",
+)
+
+
+def _short(name: str, limit: int = 16) -> str:
+    """Trim a department name for a narrow drawing label."""
+    name = name.replace(" & ", "/").title()
+    return name if len(name) <= limit else name[: limit - 1] + "\u2026"
+
+
+def _department_colors(mass: SolvedMass) -> dict[str, str]:
+    """Stable colour per department across every floor of a mass."""
+    seen: list[str] = []
+    for floor in mass.floors:
+        for alloc in floor.allocations:
+            if alloc.department not in seen:
+                seen.append(alloc.department)
+    for dept in mass.departments:
+        if dept not in seen:
+            seen.append(dept)
+    return {d: DEPT_PALETTE[i % len(DEPT_PALETTE)] for i, d in enumerate(seen)}
 
 
 def render_massing_visual(
@@ -87,49 +118,79 @@ def render_massing_visual(
         ax_plan.set_xlim(-5, max(w, 1) + 10)
         ax_plan.set_ylim(-5, max(l, 1) + 10)
         ax_plan.set_aspect("equal")
+        fit = "PASS" if mass.fit_pass else "FAIL"
         ax_plan.set_title(
-            f"{mass.name}\n{w:g} x {l:.0f} ft plan",
-            fontsize=10,
+            f"{mass.name}\n{w:.0f} x {l:.0f} ft plan, {len(mass.floors)} stories\n"
+            f"GSF {mass.actual_gsf:,.0f}/{mass.target_gsf:,.0f} [{fit}]",
+            fontsize=9,
         )
         ax_plan.set_xlabel("ft")
         ax_plan.set_ylabel("ft")
-        fit = "PASS" if mass.fit_pass else "FAIL"
-        ax_plan.text(
-            0,
-            -0.08,
-            f"GSF {mass.actual_gsf:,.0f}/{mass.target_gsf:,.0f} [{fit}]",
-            transform=ax_plan.transAxes,
-            fontsize=8,
-        )
 
-        # Elevation (stacked usable areas as stories)
+        # Elevation: each story split horizontally by allocated program area,
+        # so "what program on which level" reads directly off the drawing.
         story_h = 14  # ft display height per story
+        dept_colors = _department_colors(mass)
         y = 0
         for fl in mass.floors:
             scale = fl.usable_area_sf / fl.area_sf if fl.area_sf else 1
             bar_w = w * max(scale, 0.15)
-            face = "#bbbbbb" if fl.voids else color
-            ax_elev.add_patch(
-                Rectangle(
-                    (0, y),
-                    bar_w,
-                    story_h - 1,
-                    facecolor=face,
-                    edgecolor="#222",
-                    alpha=0.7,
+
+            if fl.allocations and fl.allocated_gsf > 0:
+                x = 0.0
+                for alloc in fl.allocations:
+                    seg = bar_w * (alloc.gsf / fl.allocated_gsf)
+                    ax_elev.add_patch(
+                        Rectangle(
+                            (x, y),
+                            seg,
+                            story_h - 1,
+                            facecolor=dept_colors[alloc.department],
+                            edgecolor="#222",
+                            alpha=0.75,
+                        )
+                    )
+                    if seg > bar_w * 0.16:
+                        ax_elev.text(
+                            x + seg / 2,
+                            y + story_h / 2 - 0.5,
+                            f"{_short(alloc.department)}\n{alloc.gsf:,.0f}",
+                            ha="center",
+                            va="center",
+                            fontsize=6.5,
+                        )
+                    x += seg
+            else:
+                ax_elev.add_patch(
+                    Rectangle(
+                        (0, y),
+                        bar_w,
+                        story_h - 1,
+                        facecolor="#bbbbbb" if fl.voids else color,
+                        edgecolor="#222",
+                        alpha=0.7,
+                    )
                 )
-            )
-            label = f"L{fl.level}  {fl.usable_area_sf:,.0f} SF"
+
+            note = f"L{fl.level}  {fl.usable_area_sf:,.0f} SF"
             if fl.voids:
-                label += " (void)"
-            ax_elev.text(bar_w / 2, y + story_h / 2 - 0.5, label, ha="center", va="center", fontsize=8)
+                note += " (void)"
+            ax_elev.text(
+                bar_w + w * 0.03,
+                y + story_h / 2 - 0.5,
+                note,
+                ha="left",
+                va="center",
+                fontsize=7,
+                color="#333",
+            )
             y += story_h
 
-        ax_elev.set_xlim(0, max(w, 1) * 1.2)
+        ax_elev.set_xlim(0, max(w, 1) * 1.6)
         ax_elev.set_ylim(0, story_h * len(mass.floors) + 2)
         ax_elev.set_aspect("equal")
-        ax_elev.set_title("Elevation (schematic)", fontsize=10)
-        ax_elev.set_xlabel("width (ft)")
+        ax_elev.set_title("Program by level", fontsize=10)
+        ax_elev.set_xlabel("share of floor area")
         ax_elev.set_ylabel("height (schematic)")
 
     fig.suptitle(

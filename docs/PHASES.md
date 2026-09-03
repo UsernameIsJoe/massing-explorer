@@ -111,14 +111,51 @@ Step-by-step build plan. Do not skip validation gates between phases.
 
 ---
 
-## Phase 5 — Rhino export (optional)
+## Phase 5 — Floor-by-floor program allocation
+
+**Goal:** Answer "what program on which layer" with real area math, not a
+keyword heuristic that listed every department on every floor.
+
+### Deliverables
+
+- [x] `ProgramAllocation` model; `FloorPlate.allocations` + `utilization`
+- [x] Allocator (`allocate.py`): department area poured over levels, cut only
+      where a floor runs out, so departments stay contiguous
+- [x] Quantity expansion — a program row of qty 18 is 18 placeable rooms
+- [x] Vertical position driven by `floor_preferences` config keywords
+- [x] Double-height room owners forced to grade (the void is cut above them)
+- [x] Token-fragment rule: no meaningless department slivers unless the area
+      has nowhere else to go
+- [x] Conservation + floor capacity validation checks
+- [x] `pin_department_to_floor` / `unpin_department` chat tools
+- [x] Report shows area + utilization per level; elevation drawing is split by
+      program share
+
+### Test criteria
+
+| Test | Pass condition | Result |
+|------|----------------|--------|
+| Conservation | Every department's GSF fully placed | PASS |
+| Capacity | No floor allocated beyond usable area | PASS — 100% on all Underwood floors |
+| Contiguity | A department is not scattered to back-fill gaps | PASS — Core Academic L0–L1, SpEd L2 |
+| Qty expansion | 18 classrooms distribute across floors | PASS |
+| Ground affinity | Dining/media land low, academic/art land high | PASS |
+| Void owner | Gym department sits at grade, void on floor above | PASS |
+| Pin | `pin_department_to_floor` overrides affinity | PASS |
+| Fragment rule | Sliver avoided when possible, kept when forced | PASS (both branches) |
+
+**Status: complete** — 68 tests passing.
+
+---
+
+## Phase 6 — Rhino export (optional)
 
 **Goal:** Generate editable massing geometry from MassingStudy JSON.
 
 ### Deliverables
 
 - [ ] MassingStudy → Rhino script or `.3dm` via rhino3dm
-- [ ] Layers per mass / per program
+- [ ] Layers per mass / per program (allocations now make this meaningful)
 - [ ] Extruded volumes per floor plate
 
 ### Test criteria
@@ -141,7 +178,9 @@ Phase 3 (solver + validation)
     ↓
 Phase 4 (multi-mass + site)
     ↓
-Phase 5 (Rhino) — optional
+Phase 5 (program per level)
+    ↓
+Phase 6 (Rhino) — optional
 ```
 
 ---
@@ -150,7 +189,9 @@ Phase 5 (Rhino) — optional
 
 - Screenshot / vision program ingest
 - Multiple simultaneous massing options
-- Full classroom distribution / bin packing
+- Room-level 2D layout within a floor plate (allocation is by area, and room
+  names per floor are indicative only)
+- L-shaped / courtyard site packing (combined length is read as a single row)
 - Rhino site context import
 - Web UI
 - Cloud LLM APIs

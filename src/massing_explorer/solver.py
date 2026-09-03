@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from .allocate import allocate_programs
 from .config import gsf_tolerance_from_config, load_project_config
 from .massing_models import (
     CompromisedAnchor,
@@ -190,28 +191,23 @@ def _void_area_for_mass(
     return voids
 
 
-def _floor_programs(
+def _ground_required_departments(
     session: StudySession,
     departments: list[str],
-    level: int,
-    story_count: int,
-) -> list[str]:
-    """Simple stacking: all departments on every floor for equal plates;
-    ground-heavy programs noted on level 0 when multi-story."""
-    if story_count <= 1:
-        return list(departments)
-
-    # Prefer putting HPE/dining/media on lower floors when present
-    ground_bias = ("HEALTH", "PHYSICAL", "DINING", "FOOD", "MEDIA", "CUSTODIAL")
-    upper_bias = ("ACADEMIC", "SPECIAL EDUCATION", "ADMINISTRATION", "ART", "MUSIC")
-
-    if level == 0:
-        ground = [d for d in departments if any(b in d.upper() for b in ground_bias)]
-        return ground or list(departments)
-
-    upper = [d for d in departments if any(b in d.upper() for b in upper_bias)]
-    # Always list all assigned programs so report stays clear
-    return upper or list(departments)
+    voids: list[VoidRegion],
+) -> set[str]:
+    """
+    Departments owning a double-height room must sit on the ground floor, since
+    the void is cut in the plate directly above them.
+    """
+    void_rooms = {v.room.lower() for v in voids}
+    required: set[str] = set()
+    for room in session.program.rooms:
+        if room.department not in departments:
+            continue
+        if room.room_name.lower() in void_rooms:
+            required.add(room.department)
+    return required
 
 
 def solve_mass_footprint(
@@ -388,6 +384,62 @@ def check_pairing_lengths(
     return checks
 
 
+def check_allocation(
+    mass: SolvedMass,
+    dept_gsf: dict[str, float],
+) -> list[ValidationCheck]:
+    """
+    Two guarantees the allocation must hold:
+    1. Conservation — every department's GSF lands somewhere, in full.
+    2. Capacity — no floor is allocated more than its usable area.
+    """
+    checks: list[ValidationCheck] = []
+
+    allocated: dict[str, float] = {}
+    for floor in mass.floors:
+        for alloc in floor.allocations:
+            allocated[alloc.department] = (
+                allocated.get(alloc.department, 0.0) + alloc.gsf
+            )
+
+    missing = []
+    for dept, want in dept_gsf.items():
+        got = allocated.get(dept, 0.0)
+        if abs(got - want) > max(1.0, want * 0.001):
+            missing.append(f"{dept}: allocated {got:,.0f} of {want:,.0f} SF")
+    checks.append(
+        ValidationCheck(
+            check=f"allocation_conserved:{mass.id}",
+            passed=not missing,
+            message=(
+                f"{mass.name}: all {len(dept_gsf)} departments fully placed "
+                f"({sum(allocated.values()):,.0f} SF)"
+                if not missing
+                else f"{mass.name}: area lost in allocation - " + "; ".join(missing)
+            ),
+        )
+    )
+
+    over = [
+        f"L{f.level} {f.allocated_gsf:,.0f} SF in {f.usable_area_sf:,.0f} SF"
+        for f in mass.floors
+        if f.allocated_gsf > f.usable_area_sf + 1.0
+    ]
+    checks.append(
+        ValidationCheck(
+            check=f"floor_capacity:{mass.id}",
+            passed=not over,
+            message=(
+                f"{mass.name}: every floor within usable area "
+                + ", ".join(f"L{f.level} {f.utilization * 100:.0f}%" for f in mass.floors)
+                if not over
+                else f"{mass.name}: floor over capacity - " + "; ".join(over)
+            ),
+        )
+    )
+    return checks
+
+
 def _site_limits(session: StudySession, config: dict[str, Any]) -> dict[str, float]:
     """Merge site limits from chat constraints (priority) and config."""
     limits: dict[str, float] = {}
@@ -522,7 +574,10 @@ def solve_massing_study(
     result = MassingStudyResult(
         study_id=session.study_id,
         gsf_tolerance=tolerance,
-        rationale="Equal floor plates from target GSF / stories; voids deducted on floor above.",
+        rationale=(
+            "Equal floor plates from target GSF / stories; voids deducted on floor "
+            "above; departments allocated to levels by floor preference and area fit."
+        ),
     )
 
     if not session.masses:
@@ -549,10 +604,34 @@ def solve_massing_study(
             voids=voids,
             departments=mass_def.departments,
         )
-        # Annotate programs per floor with simple bias
-        for fl in floors:
-            fl.programs = _floor_programs(
-                session, mass_def.departments, fl.level, mass_def.story_count
+        # Place each department on specific levels with real area math
+        depts = _dept_map(session)
+        dept_gsf = {
+            d: depts[d].target_gsf for d in mass_def.departments if d in depts
+        }
+        alloc_notes = allocate_programs(
+            floors=floors,
+            departments=list(mass_def.departments),
+            dept_gsf=dept_gsf,
+            rooms=session.program.rooms,
+            multiplier=session.program.grossing.combined_multiplier,
+            config=config,
+            pins={
+                d: lvl
+                for d, lvl in session.floor_pins.items()
+                if d in mass_def.departments
+            },
+            ground_required=_ground_required_departments(
+                session, mass_def.departments, voids
+            ),
+        )
+        for note in alloc_notes:
+            result.validation.append(
+                ValidationCheck(
+                    check=f"allocation:{mass_def.id}",
+                    passed=True,
+                    message=f"{mass_def.name}: {note}",
+                )
             )
 
         delta = actual - target
@@ -575,6 +654,7 @@ def solve_massing_study(
         site_checks, site_suggestions = check_site_limits(solved, limits, target)
         result.validation.extend(site_checks)
         result.resize_suggestions.extend(site_suggestions)
+        result.validation.extend(check_allocation(solved, dept_gsf))
 
         result.validation.append(
             ValidationCheck(

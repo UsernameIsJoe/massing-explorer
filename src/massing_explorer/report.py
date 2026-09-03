@@ -52,7 +52,17 @@ def format_massing_report(result: MassingStudyResult) -> str:
                 f"{fl.area_sf:,.0f} SF footprint, {fl.usable_area_sf:,.0f} SF usable"
                 f"{void_note}"
             )
-            if fl.programs:
+            if fl.allocations:
+                for a in fl.allocations:
+                    flag = " (split)" if a.split else ""
+                    lines.append(
+                        f"         {a.gsf:>9,.0f} SF  {a.department}{flag}"
+                    )
+                lines.append(
+                    f"         {'-' * 9}  {fl.utilization * 100:.0f}% of usable area "
+                    f"({fl.allocated_gsf:,.0f} SF allocated)"
+                )
+            elif fl.programs:
                 lines.append(f"         programs: {', '.join(fl.programs)}")
         lines.append("")
 

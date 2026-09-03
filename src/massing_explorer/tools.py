@@ -153,6 +153,57 @@ def mark_double_height(session: StudySession, room_name: str) -> dict[str, Any]:
     return {"ok": True, "double_height_rooms": session.double_height_rooms}
 
 
+def pin_department_to_floor(
+    session: StudySession,
+    department: str,
+    level: int,
+) -> dict[str, Any]:
+    """Force a department onto a specific level (0 = ground) when allocating."""
+    known = session.department_names()
+    if department not in known:
+        matches = [d for d in known if department.lower() in d.lower()]
+        if len(matches) != 1:
+            return {
+                "ok": False,
+                "error": f"Unknown department: {department}",
+                "known_departments": known,
+            }
+        department = matches[0]
+
+    if level < 0:
+        return {"ok": False, "error": "level must be >= 0 (0 = ground floor)"}
+
+    mass = next((m for m in session.masses if department in m.departments), None)
+    if mass and level >= mass.story_count:
+        return {
+            "ok": False,
+            "error": (
+                f"{mass.name} has {mass.story_count} stories, so level {level} "
+                f"does not exist (top level is {mass.story_count - 1})"
+            ),
+        }
+
+    session.floor_pins[department] = int(level)
+    session.save()
+    return {
+        "ok": True,
+        "floor_pins": session.floor_pins,
+        "note": "Call solve_dimensions to re-allocate with this pin applied.",
+    }
+
+
+def unpin_department(session: StudySession, department: str) -> dict[str, Any]:
+    removed = session.floor_pins.pop(department, None)
+    if removed is None:
+        matches = [d for d in session.floor_pins if department.lower() in d.lower()]
+        if len(matches) == 1:
+            session.floor_pins.pop(matches[0])
+        else:
+            return {"ok": False, "error": f"No pin for: {department}"}
+    session.save()
+    return {"ok": True, "floor_pins": session.floor_pins}
+
+
 def pair_masses(
     session: StudySession,
     mass_ids: list[str],
@@ -292,6 +343,17 @@ def solve_dimensions(session: StudySession) -> dict[str, Any]:
                 "actual_gsf": round(m.actual_gsf),
                 "gsf_fit_pass": m.fit_pass,
                 "pairing_id": m.pairing_id,
+                "floors": [
+                    {
+                        "level": f.level,
+                        "usable_sf": round(f.usable_area_sf),
+                        "utilization_pct": round(f.utilization * 100),
+                        "programs": {
+                            a.department: round(a.gsf) for a in f.allocations
+                        },
+                    }
+                    for f in m.floors
+                ],
             }
             for m in result.masses
         ],
@@ -456,6 +518,37 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "pin_department_to_floor",
+            "description": (
+                "Force a department onto a specific level when allocating program "
+                "to floors (0 = ground). Use when the user says something like "
+                "'put the media center on the ground floor'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "department": {"type": "string"},
+                    "level": {"type": "integer"},
+                },
+                "required": ["department", "level"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "unpin_department",
+            "description": "Remove a department's floor pin so it allocates freely.",
+            "parameters": {
+                "type": "object",
+                "properties": {"department": {"type": "string"}},
+                "required": ["department"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "resize_mass",
             "description": (
                 "Change a mass width and/or story count, then re-solve and re-validate "
@@ -503,6 +596,12 @@ def execute_tool(session: StudySession, name: str, arguments: dict[str, Any]) ->
         )
     elif name == "clear_pairings":
         result = clear_pairings(session)
+    elif name == "pin_department_to_floor":
+        result = pin_department_to_floor(
+            session, str(arguments["department"]), int(arguments["level"])
+        )
+    elif name == "unpin_department":
+        result = unpin_department(session, str(arguments["department"]))
     elif name == "resize_mass":
         width = arguments.get("width_ft")
         stories = arguments.get("story_count")

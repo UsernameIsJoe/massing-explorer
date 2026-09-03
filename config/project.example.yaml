@@ -43,6 +43,30 @@ anchor_rooms:
     min_length_ft: 60
     double_height: false
 
+# Floor allocation bias — keyword match against department names.
+# Departments matching `ground` claim lower levels first; `upper` are pushed
+# up. Departments owning a double-height room are forced to grade regardless.
+# Individual departments can be pinned to a level in chat.
+floor_preferences:
+  ground:
+    - dining
+    - food
+    - kitchen
+    - health
+    - physical
+    - media
+    - custodial
+    - maintenance
+    - administration
+    - guidance
+    - medical
+  upper:
+    - academic
+    - special education
+    - art
+    - music
+    - science
+
 # Department → default mass grouping hints (optional; LLM may override via chat)
 default_groupings: []
 
