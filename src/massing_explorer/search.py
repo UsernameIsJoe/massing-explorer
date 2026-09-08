@@ -36,10 +36,11 @@ from .solver import (
     _mass_target_gsf,
     _match_anchor_rooms,
     _void_area_for_mass,
-    plate_area,
     rectangle_fits_room,
+    resolve_step_weights,
     solve_massing_study,
     solve_paired_masses,
+    solve_stepped_plates,
 )
 from .session import StudySession
 
@@ -115,11 +116,12 @@ class MassOption:
     mass_name: str
     stories: int
     width_ft: float
-    length_ft: float
-    plate_sf: float
+    length_ft: float  # ground floor: this is the frontage the mass occupies
+    plate_sf: float  # ground floor plate
     target_gsf: float
     daylight_sensitive: bool = False
     daylight_max_width_ft: float = DEFAULT_DAYLIGHT_MAX_WIDTH_FT
+    stepped: bool = False
 
     @property
     def aspect(self) -> float:
@@ -146,6 +148,7 @@ class MassOption:
             "length_ft": round(self.length_ft, 1),
             "plate_sf": round(self.plate_sf),
             "target_gsf": round(self.target_gsf),
+            "stepped": self.stepped,
         }
 
 
@@ -248,38 +251,80 @@ def _mass_options(
     sensitive = _is_daylight_sensitive(mass_def.departments, dl_keywords)
     options: list[MassOption] = []
 
-    for stories in range(1, envelope.max_stories + 1):
-        plate = plate_area(target, stories, void_area)
-        if plate <= 0:
+    # Explicit step weights describe named levels, so they pin the height. A
+    # taper is a shape rather than a set of floors, so the height stays free.
+    explicit_steps = session.floor_steps.get(mass_def.id)
+    story_range = (
+        [len(explicit_steps)]
+        if explicit_steps
+        else list(range(1, envelope.max_stories + 1))
+    )
+
+    for stories in story_range:
+        weights = resolve_step_weights(session, mass_def.id, stories)
+        plates = solve_stepped_plates(target, weights, void_area)
+        if not plates or plates[0] <= 0:
             continue
+        ground = plates[0]
+        longest = max(plates)  # a cantilever can put the worst floor upstairs
 
         lo = envelope.min_width_ft
         if envelope.max_building_length_ft:
-            lo = max(lo, plate / envelope.max_building_length_ft)
+            lo = max(lo, longest / envelope.max_building_length_ft)
         # Without a stated width cap, stop at a square plate; wider than that is
         # the same rectangle rotated.
-        hi = envelope.max_building_width_ft or max(lo, math.sqrt(plate))
+        hi = envelope.max_building_width_ft or max(lo, math.sqrt(ground))
 
         for width in _width_grid(lo, hi):
-            length = plate / width
             if (
                 envelope.max_building_length_ft
-                and length > envelope.max_building_length_ft + LIMIT_EPS
+                and longest / width > envelope.max_building_length_ft + LIMIT_EPS
             ):
                 continue
-            if not _anchors_fit(width, length, anchors):
+            # Anchor rooms sit on the ground floor
+            if not _anchors_fit(width, ground / width, anchors):
                 continue
+            # Prefer widths that can leave a usable L around a double-height void
+            if void_area > 0 and stories >= 2:
+                from .layout import (
+                    clear_dims_for_departments,
+                    min_arm_depth_ft,
+                    plate_can_host_void_layout,
+                )
+
+                voids = _void_area_for_mass(session, mass_def.departments, config)
+                void_plate = plates[1] if len(plates) > 1 else ground
+                clears = []
+                reqs = clear_dims_for_departments(list(mass_def.departments), config)
+                void_rooms = {v.room.lower() for v in voids}
+                for req in reqs.values():
+                    room = (req.room or "").lower()
+                    if room and any(room in v or v in room for v in void_rooms):
+                        continue
+                    anchors_cfg = (config.get("anchor_rooms") or {}).get(req.room) or {}
+                    if anchors_cfg.get("double_height"):
+                        continue
+                    clears.append(req)
+                if not plate_can_host_void_layout(
+                    width,
+                    void_plate / width,
+                    voids,
+                    clears,
+                    min_arm_depth_ft(config),
+                ):
+                    continue
             options.append(
                 MassOption(
                     mass_id=mass_def.id,
                     mass_name=mass_def.name,
                     stories=stories,
                     width_ft=width,
-                    length_ft=length,
-                    plate_sf=plate,
+                    length_ft=ground / width,
+                    plate_sf=ground,
                     target_gsf=target,
                     daylight_sensitive=sensitive,
                     daylight_max_width_ft=dl_width,
+                    stepped=max(weights) - min(weights) > 1e-9,
                 )
             )
     return options
@@ -304,11 +349,23 @@ def _pairing_options(
 
     def walk(index: int, chosen: list[int]) -> None:
         if index == len(members):
-            plates = [
-                plate_area(contexts[i][0], chosen[i], contexts[i][1])
-                for i in range(len(members))
-            ]
-            width, lengths = solve_paired_masses(plates, total_length_ft)
+            # The shared width divides the ground-floor plates, since the
+            # frontage the pair occupies is set by its footprint on the site.
+            ground: list[float] = []
+            longest: list[float] = []
+            weights_by_member: list[list[float]] = []
+            for i, member in enumerate(members):
+                weights = resolve_step_weights(session, member.id, chosen[i])
+                plates = solve_stepped_plates(
+                    contexts[i][0], weights, contexts[i][1]
+                )
+                if not plates:
+                    return
+                ground.append(plates[0])
+                longest.append(max(plates))
+                weights_by_member.append(weights)
+
+            width, lengths = solve_paired_masses(ground, total_length_ft)
             if width < envelope.min_width_ft - LIMIT_EPS:
                 return
             if (
@@ -320,11 +377,13 @@ def _pairing_options(
             for i, member in enumerate(members):
                 if (
                     envelope.max_building_length_ft
-                    and lengths[i] > envelope.max_building_length_ft + LIMIT_EPS
+                    and longest[i] / width
+                    > envelope.max_building_length_ft + LIMIT_EPS
                 ):
                     return
                 if not _anchors_fit(width, lengths[i], contexts[i][2]):
                     return
+                member_weights = weights_by_member[i]
                 group.append(
                     MassOption(
                         mass_id=member.id,
@@ -332,18 +391,24 @@ def _pairing_options(
                         stories=chosen[i],
                         width_ft=width,
                         length_ft=lengths[i],
-                        plate_sf=plates[i],
+                        plate_sf=ground[i],
                         target_gsf=contexts[i][0],
                         daylight_sensitive=_is_daylight_sensitive(
                             member.departments, dl_keywords
                         ),
                         daylight_max_width_ft=dl_width,
+                        stepped=max(member_weights) - min(member_weights) > 1e-9,
                     )
                 )
             results.append(group)
             return
 
-        for stories in range(1, envelope.max_stories + 1):
+        member = members[index]
+        explicit = session.floor_steps.get(member.id)
+        story_range = (
+            [len(explicit)] if explicit else range(1, envelope.max_stories + 1)
+        )
+        for stories in story_range:
             walk(index + 1, [*chosen, stories])
 
     walk(0, [])

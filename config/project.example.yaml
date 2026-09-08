@@ -4,6 +4,16 @@
 units: feet
 area_unit: sf
 
+# Floor-to-floor height used only when extruding Rhino solids. Not a solved dimension.
+story_height_ft: 14
+
+# Classroom bar, used when the user did not state a width. A site or pairing
+# length is a cap, not a target. double = classrooms both sides of a corridor.
+bar:
+  loading: double
+  classroom_depth_ft: 30
+  corridor_ft: 8
+
 # GSF calculation: Target GSF = Program Area × area_adjustment × grossing_factor
 grossing:
   area_adjustment: 1.15
@@ -55,6 +65,12 @@ daylight:
     - art
     - music
     - science
+
+# In-mass floor layout — leftover around a void may be L-shaped, but only when
+# every arm is at least this deep (ft). Clear dims from anchor_rooms must still
+# fit in a real rectangle piece of that footprint; leftover SF alone is not enough.
+layout:
+  min_arm_depth_ft: 20
 
 # Floor allocation bias — keyword match against department names.
 # Departments matching `ground` claim lower levels first; `upper` are pushed

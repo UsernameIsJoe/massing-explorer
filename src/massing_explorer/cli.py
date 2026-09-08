@@ -83,7 +83,7 @@ def cmd_solve(args: argparse.Namespace) -> int:
     from .report import format_massing_report
     from .session import StudySession, slugify_study_id
     from .solver import solve_massing_study
-    from .tools import pair_masses, set_grouping
+    from .tools import pair_masses, set_floor_steps, set_floor_taper, set_grouping
     from .visual import render_massing_visual, render_site_plan
 
     study_id = slugify_study_id(args.study)
@@ -164,6 +164,31 @@ def cmd_solve(args: argparse.Namespace) -> int:
     if args.max_total_length is not None:
         session.constraints["max_total_length_ft"] = args.max_total_length
 
+    for spec in args.taper or []:
+        mass_id, _, ratio = spec.partition("=")
+        if not ratio:
+            print(f"--taper needs mass_id=ratio, got '{spec}'")
+            return 1
+        out = set_floor_taper(session, mass_id.strip(), float(ratio))
+        if not out.get("ok"):
+            print(f"Taper error: {out.get('error')}")
+            return 1
+        print(f"Tapered {mass_id.strip()} at {float(ratio):g} per level")
+
+    for spec in args.steps or []:
+        mass_id, _, weights = spec.partition("=")
+        if not weights:
+            print(f"--steps needs mass_id=w1,w2,..., got '{spec}'")
+            return 1
+        values = [float(w) for w in weights.split(",") if w.strip()]
+        out = set_floor_steps(session, mass_id.strip(), values)
+        if not out.get("ok"):
+            print(f"Steps error: {out.get('error')}")
+            return 1
+        if out.get("note"):
+            print(f"Note: {out['note']}")
+        print(f"Stepped {mass_id.strip()} at weights {values}")
+
     if args.pair:
         mass_ids = [m.strip() for m in args.pair.split(",") if m.strip()]
         pair_result = pair_masses(session, mass_ids, args.pair_length)
@@ -204,6 +229,9 @@ def cmd_solve(args: argparse.Namespace) -> int:
             print(f"Site plan: {site_path}")
         except ImportError as e:
             print(f"Visual skipped: {e}")
+
+    if getattr(args, "rhino", None):
+        _write_rhino(result, args.rhino, session.config_path or args.config)
 
     return 0 if all(v.passed or v.check.startswith("anchor") for v in result.validation if "gsf_fit" in v.check) else 0
 
@@ -298,6 +326,116 @@ def cmd_search(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_run(args: argparse.Namespace) -> int:
+    """Group from a brief, search if site limits are present, print the report."""
+    from .brief import apply_brief
+    from .report import format_massing_report
+    from .session import StudySession, slugify_study_id
+    from .solver import solve_massing_study
+    from .visual import render_massing_visual, render_site_plan
+
+    study_id = slugify_study_id(args.study)
+    if args.program:
+        program = load_program_file(args.program, config_path=args.config)
+        session = StudySession(
+            study_id=study_id, program=program, config_path=args.config or ""
+        )
+        session.save()
+    else:
+        try:
+            session = StudySession.load(study_id)
+        except FileNotFoundError as e:
+            print(f"Error: {e}")
+            print("Provide --program or an existing --study")
+            return 1
+
+    if args.config:
+        session.config_path = args.config
+
+    out = apply_brief(session, args.brief)
+    parsed = out.get("parsed") or {}
+    print("PARSED BRIEF")
+    for note in parsed.get("notes") or []:
+        print(f"  {note}")
+    for a, b in parsed.get("keep_together") or []:
+        print(f"  stay together: {a} + {b}")
+    if parsed.get("unmatched"):
+        print(f"  unmatched phrases: {parsed['unmatched']}")
+    print()
+    print("GROUPING (engine)")
+    for mass in out.get("grouping") or []:
+        print(f"  [{mass['id']}] {mass['name']}: {', '.join(mass['departments'])}")
+        if mass.get("notes"):
+            print(f"      {mass['notes']}")
+    print()
+
+    search = out.get("search") or {}
+    if search.get("schemes"):
+        print(f"{search['found']} verified scheme(s):")
+        for scheme in search["schemes"]:
+            print(f"  [{scheme['index']}] {scheme['summary']}")
+        print()
+
+    solved = out.get("solved")
+    if solved and solved.get("summary"):
+        print(solved["summary"])
+    else:
+        result = solve_massing_study(session, config_path=session.config_path or None)
+        print(format_massing_report(result))
+
+    if args.visual:
+        result = solve_massing_study(session, config_path=session.config_path or None)
+        path = Path(args.visual)
+        try:
+            render_massing_visual(result, path)
+            site = path.with_name(f"{path.stem}_site{path.suffix}")
+            render_site_plan(
+                result,
+                site,
+                session.constraints.get("max_total_length_ft"),
+            )
+            print(f"Visual: {path}\nSite plan: {site}")
+        except ImportError as e:
+            print(f"Visual skipped: {e}")
+
+    if getattr(args, "rhino", None):
+        result = solve_massing_study(session, config_path=session.config_path or None)
+        _write_rhino(result, args.rhino, session.config_path or args.config)
+    return 0 if (out.get("solved") or {}).get("all_checks_passed", True) else 1
+
+
+def _write_rhino(result, path: str, config_path: str | None) -> None:
+    from .config import load_project_config
+    from .rhino_export import export_rhino, story_height_from_config
+
+    try:
+        config = load_project_config(config_path) if config_path else {}
+    except FileNotFoundError:
+        config = {}
+    written = export_rhino(result, path, story_height_ft=story_height_from_config(config))
+    print(f"Rhino: {written}")
+
+
+def cmd_export_rhino(args: argparse.Namespace) -> int:
+    from .session import StudySession, slugify_study_id
+    from .solver import solve_massing_study
+
+    study_id = slugify_study_id(args.study)
+    try:
+        session = StudySession.load(study_id)
+    except FileNotFoundError as e:
+        print(f"Error: {e}")
+        return 1
+    if args.config:
+        session.config_path = args.config
+    if not session.masses:
+        print("No masses defined. Group the study before exporting.")
+        return 1
+    result = solve_massing_study(session, config_path=session.config_path or None)
+    _write_rhino(result, args.output, session.config_path or args.config)
+    return 0
+
+
 def cmd_config_check(args: argparse.Namespace) -> int:
     config = load_project_config(args.config)
     print(json.dumps(config, indent=2))
@@ -369,6 +507,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Total combined length (ft) for --pair masses",
     )
     solve.add_argument(
+        "--taper",
+        action="append",
+        metavar="MASS=RATIO",
+        help=(
+            "Step a mass back as it rises, e.g. academic=0.8 (each level 80%% of "
+            "the one below). Repeatable."
+        ),
+    )
+    solve.add_argument(
+        "--steps",
+        action="append",
+        metavar="MASS=W1,W2,...",
+        help=(
+            "Explicit relative plate weights per level, e.g. academic=1,0.8,0.5. "
+            "Repeatable."
+        ),
+    )
+    solve.add_argument(
         "--max-length", type=float, help="Max length (ft) allowed per mass"
     )
     solve.add_argument(
@@ -382,6 +538,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write plan/elevation PNG (default: output/massing_checkpoint.png)",
     )
     solve.add_argument("--output-dir", "-o", help="Directory for report/json (default: studies/<id>)")
+    solve.add_argument(
+        "--rhino",
+        help="Write checked floor plates as a Rhino .3dm (feet)",
+    )
     solve.set_defaults(func=cmd_solve)
 
     search = sub.add_parser(
@@ -410,6 +570,43 @@ def build_parser() -> argparse.ArgumentParser:
     )
     search.add_argument("--visual", help="PNG path (only with --apply)")
     search.set_defaults(func=cmd_search)
+
+    run = sub.add_parser(
+        "run",
+        help="Parse a brief, group departments, and search/solve in one step",
+    )
+    run.add_argument("--study", "-s", required=True, help="Study ID")
+    run.add_argument("--program", "-p", help="Program file (new study)")
+    run.add_argument("--config", "-c", help="Project config YAML")
+    run.add_argument(
+        "--brief",
+        "-b",
+        required=True,
+        help=(
+            'User brief, e.g. "custodial and dining should stay together, '
+            'site length is 300, width is 100, max story is 4"'
+        ),
+    )
+    run.add_argument("--visual", help="PNG path")
+    run.add_argument(
+        "--rhino",
+        help="Write checked floor plates as a Rhino .3dm (feet)",
+    )
+    run.set_defaults(func=cmd_run)
+
+    export = sub.add_parser(
+        "export-rhino",
+        help="Re-solve a saved study and write Rhino solids",
+    )
+    export.add_argument("--study", "-s", required=True, help="Study ID")
+    export.add_argument("--config", "-c", help="Project config YAML")
+    export.add_argument(
+        "--output",
+        "-o",
+        default="output/massing.3dm",
+        help="Rhino file path (default: output/massing.3dm)",
+    )
+    export.set_defaults(func=cmd_export_rhino)
 
     return parser
 

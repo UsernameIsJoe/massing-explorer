@@ -49,11 +49,108 @@ def _print_assistant(content: str) -> None:
     print(f"\nAssistant:\n{content}\n")
 
 
+def _commit_brief_with_reading(
+    session: StudySession,
+    client: OllamaClient,
+    user_text: str,
+    parsed: Any,
+    reading: Any = None,
+) -> dict[str, Any]:
+    """
+    Model chooses levers, engine commits and checks, model picks a scheme
+    or one repair. No new geometry tools.
+    """
+    from .brief import apply_parsed_brief
+    from .reading import request_reading, request_repair, request_scheme_index
+    from .tools import apply_scheme, resize_mass
+
+    if reading is None:
+        reading = request_reading(
+            client, user_text, session.department_names(), parsed.to_dict()
+        )
+    engine = apply_parsed_brief(session, parsed, reading=reading)
+    engine["scheme_pick"] = None
+    engine["repair"] = None
+
+    schemes = (engine.get("search") or {}).get("schemes") or []
+    index = request_scheme_index(client, user_text, schemes, reading)
+    if index not in (None, 0):
+        solved = apply_scheme(session, index)
+        engine["solved"] = solved
+        engine["scheme_pick"] = {"index": index}
+    elif schemes:
+        engine["scheme_pick"] = {"index": 0}
+
+    solved = engine.get("solved") or {}
+    failed = list(solved.get("failed_checks") or [])
+    if failed:
+        masses = [
+            {"id": m.id, "name": m.name, "stories": m.story_count}
+            for m in session.masses
+        ]
+        repair = request_repair(client, failed, masses)
+        if repair and repair.get("action") == "add_story":
+            mass = next(m for m in session.masses if m.id == repair["mass_id"])
+            repaired = resize_mass(
+                session, mass.id, story_count=mass.story_count + 1
+            )
+            engine["repair"] = {
+                "action": "add_story",
+                "mass_id": mass.id,
+                "reason": repair.get("reason"),
+                "result_ok": repaired.get("ok"),
+                "all_checks_passed": repaired.get("all_checks_passed"),
+                "failed_checks": repaired.get("failed_checks"),
+            }
+            if repaired.get("ok"):
+                engine["solved"] = repaired
+    return engine
+
+
 def run_chat_turn(session: StudySession, client: OllamaClient, user_text: str) -> str:
     """Process one user message; may involve multiple tool-call rounds."""
     session.messages.append(ChatMessage(role="user", content=user_text))
 
+    # Grouping and site limits come from the engine, not the LLM. Run the
+    # brief through the pipeline first so a message like "custodial and dining
+    # should stay together, site length is 300" is already applied.
+    from .brief import apply_brief, parse_brief, should_apply_brief
+
+    parsed = parse_brief(user_text, session.department_names())
+    engine_note = ""
+    from .reading import request_reading
+
+    reading = request_reading(
+        client, user_text, session.department_names(), parsed.to_dict()
+    )
+    if should_apply_brief(session, parsed) or not reading.empty:
+        engine = _commit_brief_with_reading(
+            session, client, user_text, parsed, reading=reading
+        )
+        compact = {
+            "parsed": engine.get("parsed"),
+            "reading": engine.get("reading"),
+            "reading_notes": engine.get("reading_notes"),
+            "scheme_pick": engine.get("scheme_pick"),
+            "repair": engine.get("repair"),
+            "grouping": engine.get("grouping"),
+            "search_found": (engine.get("search") or {}).get("found"),
+            "schemes": (engine.get("search") or {}).get("schemes"),
+            "all_checks_passed": (engine.get("solved") or {}).get("all_checks_passed"),
+            "failed_checks": (engine.get("solved") or {}).get("failed_checks"),
+            "masses": (engine.get("solved") or {}).get("masses"),
+            "instruction": engine.get("instruction"),
+        }
+        engine_note = (
+            "The engine parsed the numbers. Your reading choices were applied "
+            "through existing tools and checked. Report the reading, the scheme "
+            "kept, and every failed check. Do not invent dimensions or regroup.\n"
+            + json.dumps(compact, indent=2)[:6000]
+        )
+
     messages = _build_ollama_messages(session)
+    if engine_note:
+        messages.append({"role": "system", "content": engine_note})
     final_content = ""
 
     for _ in range(MAX_TOOL_ROUNDS):

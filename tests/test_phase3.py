@@ -65,7 +65,19 @@ class TestPhase3(unittest.TestCase):
         self.assertAlmostEqual(floors[1].usable_area_sf, 7000, delta=1)
         self.assertAlmostEqual(actual, 20000, delta=1)
 
-    def test_gsf_tolerance(self) -> None:
+    def test_higher_floors_do_not_close_over_the_gym_void(self) -> None:
+        voids = [VoidRegion("Gymnasium", 60, 100, 6000)]
+        floors, actual = solve_mass_footprint(36000, 3, 80, voids=voids)
+        self.assertGreaterEqual(len(floors), 3)
+        self.assertFalse(floors[0].voids)
+        for floor in floors[1:]:
+            self.assertTrue(floor.voids, f"L{floor.level} closed over the gym")
+            self.assertLessEqual(floor.length_ft, floors[0].length_ft + 0.1)
+        # No higher plate is a full lid longer than the voided floor under it.
+        voided = [f for f in floors if f.voids]
+        for lower, upper in zip(voided, voided[1:]):
+            self.assertLessEqual(upper.length_ft, lower.length_ft + 0.1)
+        self.assertAlmostEqual(actual, 36000, delta=1)
         self.assertTrue(gsf_fit_pass(9750, 10000, 0.03))  # 2.5% under
         self.assertFalse(gsf_fit_pass(9500, 10000, 0.03))  # 5% under
 

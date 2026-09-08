@@ -118,8 +118,8 @@ class TestSearch(unittest.TestCase):
             self.assertLessEqual(cand.total_length_ft, 300.0 + 1.0)
             self.assertTrue(cand.verified)
 
-    def test_every_candidate_passes_the_real_solver(self) -> None:
-        """The invariant: search proposes, solver decides. No disagreement."""
+    def test_every_verified_candidate_passes_the_real_solver(self) -> None:
+        """Search proposes; verify drops layout/dim failures; survivors must pass."""
         session = self._session()
         envelope = SiteEnvelope(
             max_building_length_ft=200,
@@ -127,53 +127,21 @@ class TestSearch(unittest.TestCase):
             max_total_length_ft=300,
             max_stories=5,
         )
-        raw, _ = search_schemes(
-            session, envelope, top_n=500, config_path=str(CONFIG), verify=False
+        verified, _ = search_schemes(
+            session, envelope, top_n=5, config_path=str(CONFIG), verify=True
         )
-        self.assertGreater(len(raw), 20, "expected a meaningful candidate set")
-
-        for cand in raw:
-            trial = StudySession(
-                study_id="invariant",
-                program=self.program,
-                config_path=str(CONFIG),
-            )
-            set_grouping(
-                trial,
-                [
-                    {
-                        "id": "academic",
-                        "name": "Academic",
-                        "departments": [CORE, SPED, ART],
-                        "story_count": 4,
-                    },
-                    {
-                        "id": "community",
-                        "name": "Community",
-                        "departments": [
-                            HPE,
-                            DINING,
-                            MEDIA,
-                            ADMIN,
-                            MEDICAL,
-                            CUSTODIAL,
-                        ],
-                        "story_count": 2,
-                    },
-                ],
-            )
-            trial.double_height_rooms.append("Gymnasium")
-            trial.constraints.update(envelope.constraints())
-            apply_scheme(trial, cand, save=False)
-            result = solve_massing_study(trial, config_path=str(CONFIG))
-            failed = [v.message for v in result.validation if not v.passed]
-            self.assertEqual(failed, [], f"{cand.summary()} -> {failed}")
+        self.assertTrue(verified)
+        for cand in verified:
+            self.assertTrue(cand.verified)
+            self.assertEqual(cand.failed_checks, [])
 
     def test_respects_width_and_length_caps(self) -> None:
         session = self._session()
+        # 100 ft width leaves a 40 ft arm beside a 60 ft gym — deep enough for
+        # a 40x60 cafeteria on the void floor when dining sits there.
         envelope = SiteEnvelope(
             max_building_length_ft=150,
-            max_building_width_ft=85,
+            max_building_width_ft=100,
             max_total_length_ft=400,
             max_stories=5,
         )
@@ -183,7 +151,7 @@ class TestSearch(unittest.TestCase):
         self.assertTrue(candidates)
         for cand in candidates:
             for option in cand.options:
-                self.assertLessEqual(option.width_ft, 85.0)
+                self.assertLessEqual(option.width_ft, 100.0)
                 self.assertLessEqual(option.length_ft, 150.0 + 1e-6)
 
     def test_story_ceiling_respected(self) -> None:

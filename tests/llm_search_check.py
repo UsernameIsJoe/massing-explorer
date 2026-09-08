@@ -45,6 +45,16 @@ CASES = [
         "then tell me if that breaks my 300 ft frontage.",
         "solve_dimensions",
     ),
+    (
+        "I want the academic bar to step back as it rises, like a terrace, so "
+        "each floor is a bit smaller than the one under it. Then solve it.",
+        "set_floor_taper",
+    ),
+    (
+        "Make the top floor of the academic bar exactly half the footprint of "
+        "the ground floor, with the middle floor in between. Then solve.",
+        "set_floor_steps",
+    ),
 ]
 
 

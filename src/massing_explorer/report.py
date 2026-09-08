@@ -55,9 +55,15 @@ def format_massing_report(result: MassingStudyResult) -> str:
             if fl.allocations:
                 for a in fl.allocations:
                     flag = " (split)" if a.split else ""
+                    if a.layout_ok and a.shape in {"L", "U"}:
+                        flag += f" ({a.shape}-shaped)"
+                    elif not a.layout_ok:
+                        flag += " [LAYOUT FAIL]"
                     lines.append(
                         f"         {a.gsf:>9,.0f} SF  {a.department}{flag}"
                     )
+                    if not a.layout_ok and a.layout_issue:
+                        lines.append(f"                   ! {a.layout_issue}")
                 lines.append(
                     f"         {'-' * 9}  {fl.utilization * 100:.0f}% of usable area "
                     f"({fl.allocated_gsf:,.0f} SF allocated)"

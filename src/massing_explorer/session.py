@@ -26,6 +26,10 @@ class StudySession:
     double_height_rooms: list[str] = field(default_factory=list)
     pairings: list[MassPairing] = field(default_factory=list)
     floor_pins: dict[str, int] = field(default_factory=dict)
+    # Stepped massing, per mass id: explicit per-level plate weights, or a
+    # taper ratio applied level over level. Explicit weights win.
+    floor_steps: dict[str, list[float]] = field(default_factory=dict)
+    floor_tapers: dict[str, float] = field(default_factory=dict)
     last_massing: dict[str, Any] | None = None
     last_search: list[dict[str, Any]] = field(default_factory=list)
 
@@ -52,6 +56,8 @@ class StudySession:
             "double_height_rooms": self.double_height_rooms,
             "pairings": [p.to_dict() for p in self.pairings],
             "floor_pins": self.floor_pins,
+            "floor_steps": self.floor_steps,
+            "floor_tapers": self.floor_tapers,
             "last_massing": self.last_massing,
             "last_search": self.last_search,
             "messages": [m.to_dict() for m in self.messages],
@@ -103,6 +109,13 @@ class StudySession:
             double_height_rooms=data.get("double_height_rooms", []),
             pairings=[MassPairing.from_dict(p) for p in data.get("pairings", [])],
             floor_pins={k: int(v) for k, v in (data.get("floor_pins") or {}).items()},
+            floor_steps={
+                k: [float(w) for w in v]
+                for k, v in (data.get("floor_steps") or {}).items()
+            },
+            floor_tapers={
+                k: float(v) for k, v in (data.get("floor_tapers") or {}).items()
+            },
             last_massing=data.get("last_massing"),
             last_search=data.get("last_search") or [],
             messages=[ChatMessage.from_dict(m) for m in data.get("messages", [])],

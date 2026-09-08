@@ -34,11 +34,17 @@ class MassGrouping:
 
 @dataclass
 class MassPairing:
-    """Two or more masses that share a width and fit a combined length."""
+    """Two or more masses that sit together along a frontage.
+
+    total_length_ft is the length they must share when length_is_cap is false.
+    When length_is_cap is true it is only a maximum — the bar is sized for
+    function and must not stretch to fill the cap.
+    """
 
     id: str
     mass_ids: list[str] = field(default_factory=list)
     total_length_ft: float = 0.0
+    length_is_cap: bool = False
     notes: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -46,6 +52,7 @@ class MassPairing:
             "id": self.id,
             "mass_ids": self.mass_ids,
             "total_length_ft": self.total_length_ft,
+            "length_is_cap": self.length_is_cap,
             "notes": self.notes,
         }
 
@@ -55,6 +62,7 @@ class MassPairing:
             id=data["id"],
             mass_ids=list(data.get("mass_ids", [])),
             total_length_ft=float(data.get("total_length_ft", 0.0)),
+            length_is_cap=bool(data.get("length_is_cap", False)),
             notes=str(data.get("notes", "")),
         )
 

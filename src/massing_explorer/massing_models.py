@@ -10,6 +10,8 @@ class VoidRegion:
     width_ft: float
     length_ft: float
     area_sf: float
+    x_ft: float = 0.0
+    y_ft: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -17,6 +19,30 @@ class VoidRegion:
             "width_ft": round(self.width_ft, 2),
             "length_ft": round(self.length_ft, 2),
             "area_sf": round(self.area_sf, 1),
+            "x_ft": round(self.x_ft, 2),
+            "y_ft": round(self.y_ft, 2),
+        }
+
+
+@dataclass
+class FootprintRect:
+    """One axis-aligned piece of a program on a floor. An L is two of these."""
+
+    x_ft: float
+    y_ft: float
+    width_ft: float
+    length_ft: float
+
+    @property
+    def area_sf(self) -> float:
+        return self.width_ft * self.length_ft
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "x_ft": round(self.x_ft, 2),
+            "y_ft": round(self.y_ft, 2),
+            "width_ft": round(self.width_ft, 2),
+            "length_ft": round(self.length_ft, 2),
         }
 
 
@@ -28,6 +54,11 @@ class ProgramAllocation:
     gsf: float
     rooms: list[str] = field(default_factory=list)
     split: bool = False
+    footprints: list[FootprintRect] = field(default_factory=list)
+    shape: str = "rectangle"
+    layout_ok: bool = True
+    layout_issue: str = ""
+    double_height: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -35,6 +66,11 @@ class ProgramAllocation:
             "gsf": round(self.gsf, 1),
             "rooms": self.rooms,
             "split": self.split,
+            "shape": self.shape,
+            "layout_ok": self.layout_ok,
+            "layout_issue": self.layout_issue,
+            "double_height": self.double_height,
+            "footprints": [p.to_dict() for p in self.footprints],
         }
 
 
@@ -148,6 +184,22 @@ class SolvedMass:
     fixed_dim_ft: float = 0.0
     pairing_id: str = ""
 
+    @property
+    def is_stepped(self) -> bool:
+        """True when plates differ between levels (terraced / set-back mass)."""
+        if len(self.floors) < 2:
+            return False
+        areas = [f.area_sf for f in self.floors]
+        return max(areas) - min(areas) > 1.0
+
+    @property
+    def step_ratios(self) -> list[float]:
+        """Each level's plate as a fraction of the ground floor."""
+        if not self.floors or self.floors[0].area_sf <= 0:
+            return []
+        base = self.floors[0].area_sf
+        return [f.area_sf / base for f in self.floors]
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
@@ -161,6 +213,8 @@ class SolvedMass:
             "fixed_side": self.fixed_side,
             "fixed_dim_ft": round(self.fixed_dim_ft, 2),
             "pairing_id": self.pairing_id,
+            "is_stepped": self.is_stepped,
+            "step_ratios": [round(r, 3) for r in self.step_ratios],
         }
 
 

@@ -75,52 +75,118 @@ def render_massing_visual(
         ground = mass.floors[0]
         w, l = ground.width_ft, ground.length_ft
 
-        # Plan
+        # Plan of the most informative floor: a voided level if one exists
+        # (that is where an L-shaped leftover appears), otherwise ground.
+        plan_floor = next((f for f in mass.floors if f.voids), ground)
+        pw, pl = plan_floor.width_ft, plan_floor.length_ft
+        dept_colors = _department_colors(mass)
         ax_plan.add_patch(
             FancyBboxPatch(
                 (0, 0),
-                w,
-                l,
+                pw,
+                pl,
                 boxstyle="square,pad=0",
-                facecolor=color,
+                facecolor="#f4f4f4",
                 edgecolor="#222",
-                alpha=0.55,
                 linewidth=1.5,
             )
         )
-        # Void outline on plan if present on floor 1
-        void_floor = next((f for f in mass.floors if f.voids), None)
-        if void_floor:
-            for v in void_floor.voids:
-                vw = min(v.width_ft, w)
-                vl = min(v.length_ft, l)
+        drawn = False
+        for alloc in plan_floor.allocations:
+            for piece in alloc.footprints:
                 ax_plan.add_patch(
                     Rectangle(
-                        (2, 2),
-                        vw,
-                        vl,
+                        (piece.x_ft, piece.y_ft),
+                        piece.width_ft,
+                        piece.length_ft,
+                        facecolor=dept_colors.get(alloc.department, color),
+                        edgecolor="#222",
+                        alpha=0.7,
+                        linewidth=0.8,
+                    )
+                )
+                if piece.area_sf > plan_floor.area_sf * 0.08:
+                    ax_plan.text(
+                        piece.x_ft + piece.width_ft / 2,
+                        piece.y_ft + piece.length_ft / 2,
+                        _short(alloc.department, 14),
+                        ha="center",
+                        va="center",
+                        fontsize=7,
+                    )
+                drawn = True
+        if not drawn:
+            ax_plan.add_patch(
+                FancyBboxPatch(
+                    (0, 0),
+                    pw,
+                    pl,
+                    boxstyle="square,pad=0",
+                    facecolor=color,
+                    edgecolor="#222",
+                    alpha=0.55,
+                    linewidth=1.5,
+                )
+            )
+        for v in plan_floor.voids:
+            ax_plan.add_patch(
+                Rectangle(
+                    (v.x_ft, v.y_ft),
+                    v.width_ft,
+                    v.length_ft,
+                    facecolor="none",
+                    linestyle="--",
+                    edgecolor="#111",
+                    linewidth=1.2,
+                    hatch="///",
+                )
+            )
+            ax_plan.text(
+                v.x_ft + v.width_ft / 2,
+                v.y_ft + v.length_ft / 2,
+                f"void\n{v.room}",
+                ha="center",
+                va="center",
+                fontsize=7,
+            )
+
+        # Stepped mass: outline every upper floor over the ground fill so the
+        # set-back reads in plan. Width is constant, so floors nest along length.
+        if mass.is_stepped:
+            for fl in mass.floors[1:]:
+                ax_plan.add_patch(
+                    Rectangle(
+                        (0, 0),
+                        fl.width_ft,
+                        fl.length_ft,
                         fill=False,
-                        linestyle="--",
-                        edgecolor="#111",
-                        linewidth=1.2,
-                        label="void",
+                        edgecolor="#222",
+                        linewidth=1.0,
+                        linestyle=(0, (4, 2)),
                     )
                 )
                 ax_plan.text(
-                    2 + vw / 2,
-                    2 + vl / 2,
-                    "void",
-                    ha="center",
-                    va="center",
-                    fontsize=8,
+                    fl.width_ft * 0.97,
+                    fl.length_ft,
+                    f"L{fl.level}",
+                    ha="right",
+                    va="bottom",
+                    fontsize=6.5,
+                    color="#333",
                 )
 
         ax_plan.set_xlim(-5, max(w, 1) + 10)
         ax_plan.set_ylim(-5, max(l, 1) + 10)
         ax_plan.set_aspect("equal")
         fit = "PASS" if mass.fit_pass else "FAIL"
+        if any(a.shape in {"L", "U"} for a in plan_floor.allocations):
+            shape = f"L{plan_floor.level} L-plan"
+        elif mass.is_stepped:
+            shape = "stepped"
+        else:
+            shape = f"L{plan_floor.level} plan"
         ax_plan.set_title(
-            f"{mass.name}\n{w:.0f} x {l:.0f} ft plan, {len(mass.floors)} stories\n"
+            f"{mass.name}\n{pw:.0f} x {pl:.0f} ft {shape}, {len(mass.floors)} stories\n"
             f"GSF {mass.actual_gsf:,.0f}/{mass.target_gsf:,.0f} [{fit}]",
             fontsize=9,
         )
@@ -132,9 +198,26 @@ def render_massing_visual(
         story_h = 14  # ft display height per story
         dept_colors = _department_colors(mass)
         y = 0
+        base_area = mass.floors[0].area_sf or 1.0
         for fl in mass.floors:
-            scale = fl.usable_area_sf / fl.area_sf if fl.area_sf else 1
-            bar_w = w * max(scale, 0.15)
+            # Bar length tracks the plate, so a step-back reads as a shorter
+            # bar; the void is then hatched off the end of that plate.
+            plate_w = w * max(fl.area_sf / base_area, 0.05)
+            usable_frac = fl.usable_area_sf / fl.area_sf if fl.area_sf else 1.0
+            bar_w = plate_w * max(usable_frac, 0.15)
+
+            if usable_frac < 0.999:
+                ax_elev.add_patch(
+                    Rectangle(
+                        (bar_w, y),
+                        max(plate_w - bar_w, 0),
+                        story_h - 1,
+                        facecolor="none",
+                        edgecolor="#555",
+                        hatch="///",
+                        linewidth=0.8,
+                    )
+                )
 
             if fl.allocations and fl.allocated_gsf > 0:
                 x = 0.0
@@ -176,7 +259,7 @@ def render_massing_visual(
             if fl.voids:
                 note += " (void)"
             ax_elev.text(
-                bar_w + w * 0.03,
+                plate_w + w * 0.03,
                 y + story_h / 2 - 0.5,
                 note,
                 ha="left",

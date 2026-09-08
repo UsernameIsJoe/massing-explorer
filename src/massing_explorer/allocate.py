@@ -209,6 +209,7 @@ def allocate_programs(
     config: dict[str, Any] | None = None,
     pins: dict[str, int] | None = None,
     ground_required: set[str] | None = None,
+    skip_ground_leftover: bool = False,
 ) -> list[str]:
     """
     Fill each floor's usable area with department program, splitting a
@@ -254,6 +255,22 @@ def allocate_programs(
             if available <= EPS:
                 continue
 
+            # A double-height program owns the ground plate. Do not pour an
+            # upper program into the leftover scrap just to fill the floor.
+            ground_owners = set(ground_required or [])
+            already = placed[level]
+            if (
+                skip_ground_leftover
+                and level == 0
+                and unit.department not in ground_owners
+                and unit.forced_level != 0
+                and any(name in ground_owners for name in already)
+                and unit.affinity <= 0
+            ):
+                capacity_elsewhere = sum(remaining[lvl] for lvl in order[position + 1 :])
+                if capacity_elsewhere + EPS >= need:
+                    continue
+
             # Skip a level that could only hold a token fragment of this
             # department, provided the remaining levels can absorb the area.
             floor_min = max(
@@ -278,7 +295,7 @@ def allocate_programs(
             place(level, unit.department, need, _take_rooms(queue, need))
             notes.append(
                 f"{unit.department}: {need:,.0f} SF exceeds total usable area; "
-                f"parked on L{level}"
+                f"parked on L{floors[level].level}"
             )
             levels_used.append(level)
 
@@ -291,7 +308,7 @@ def allocate_programs(
         if len(distinct) > 1:
             notes.append(
                 f"{unit.department} spans "
-                + ", ".join(f"L{lvl}" for lvl in distinct)
+                + ", ".join(f"L{floors[lvl].level}" for lvl in distinct)
             )
 
     dept_levels: dict[str, int] = {}
@@ -312,7 +329,11 @@ def allocate_programs(
             )
             for dept, (gsf, names) in by_dept.items()
         ]
+        owned_by_ground = set(ground_required or [])
         floor.allocations = sorted(allocs, key=lambda a: -a.gsf)
+        for alloc in floor.allocations:
+            if floor.level == 0 and alloc.department in owned_by_ground:
+                alloc.double_height = True
         floor.programs = [a.department for a in floor.allocations]
 
     return notes

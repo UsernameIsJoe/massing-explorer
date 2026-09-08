@@ -1,9 +1,63 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from .session import StudySession
+
+
+def _slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", (text or "").lower()).strip("_")
+
+
+def resolve_mass_id(session: StudySession, ref: str) -> tuple[str, dict[str, Any] | None]:
+    """
+    Map a loose mass reference onto a real mass id.
+
+    The LLM routinely derives an id from the display name - calling a mass
+    "academic_bar" when its id is "academic" - so exact-id matching alone
+    rejected calls that were otherwise correct. Mirrors the tolerant matching
+    `pin_department_to_floor` already does for department names. An ambiguous
+    reference is an error rather than a guess.
+
+    Returns (mass_id, error). Exactly one of the two is meaningful.
+    """
+    ids = [m.id for m in session.masses]
+    if not ids:
+        return "", {"ok": False, "error": "No masses defined. Set groupings first."}
+
+    ref = (ref or "").strip()
+    if not ref:
+        return "", {"ok": False, "error": "mass_id is required", "known_mass_ids": ids}
+    if ref in ids:
+        return ref, None
+
+    target = _slug(ref)
+    for mass in session.masses:
+        if target in (_slug(mass.id), _slug(mass.name)):
+            return mass.id, None
+
+    matches = sorted(
+        {
+            mass.id
+            for mass in session.masses
+            for candidate in (_slug(mass.id), _slug(mass.name))
+            if candidate and (target in candidate or candidate in target)
+        }
+    )
+    if len(matches) == 1:
+        return matches[0], None
+
+    return "", {
+        "ok": False,
+        "error": (
+            f"Ambiguous mass reference '{ref}' - could be {matches}"
+            if matches
+            else f"Unknown mass '{ref}'. Known: {ids}"
+        ),
+        "known_mass_ids": ids,
+    }
 
 
 def get_department_summary(session: StudySession) -> dict[str, Any]:
@@ -121,6 +175,10 @@ def set_story_count(
     if story_count < 1:
         return {"ok": False, "error": "story_count must be >= 1"}
 
+    mass_id, error = resolve_mass_id(session, mass_id)
+    if error:
+        return error
+
     for mass in session.masses:
         if mass.id == mass_id:
             mass.story_count = story_count
@@ -171,12 +229,119 @@ def mark_double_height(session: StudySession, room_name: str) -> dict[str, Any]:
     return {"ok": True, "double_height_rooms": session.double_height_rooms}
 
 
+MIN_TAPER = 0.2
+MAX_TAPER = 1.0
+
+
+def set_floor_steps(
+    session: StudySession,
+    mass_id: str,
+    weights: list[float],
+) -> dict[str, Any]:
+    """
+    Step a mass by explicit per-level plate weights, e.g. [1, 0.8, 0.5].
+
+    Weights are relative, not areas: the engine scales them so the plates still
+    sum to the mass target GSF. Width stays constant, so each level's length
+    follows its weight.
+    """
+    mass_id, error = resolve_mass_id(session, mass_id)
+    if error:
+        return error
+    if not weights:
+        return {"ok": False, "error": "weights must not be empty"}
+    try:
+        values = [float(w) for w in weights]
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "weights must all be numbers"}
+    if any(w <= 0 for w in values):
+        return {
+            "ok": False,
+            "error": "every weight must be > 0; a zero-area floor is not a floor",
+        }
+
+    mass = next(m for m in session.masses if m.id == mass_id)
+    note = None
+    if len(values) != mass.story_count:
+        note = (
+            f"{mass.name} has {mass.story_count} stories but {len(values)} weights "
+            f"were given; the list is padded or trimmed to match. Call "
+            f"set_story_count first if the height should change."
+        )
+
+    session.floor_steps[mass_id] = values
+    session.floor_tapers.pop(mass_id, None)
+    session.save()
+    return {
+        "ok": True,
+        "mass_id": mass_id,
+        "weights": values,
+        "note": note,
+        "next_step": "Call solve_dimensions to see the stepped plates.",
+    }
+
+
+def set_floor_taper(
+    session: StudySession,
+    mass_id: str,
+    ratio: float,
+) -> dict[str, Any]:
+    """
+    Step a mass by a constant setback ratio: each level is `ratio` times the one
+    below. Unlike explicit weights this is independent of story count, so a
+    scheme search can still vary the height.
+    """
+    mass_id, error = resolve_mass_id(session, mass_id)
+    if error:
+        return error
+    try:
+        value = float(ratio)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "ratio must be a number"}
+    if not (MIN_TAPER <= value <= MAX_TAPER):
+        return {
+            "ok": False,
+            "error": (
+                f"ratio must be between {MIN_TAPER} and {MAX_TAPER} "
+                f"(1.0 = no setback). Got {value:g}."
+            ),
+        }
+
+    session.floor_tapers[mass_id] = value
+    session.floor_steps.pop(mass_id, None)
+    session.save()
+    return {
+        "ok": True,
+        "mass_id": mass_id,
+        "ratio": value,
+        "next_step": "Call solve_dimensions to see the stepped plates.",
+    }
+
+
+def clear_floor_steps(session: StudySession, mass_id: str = "") -> dict[str, Any]:
+    """Return one mass, or all masses, to equal floor plates."""
+    if mass_id:
+        mass_id, error = resolve_mass_id(session, mass_id)
+        if error:
+            return error
+        session.floor_steps.pop(mass_id, None)
+        session.floor_tapers.pop(mass_id, None)
+    else:
+        session.floor_steps.clear()
+        session.floor_tapers.clear()
+    session.save()
+    return {
+        "ok": True,
+        "stepped_masses": sorted({*session.floor_steps, *session.floor_tapers}),
+    }
+
+
 def search_site_schemes(
     session: StudySession,
     max_total_length_ft: float | None = None,
     max_length_ft: float | None = None,
     max_width_ft: float | None = None,
-    max_stories: int = 4,
+    max_stories: int | None = None,
     preference: str = "balanced",
     top_n: int = 3,
 ) -> dict[str, Any]:
@@ -187,6 +352,23 @@ def search_site_schemes(
     finds schemes. Every option returned has been verified through the solver.
     """
     from .search import PREFERENCE_WEIGHTS, SiteEnvelope, search_schemes
+
+    def _from_session(*keys: str):
+        for key in keys:
+            value = session.constraints.get(key)
+            if value is not None:
+                return float(value)
+        return None
+
+    if max_total_length_ft is None:
+        max_total_length_ft = _from_session("max_total_length_ft")
+    if max_length_ft is None:
+        max_length_ft = _from_session("max_building_length_ft", "max_length_ft")
+    if max_width_ft is None:
+        max_width_ft = _from_session("max_building_width_ft", "max_width_ft")
+    if max_stories is None:
+        stored = session.constraints.get("max_stories")
+        max_stories = int(stored) if stored is not None else 4
 
     if preference not in PREFERENCE_WEIGHTS:
         return {
@@ -345,11 +527,14 @@ def pair_masses(
     mass_ids: list[str],
     total_length_ft: float,
     pairing_id: str | None = None,
+    length_is_cap: bool = False,
 ) -> dict[str, Any]:
     """
-    Constrain two or more adjacent masses to a shared width inside a total length.
+    Place two or more masses together along a frontage.
 
-    Engine solves W = sum(floor plates) / total_length, then L_i = plate_i / W.
+    When length_is_cap is false, they share W = sum(plates) / total_length.
+    When it is true, total_length is only a maximum. Width comes from how the
+    bar should work, and the length must stay under the cap.
     """
     from .config import load_project_config
     from .solver import _mass_plate_area, solve_paired_masses
@@ -375,6 +560,7 @@ def pair_masses(
             id=pid,
             mass_ids=list(mass_ids),
             total_length_ft=float(total_length_ft),
+            length_is_cap=bool(length_is_cap),
         )
     )
     session.save()
@@ -403,29 +589,35 @@ def clear_pairings(session: StudySession) -> dict[str, Any]:
     return {"ok": True, "pairings": []}
 
 
+def _pairing_containing(session: StudySession, mass_id: str):
+    for pairing in session.pairings:
+        if mass_id in pairing.mass_ids:
+            return pairing
+    return None
+
+
 def resize_mass(
     session: StudySession,
     mass_id: str,
     width_ft: float | None = None,
     story_count: int | None = None,
 ) -> dict[str, Any]:
-    """Change a fixed dimension or story count, then re-solve and re-validate."""
-    known = {m.id for m in session.masses}
-    if mass_id not in known:
-        return {
-            "ok": False,
-            "error": f"Unknown mass id: {mass_id}",
-            "known_mass_ids": sorted(known),
-        }
+    """Change a fixed dimension or story count, then re-solve and re-validate.
+
+    Paired masses share a width derived from the pairing length. An independent
+    width on one member is ignored by the solver, so this writes the change
+    onto the pairing instead: new_length = sum(plates) / requested_width.
+    Story changes still apply to the named mass only.
+    """
+    mass_id, error = resolve_mass_id(session, mass_id)
+    if error:
+        return error
     if width_ft is None and story_count is None:
         return {"ok": False, "error": "Provide width_ft and/or story_count"}
 
     changes: list[str] = []
-    if width_ft is not None:
-        if width_ft <= 0:
-            return {"ok": False, "error": "width_ft must be > 0"}
-        session.constraints[f"{mass_id}_width_ft"] = float(width_ft)
-        changes.append(f"width -> {width_ft:g} ft")
+    pairing = _pairing_containing(session, mass_id)
+
     if story_count is not None:
         if story_count < 1:
             return {"ok": False, "error": "story_count must be >= 1"}
@@ -433,6 +625,29 @@ def resize_mass(
             if mass.id == mass_id:
                 mass.story_count = int(story_count)
         changes.append(f"stories -> {story_count}")
+
+    if width_ft is not None:
+        if width_ft <= 0:
+            return {"ok": False, "error": "width_ft must be > 0"}
+        if pairing is not None:
+            from .config import load_project_config
+            from .solver import _mass_plate_area
+
+            config = load_project_config(session.config_path or None)
+            by_id = {m.id: m for m in session.masses}
+            members = [by_id[mid] for mid in pairing.mass_ids if mid in by_id]
+            plates = [_mass_plate_area(session, m, config) for m in members]
+            new_len = sum(plates) / float(width_ft)
+            pairing.total_length_ft = new_len
+            for mid in pairing.mass_ids:
+                session.constraints.pop(f"{mid}_width_ft", None)
+            changes.append(
+                f"pairing {pairing.id} frontage -> {new_len:.1f} ft "
+                f"(shared width {width_ft:g} ft)"
+            )
+        else:
+            session.constraints[f"{mass_id}_width_ft"] = float(width_ft)
+            changes.append(f"width -> {width_ft:g} ft")
 
     session.save()
     solved = solve_dimensions(session)
@@ -525,6 +740,28 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "apply_brief",
+            "description": (
+                "Parse a user brief (stay-together, site length/width, max stories) "
+                "and let the ENGINE group departments and search for a fitting "
+                "scheme. Pass the user's message verbatim. Do not invent groupings "
+                "with set_grouping when this tool can run."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "The user's message, copied verbatim",
+                    }
+                },
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_department_summary",
             "description": (
                 "Get NFA and target GSF for every department. "
@@ -546,8 +783,9 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "function": {
             "name": "set_grouping",
             "description": (
-                "Assign departments to conceptual masses. "
-                "Each department should appear in exactly one mass."
+                "Override mass groupings. Prefer apply_brief — the engine groups "
+                "from stay-together notes and operational families. Only use this "
+                "when the user explicitly asks to regroup by hand."
             ),
             "parameters": {
                 "type": "object",
@@ -677,6 +915,64 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "set_floor_steps",
+            "description": (
+                "Make a mass stepped / terraced with explicit per-level plate "
+                "weights, e.g. [1, 0.8, 0.5] for a base with two setbacks. "
+                "Weights are relative, not areas - the engine rescales them so "
+                "the plates still total the mass target GSF. Use this when the "
+                "user describes specific levels ('top floor half the base')."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mass_id": {"type": "string"},
+                    "weights": {"type": "array", "items": {"type": "number"}},
+                },
+                "required": ["mass_id", "weights"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_floor_taper",
+            "description": (
+                "Make a mass stepped with a constant setback ratio - each level "
+                "is `ratio` times the plate below (0.8 = each floor 80% of the "
+                "one under it, 1.0 = no setback). Prefer this over "
+                "set_floor_steps when the user describes a general shape "
+                "('step it back as it rises', 'wedding cake', 'ziggurat'), "
+                "because it survives a change of story count."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mass_id": {"type": "string"},
+                    "ratio": {"type": "number"},
+                },
+                "required": ["mass_id", "ratio"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "clear_floor_steps",
+            "description": (
+                "Return a mass to equal floor plates. Omit mass_id to un-step "
+                "every mass."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"mass_id": {"type": "string"}},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "search_site_schemes",
             "description": (
                 "Find story counts and widths that FIT a site envelope. Use this "
@@ -754,8 +1050,9 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "function": {
             "name": "resize_mass",
             "description": (
-                "Change a mass width and/or story count, then re-solve and re-validate "
-                "in one step. Use this to apply resize suggestions."
+                "Change a mass story count and/or width, then re-solve. "
+                "If the mass is paired, width is not independent: the engine "
+                "updates the pairing length so all members still share one width."
             ),
             "parameters": {
                 "type": "object",
@@ -772,7 +1069,13 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
 
 
 def execute_tool(session: StudySession, name: str, arguments: dict[str, Any]) -> str:
-    if name == "get_department_summary":
+    if name == "apply_brief":
+        from .brief import apply_brief as run_brief
+
+        result = run_brief(
+            session, str(arguments.get("text") or arguments.get("brief") or "")
+        )
+    elif name == "get_department_summary":
         result = get_department_summary(session)
     elif name == "get_grouping_summary":
         result = get_grouping_summary(session)
@@ -817,13 +1120,35 @@ def execute_tool(session: StudySession, name: str, arguments: dict[str, Any]) ->
         )
     elif name == "clear_pairings":
         result = clear_pairings(session)
+    elif name == "set_floor_steps":
+        # Small models reach for a synonym of "weights" about as often as the
+        # real name; they all mean the same list, so accept them.
+        weights = next(
+            (
+                arguments[key]
+                for key in ("weights", "steps", "step_weights", "ratios", "fractions")
+                if arguments.get(key)
+            ),
+            [],
+        )
+        result = set_floor_steps(session, str(arguments["mass_id"]), list(weights))
+    elif name == "set_floor_taper":
+        result = set_floor_taper(
+            session, str(arguments["mass_id"]), arguments.get("ratio")
+        )
+    elif name == "clear_floor_steps":
+        result = clear_floor_steps(session, str(arguments.get("mass_id", "")))
     elif name == "search_site_schemes":
         result = search_site_schemes(
             session,
             max_total_length_ft=arguments.get("max_total_length_ft"),
             max_length_ft=arguments.get("max_length_ft"),
             max_width_ft=arguments.get("max_width_ft"),
-            max_stories=int(arguments.get("max_stories", 4)),
+            max_stories=(
+                int(arguments["max_stories"])
+                if arguments.get("max_stories") is not None
+                else None
+            ),
             preference=str(arguments.get("preference", "balanced")),
             top_n=int(arguments.get("top_n", 3)),
         )
