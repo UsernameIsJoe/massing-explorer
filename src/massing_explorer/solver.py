@@ -625,16 +625,14 @@ def _fit_width_under_cap(
     cap_ft: float,
     plates_before: float,
 ) -> float:
-    """Widen only if this plate would push the running length over the cap."""
-    if cap_ft <= 0 or plate_sf <= 0:
-        return width
-    remaining = cap_ft - plates_before
-    if remaining <= 1:
-        return width
-    needed = plate_sf / remaining
-    if plate_sf / width <= remaining + 1:
-        return width
-    return max(width, needed)
+    """
+    A length cap is not a length to hit.
+
+    Keep the functional width even if the plate then runs past the cap.
+    Widening until length equals the remaining allowance would turn the
+    maximum into the design length.
+    """
+    return width
 
 
 def _resolve_widths(
@@ -674,9 +672,39 @@ def _resolve_widths(
 
     for mass_def in session.masses:
         widths.setdefault(
-            mass_def.id, _resolve_fixed_width(session, mass_def.id, config)
+            mass_def.id, _width_from_brief(session, mass_def, config)
         )
     return widths, pairing_of
+
+
+def _width_from_brief(session: StudySession, mass_def: Any, config: dict[str, Any]) -> float:
+    """
+    Size the bar from how it should work, or from a stated ratio.
+
+    A maximum length is checked later. It is never used as the length.
+    An exact length ("the length should be 50") is the only case that
+    sets length to that number.
+    """
+    c = session.constraints
+    stated = c.get(f"{mass_def.id}_width_ft") or c.get("preferred_width_ft")
+    if stated:
+        return functional_bar_width(session, mass_def, config)
+
+    dh = set(c.get("double_height_departments") or [])
+    if dh and set(mass_def.departments) <= dh:
+        plate = _mass_target_gsf(session, mass_def.departments)
+    else:
+        plate = _mass_plate_area(session, mass_def, config)
+    width = functional_bar_width(session, mass_def, config)
+    exact = c.get("exact_building_length_ft")
+    if exact and plate > 0:
+        return plate / float(exact)
+    ratio = c.get("length_over_width")
+    if ratio and plate > 0:
+        # Prefer the stated proportion. If that length then exceeds a cap,
+        # the check fails. Do not widen until length equals the cap.
+        width = max(width, math.sqrt(plate / float(ratio)))
+    return width
 
 
 def check_pairing_lengths(
@@ -854,8 +882,9 @@ def check_site_limits(
                         f"length {longest.length_ft:.1f} ft exceeds max {max_len:g} ft"
                     ),
                     suggestion=(
-                        f"Use {needed_stories} stories at {longest.width_ft:.1f} ft wide, "
-                        f"or widen to {needed_width:.1f} ft to hold {max_len:g} ft length"
+                        f"{max_len:g} ft is a maximum, not a length to use. "
+                        f"Try {needed_stories} stories at {longest.width_ft:.1f} ft wide. "
+                        "Do not set the length to the maximum."
                     ),
                     option_stories=needed_stories,
                     option_width_ft=needed_width,
@@ -1140,6 +1169,21 @@ def solve_massing_study(
 
         site_checks, _ = check_site_limits(solved, limits, target)
         result.validation.extend(site_checks)
+        preferred = session.constraints.get("preferred_length_ft")
+        if preferred and solved.floors:
+            longest = max(solved.floors, key=lambda f: f.length_ft)
+            over_pref = longest.length_ft > float(preferred) + 1e-6
+            result.validation.append(
+                ValidationCheck(
+                    check=f"preferred_length:{mass_def.id}",
+                    passed=not over_pref,
+                    message=(
+                        f"{mass_def.name}: length {longest.length_ft:.1f} ft vs "
+                        f"preferred under {float(preferred):g} ft"
+                        + ("" if not over_pref else " (preference missed; the cap is not filled)")
+                    ),
+                )
+            )
         result.validation.extend(check_allocation(solved, dept_gsf))
         result.validation.extend(check_step_geometry(solved))
 

@@ -11,7 +11,7 @@ from massing_explorer.group import group_departments, match_department
 from massing_explorer.load import load_program_file
 from massing_explorer.session import StudySession
 from massing_explorer.solver import solve_massing_study
-from massing_explorer.tools import pair_masses, resize_mass, set_grouping
+from massing_explorer.tools import execute_tool, pair_masses, resize_mass, set_grouping
 
 ROOT = Path(__file__).resolve().parents[1]
 UNDERWOOD = ROOT / "examples" / "underwood_elementary_space_summary.xlsx"
@@ -69,6 +69,25 @@ class TestParseBrief(unittest.TestCase):
         self.assertEqual(parsed.max_stories, 3)
         pairs = {tuple(sorted(p)) for p in parsed.keep_together}
         self.assertIn(tuple(sorted((CUSTODIAL, DINING))), pairs)
+
+    def test_shorter_than_is_a_cap_not_an_exact_length(self) -> None:
+        parsed = parse_brief(
+            "Length should be shorter than 50. Prefer ratio 3:5.",
+            self.names,
+        )
+        self.assertEqual(parsed.constraints["max_building_length_ft"], 50)
+        self.assertEqual(parsed.constraints["length_limit_is_cap"], 1)
+        self.assertNotIn("exact_building_length_ft", parsed.constraints)
+
+    def test_length_should_be_is_exact(self) -> None:
+        parsed = parse_brief("The building length should be 50.", self.names)
+        self.assertEqual(parsed.constraints["exact_building_length_ft"], 50)
+        self.assertNotIn("max_building_length_ft", parsed.constraints)
+
+    def test_meters_convert_to_feet(self) -> None:
+        parsed = parse_brief("Length should be shorter than 59 meters.", self.names)
+        self.assertAlmostEqual(parsed.constraints["max_building_length_ft"], 59 * 3.280839895)
+        self.assertEqual(parsed.constraints["length_limit_is_cap"], 1)
 
     def test_frontage_and_low_rise(self) -> None:
         parsed = parse_brief(
@@ -147,9 +166,117 @@ class TestApplyBrief(unittest.TestCase):
         self.assertTrue(self.session.masses)
         assigned = {d for m in self.session.masses for d in m.departments}
         self.assertEqual(assigned, set(self.session.department_names()))
-        solved = out.get("solved") or {}
-        self.assertTrue(solved.get("ok"))
-        self.assertLessEqual(solved.get("total_ground_length_ft", 999), 401)
+
+    def test_named_wings_are_applied_and_not_overwritten(self) -> None:
+        text = (
+            "The gym and art should be in mass one. Mass two is dining and the media center. "
+            "Academic and special education stay together. Mass one and mass two together "
+            "should be under 360 feet. The site frontage is 420 feet, nothing wider than "
+            "80 feet, and no more than 3 stories. Keep it low. The gymnasium is double height."
+        )
+        out = apply_brief(self.session, text)
+        home = {
+            d: m["id"]
+            for m in out["grouping"]
+            for d in m["departments"]
+        }
+        self.assertEqual(home[HPE], home[ART])
+        self.assertEqual(home[DINING], home[MEDIA])
+        self.assertEqual(home[CORE], home[SPED])
+        self.assertNotEqual(home[HPE], home[DINING])
+        self.assertNotEqual(home[HPE], home[CORE])
+        assigned = {d for m in self.session.masses for d in m.departments}
+        self.assertEqual(assigned, set(self.session.department_names()))
+        self.assertAlmostEqual(self.session.pairings[0].total_length_ft, 360)
+        self.assertTrue(self.session.pairings[0].length_is_cap)
+        self.assertEqual(self.session.constraints["max_total_length_ft"], 420)
+        self.assertEqual(self.session.constraints["max_building_width_ft"], 80)
+        self.assertEqual(self.session.constraints["max_stories"], 3)
+        self.assertIn("Gymnasium", self.session.double_height_rooms)
+        self.assertTrue(self.session.brief_locked)
+        blocked = execute_tool(
+            self.session,
+            "set_grouping",
+            {
+                "masses": [
+                    {
+                        "id": "only",
+                        "name": "Academic Support",
+                        "departments": [CORE, SPED],
+                    }
+                ]
+            },
+        )
+        self.assertIn("Do not call", blocked)
+        self.assertEqual(
+            {d for m in self.session.masses for d in m.departments},
+            assigned,
+        )
+
+    def test_four_mass_brief_is_executed(self) -> None:
+        text = (
+            "I want 4 masses. Gym and dining should be double height and in the same mass. "
+            "Core academic by itself is one mass. Art and music on the ground floor. "
+            "Prefer ratio 3:5. Max 3 stories. Length should be shorter than 50."
+        )
+        out = apply_brief(self.session, text)
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(len(self.session.masses), 4)
+        home = {
+            d: m.id
+            for m in self.session.masses
+            for d in m.departments
+        }
+        self.assertEqual(home[HPE], home[DINING])
+        gym_mass = next(m for m in self.session.masses if HPE in m.departments)
+        academic = next(m for m in self.session.masses if CORE in m.departments)
+        art = next(m for m in self.session.masses if ART in m.departments)
+        self.assertEqual(set(gym_mass.departments), {HPE, DINING})
+        self.assertEqual(academic.departments, [CORE])
+        self.assertGreater(len(art.departments), 1)
+        self.assertIn(ART, art.departments)
+        self.assertNotEqual(art.story_count, 1)
+        self.assertEqual(gym_mass.story_count, 2)
+        self.assertLessEqual(academic.story_count, 3)
+        self.assertEqual(self.session.floor_pins.get(ART), 0)
+        self.assertAlmostEqual(self.session.constraints["length_over_width"], 3 / 5)
+        self.assertEqual(self.session.constraints["max_building_length_ft"], 50)
+        self.assertEqual(self.session.constraints["length_limit_is_cap"], 1)
+        self.assertNotIn("exact_building_length_ft", self.session.constraints)
+        self.assertFalse(self.session.pairings)
+        self.assertTrue(self.session.brief_locked)
+
+        result = solve_massing_study(self.session)
+        by_id = {m.id: m for m in result.masses}
+        # 50 is a cap. Bars are sized to the 3:5 ratio, not stretched to 50.
+        for mass in result.masses:
+            length = mass.floors[0].length_ft
+            width = mass.floors[0].width_ft
+            self.assertGreater(length, 50.5, mass.name)
+            self.assertAlmostEqual(length / width, 0.6, delta=0.05)
+        gym = by_id[gym_mass.id]
+        self.assertTrue(any(a.double_height for a in gym.floors[0].allocations))
+        self.assertTrue(
+            all(
+                a.double_height
+                for a in gym.floors[0].allocations
+                if a.department in {HPE, DINING}
+            )
+        )
+        art_levels = [
+            floor.level
+            for floor in by_id[art.id].floors
+            for alloc in floor.allocations
+            if alloc.department == ART
+        ]
+        self.assertEqual(art_levels, [0])
+
+        blocked = execute_tool(
+            self.session,
+            "pair_masses",
+            {"mass_ids": [m.id for m in self.session.masses], "total_length_ft": 50},
+        )
+        self.assertIn("Do not pair", blocked)
 
     def test_search_reads_limits_from_session(self) -> None:
         from massing_explorer.tools import search_site_schemes

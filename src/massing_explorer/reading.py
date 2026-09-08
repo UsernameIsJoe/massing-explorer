@@ -39,6 +39,49 @@ def _resolve(name: str, department_names: list[str]) -> str | None:
 
 
 PREFERENCES = ("low_rise", "compact", "balanced")
+KINDS = ("requirement", "limitation", "preference")
+REQUIREMENT_LEVERS = {
+    "same_mass",
+    "alone",
+    "mass_count",
+    "double_height",
+    "keep_together",
+    "keep_apart",
+    "exact_length",
+}
+LIMITATION_LEVERS = {
+    "max_length",
+    "max_width",
+    "max_stories",
+    "max_height",
+    "site_length",
+    "max_total_length",
+}
+PREFERENCE_LEVERS = {
+    "pin_ground",
+    "pin_floor",
+    "ratio",
+    "loading",
+    "low_rise",
+    "compact",
+    "spread",
+}
+_LIMIT_TEXT = re.compile(
+    r"\b(?:under|below|shorter than|less than|no more than|not more than|"
+    r"at most|at maximum|cannot exceed|can't exceed|not exceed|not over|"
+    r"no longer than|maximum|max(?:imum)?)\b",
+    flags=re.I,
+)
+_REQUIRE_TEXT = re.compile(
+    r"\b(?:must|shall|have to|need to|required|same mass|in the same|"
+    r"by itself|is one mass|one mass|double[\s-]?height)\b",
+    flags=re.I,
+)
+_PREFER_TEXT = re.compile(
+    r"\b(?:prefer|preferably|ideally|if possible|would like|try to|"
+    r"on the ground floor|ground floor|ratio)\b",
+    flags=re.I,
+)
 
 
 @dataclass
@@ -60,6 +103,8 @@ class DesignReading:
     preference: str | None = None
     reasons: list[str] = field(default_factory=list)
     dropped: list[str] = field(default_factory=list)
+    # Each user clause, already sorted into the role the pipeline must honor.
+    clauses: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -81,6 +126,10 @@ class DesignReading:
             "preference": self.preference,
             "reasons": list(self.reasons),
             "dropped": list(self.dropped),
+            "clauses": list(self.clauses),
+            "requirements": [c for c in self.clauses if c.get("kind") == "requirement"],
+            "limitations": [c for c in self.clauses if c.get("kind") == "limitation"],
+            "preferences": [c for c in self.clauses if c.get("kind") == "preference"],
         }
 
     @property
@@ -98,6 +147,7 @@ class DesignReading:
             or self.preferred_width_ft
             or self.max_stories
             or self.preference
+            or self.clauses
         )
 
 
@@ -252,7 +302,126 @@ def validate_reading(data: dict[str, Any] | None, department_names: list[str]) -
     reasons = data.get("reasons") or []
     if isinstance(reasons, list):
         reading.reasons = [str(r) for r in reasons if str(r).strip()][:6]
+    reading.clauses = _read_clauses(data.get("clauses"), department_names, reading)
     return reading
+
+
+def _stated_number(value: Any, unit: str | None = None) -> float | None:
+    number = _positive_number(value)
+    if number is None:
+        return None
+    if unit and str(unit).lower().startswith("m"):
+        return number * 3.280839895
+    return number
+
+
+def _force_kind(kind: str, text: str, lever: str) -> str:
+    """The wording decides the role. A cap is never a requirement to hit."""
+    if lever in LIMITATION_LEVERS or _LIMIT_TEXT.search(text or ""):
+        if not re.search(r"\b(?:must be exactly|exactly|shall be)\b", text or "", flags=re.I):
+            return "limitation"
+    if lever in PREFERENCE_LEVERS or (
+        _PREFER_TEXT.search(text or "") and not _REQUIRE_TEXT.search(text or "")
+    ):
+        return "preference"
+    if lever in REQUIREMENT_LEVERS or _REQUIRE_TEXT.search(text or ""):
+        return "requirement"
+    if kind in KINDS:
+        return kind
+    return "preference"
+
+
+def _read_clauses(
+    raw: Any,
+    department_names: list[str],
+    reading: DesignReading,
+) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            reading.dropped.append("clause is not an object")
+            continue
+        text = str(item.get("text") or "").strip()
+        lever = str(item.get("lever") or "").strip().lower().replace(" ", "_").replace("-", "_")
+        kind = _force_kind(str(item.get("kind") or "").strip().lower(), text, lever)
+        known = REQUIREMENT_LEVERS | LIMITATION_LEVERS | PREFERENCE_LEVERS
+        if lever not in known:
+            reading.dropped.append(f"unknown lever {lever or item.get('lever')}")
+            continue
+        if kind == "requirement" and lever in LIMITATION_LEVERS:
+            kind = "limitation"
+        if kind == "limitation" and lever in PREFERENCE_LEVERS:
+            kind = "preference"
+        departments: list[str] = []
+        for name in _as_name_list(item.get("departments")):
+            hit = _resolve(name, department_names)
+            if hit and hit not in departments:
+                departments.append(hit)
+        unit = str(item.get("unit") or "").strip().lower()
+        value = _stated_number(item.get("value"), unit)
+        length = _stated_number(item.get("length"))
+        width = _stated_number(item.get("width"))
+        clause = {
+            "kind": kind,
+            "lever": lever,
+            "text": text,
+            "departments": departments,
+            "value": value,
+            "unit": "ft" if unit.startswith("m") else (unit or None),
+            "length": length,
+            "width": width,
+        }
+        out.append(clause)
+        _fold_clause_into_reading(reading, clause)
+    return out
+
+
+def _fold_clause_into_reading(reading: DesignReading, clause: dict[str, Any]) -> None:
+    """Pass a classified clause onto the levers the rest of the pipeline already uses."""
+    lever = clause["lever"]
+    depts = list(clause.get("departments") or [])
+    value = clause.get("value")
+    if clause["kind"] == "requirement":
+        if lever in {"same_mass", "keep_together"} and len(depts) >= 2:
+            for other in depts[1:]:
+                pair = (depts[0], other)
+                if pair not in reading.keep_together and (other, depts[0]) not in reading.keep_together:
+                    reading.keep_together.append((depts[0], other))
+        elif lever == "keep_apart" and len(depts) >= 2:
+            pass
+        elif lever == "alone" and depts:
+            for dept in depts:
+                if not any(dept in mass_depts for _, mass_depts in reading.masses):
+                    reading.masses.append((dept.title(), [dept]))
+        elif lever == "double_height":
+            clause["double_height"] = True
+    elif clause["kind"] == "limitation":
+        if lever in {"max_length", "max_height"} and value and reading.pair_length_ft is None:
+            # A length or height cap is not a pairing length to fill.
+            reading.dropped.append(f"{lever} kept as a cap, not a target")
+        if lever == "max_stories" and value and reading.max_stories is None:
+            reading.max_stories = max(1, int(value))
+        if lever in {"site_length", "max_total_length"} and value and reading.site_length_ft is None:
+            reading.site_length_ft = float(value)
+        if lever == "max_width" and value and reading.max_width_ft is None:
+            reading.max_width_ft = float(value)
+    elif clause["kind"] == "preference":
+        if lever == "pin_ground":
+            for dept in depts:
+                if dept not in reading.pin_ground:
+                    reading.pin_ground.append(dept)
+        elif lever == "loading" and not reading.loading:
+            token = str(clause.get("text") or "").lower()
+            if "single" in token:
+                reading.loading = "single"
+            elif "double" in token:
+                reading.loading = "double"
+        elif lever == "low_rise" and not reading.preference:
+            reading.preference = "low_rise"
+        elif lever in {"compact", "spread"} and not reading.preference:
+            reading.preference = "compact" if lever == "compact" else "balanced"
 
 
 def _positive_number(value: Any) -> float | None:
@@ -276,34 +445,37 @@ def reading_prompt(text: str, department_names: list[str], parsed: dict[str, Any
     names = "\n".join(f"- {n}" for n in department_names)
     return (
         "Read the user's sentence the way an architect would. They will not use "
-        "a fixed template. Map whatever organization they describe into the JSON "
-        "below. Do not invent sizes they did not state. Reply with one JSON object "
-        "only.\n"
-        "Fields:\n"
-        "- masses: wings the user named, in order. Each is "
-        '{"name": "Mass 1", "departments": ["..."]}. Use this when they say '
-        '"mass one is gym and core academic", "wing A contains ...", '
-        '"put dining and media in the second building", and similar.\n'
-        "- pair_length_ft: a cap on the combined length of the named wings, when "
-        'they say "these two together under 500" or "fit them in 500 feet". '
-        "This is a maximum, not a length to fill. Only for the named masses, "
-        "not the whole campus, unless they clearly mean the whole site.\n"
-        "- loading: single or double, when they say how classrooms are loaded, "
-        "or when you must choose so the bar can function. single = one "
-        "classroom depth plus a corridor; double = classrooms both sides.\n"
-        "- corridor_ft, classroom_depth_ft: only if they stated them, or the "
-        "minimum you need to explain the loading. Do not invent a length to "
-        "use up a cap.\n"
-        "- preferred_width_ft: only if they asked for a width or a length/width ratio\n"
-        "- site_length_ft: only if the whole site or all masses together are capped\n"
-        "- max_width_ft, max_stories: only if stated\n"
-        "- keep_together: pairs that must share a mass when they did not list full wings\n"
-        "- pair_on_frontage: departments in adjacent bars, if they did not give pair_length_ft\n"
-        "- pin_ground: departments that must sit on the ground\n"
-        "- preference: low_rise, compact, balanced, or null\n"
-        "- reasons: short paraphrases of the user sentence\n"
-        "Leave a field null or empty if they did not say it. Use only these "
-        f"department names:\n{names}\n"
+        "a fixed template. Split every clause into one of three roles, then map "
+        "it onto a lever. Do not invent sizes they did not state. Reply with one "
+        "JSON object only.\n"
+        "Roles:\n"
+        "- requirement: must be executed. Organization they insist on: a count of "
+        "masses, programs that must share a mass, a program that must be alone, "
+        "double-height, keep apart. Words like must, shall, is, same mass, by "
+        "itself, one mass. A requirement is not a length to hit.\n"
+        "- limitation: a cap to check, never a target to fill. under, shorter than, "
+        "less than, no more than, at most, maximum, cannot exceed, max stories, "
+        "max height. Copy the number. If they said meters, set unit to m. Do not "
+        "set a bar's length or height to that number.\n"
+        "- preference: desired, and you may decide how, as long as requirements "
+        "hold and limitations are not broken. prefer, ideally, if possible, a "
+        "ratio, a ground-floor placement. A floor preference is not its own mass.\n"
+        "clauses: list of "
+        '{"kind": "requirement|limitation|preference", "lever": "...", '
+        '"text": "the user clause", "departments": ["..."], "value": number or null, '
+        '"unit": "ft|m|null", "length": number or null, "width": number or null}.\n'
+        "Levers: same_mass, alone, mass_count, double_height, keep_together, "
+        "keep_apart, exact_length, max_length, max_width, max_stories, max_height, "
+        "site_length, max_total_length, pin_ground, pin_floor, ratio, loading, "
+        "low_rise, compact.\n"
+        "Also fill, only when they said it:\n"
+        "- masses: required wings only, not leftover programs and not a floor preference\n"
+        "- pair_length_ft: a cap on named wings together, never a length to fill\n"
+        "- loading, corridor_ft, classroom_depth_ft: only if stated or needed to explain loading\n"
+        "- pin_ground: floor preference only\n"
+        "- reasons: one short line per role you used\n"
+        "Use only these department names:\n"
+        f"{names}\n"
         f"Regex already extracted (may be incomplete): {json.dumps(parsed)}\n"
         f"User: {text}"
     )
@@ -317,8 +489,10 @@ def request_reading(client: Any, text: str, department_names: list[str], parsed:
                 {
                     "role": "system",
                     "content": (
-                        "Reply with JSON only. Copy numbers the user stated "
-                        "(shared length, site length, width, stories). Do not invent any."
+                        "Reply with JSON only. Classify each clause as a requirement, "
+                        "a limitation, or a preference, and pass it on with a lever. "
+                        "Copy numbers the user stated. Do not invent any. A limitation "
+                        "is a cap, not a length to design to."
                     ),
                 },
                 {
@@ -384,6 +558,76 @@ def request_scheme_index(
     if index < 0 or index >= len(schemes):
         return None
     return index
+
+
+def cap_reasoning_prompt(
+    cap_ft: float,
+    masses: list[dict[str, Any]],
+    max_stories: int,
+    locked: dict[str, int],
+) -> str:
+    return (
+        "The user set a length cap. It is not a length to design to. "
+        "The bars below were sized from classroom loading or the stated ratio, "
+        "and some are longer than the cap. Reason about a better way to mass "
+        "under that limit: classroom loading, and story counts up to the max. "
+        "Do not return a width or a length. Do not make any bar the cap long. "
+        "Reply with JSON only:\n"
+        '{"loading": "single" | "double" | null, "stories": {"mass_id": <int>}, '
+        '"reason": "..."}\n'
+        f"Cap: shorter than {cap_ft:g} ft. Max stories: {max_stories}. "
+        f"Story counts already fixed by the brief: {json.dumps(locked)}.\n"
+        f"Masses: {json.dumps(masses)}"
+    )
+
+
+def request_cap_reasoning(
+    client: Any,
+    cap_ft: float,
+    masses: list[dict[str, Any]],
+    max_stories: int,
+    locked: dict[str, int],
+) -> dict[str, Any] | None:
+    """Ask how to mass under a length cap without using the cap as the length."""
+    if not masses or cap_ft <= 0:
+        return None
+    try:
+        response = client.chat(
+            [
+                {"role": "system", "content": "Reply with JSON only. Do not invent a length."},
+                {
+                    "role": "user",
+                    "content": cap_reasoning_prompt(cap_ft, masses, max_stories, locked),
+                },
+            ]
+        )
+        content = (response.get("message") or {}).get("content") or ""
+    except Exception:
+        return None
+    data = _extract_json(content) or {}
+    loading = str(data.get("loading") or "").strip().lower()
+    if loading not in {"single", "double"}:
+        loading = ""
+    stories: dict[str, int] = {}
+    raw_stories = data.get("stories") or {}
+    if isinstance(raw_stories, dict):
+        known = {m["id"] for m in masses}
+        for mid, count in raw_stories.items():
+            if str(mid) not in known or str(mid) in locked:
+                continue
+            try:
+                n = int(count)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= n <= max_stories:
+                stories[str(mid)] = n
+    if not loading and not stories:
+        return None
+    return {
+        "loading": loading or None,
+        "stories": stories,
+        "reason": str(data.get("reason") or ""),
+    }
 
 
 def repair_prompt(failed: list[str], masses: list[dict[str, Any]]) -> str:

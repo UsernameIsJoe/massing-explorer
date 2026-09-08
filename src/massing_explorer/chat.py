@@ -83,6 +83,41 @@ def _commit_brief_with_reading(
 
     solved = engine.get("solved") or {}
     failed = list(solved.get("failed_checks") or [])
+    if failed and session.constraints.get("length_limit_is_cap"):
+        from .reading import request_cap_reasoning
+
+        cap = float(session.constraints.get("max_building_length_ft") or 0)
+        lock = {
+            str(k): int(v)
+            for k, v in (session.constraints.get("story_lock") or {}).items()
+        }
+        max_stories = int(session.constraints.get("max_stories") or 4)
+        masses = [
+            {
+                "id": m.id,
+                "name": m.name,
+                "stories": m.story_count,
+                "departments": list(m.departments),
+            }
+            for m in session.masses
+        ]
+        reasoned = request_cap_reasoning(
+            client, cap, masses, max_stories, lock
+        )
+        if reasoned:
+            if reasoned.get("loading") in {"single", "double"}:
+                session.constraints["loading"] = reasoned["loading"]
+            for mid, count in (reasoned.get("stories") or {}).items():
+                mass = next((m for m in session.masses if m.id == mid), None)
+                if mass is None or mid in lock:
+                    continue
+                mass.story_count = int(count)
+            from .tools import solve_dimensions
+
+            solved = solve_dimensions(session)
+            engine["solved"] = solved
+            engine["cap_reasoning"] = reasoned
+            failed = list(solved.get("failed_checks") or [])
     if failed:
         masses = [
             {"id": m.id, "name": m.name, "stories": m.story_count}
@@ -129,6 +164,7 @@ def run_chat_turn(session: StudySession, client: OllamaClient, user_text: str) -
         )
         compact = {
             "parsed": engine.get("parsed"),
+            "briefing": engine.get("briefing"),
             "reading": engine.get("reading"),
             "reading_notes": engine.get("reading_notes"),
             "scheme_pick": engine.get("scheme_pick"),
@@ -142,9 +178,11 @@ def run_chat_turn(session: StudySession, client: OllamaClient, user_text: str) -
             "instruction": engine.get("instruction"),
         }
         engine_note = (
-            "The engine parsed the numbers. Your reading choices were applied "
-            "through existing tools and checked. Report the reading, the scheme "
-            "kept, and every failed check. Do not invent dimensions or regroup.\n"
+            "The brief is already classified. Requirements must hold. Limitations "
+            "are caps: do not set a dimension to the cap. Preferences may be met "
+            "in more than one way; a ground-floor preference is not its own mass. "
+            "Report those three roles, the scheme kept, and every failed check. "
+            "Do not invent dimensions or regroup a required wing.\n"
             + json.dumps(compact, indent=2)[:6000]
         )
 

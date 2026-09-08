@@ -2,8 +2,8 @@
 Write a solved study as Rhino solids.
 
 Each program on a checked floor is its own cube, colored by department.
-Those cubes stack into the same mass. A void stays open. Masses sit end to
-end along X (frontage / length), depth along Y, up along Z. No new sizes.
+Those cubes stack into the same mass. A void stays open. Masses sit along X
+with a gap between them, depth along Y, up along Z. No new sizes.
 """
 
 from __future__ import annotations
@@ -16,6 +16,8 @@ from .layout import remaining_region
 from .massing_models import FloorPlate, MassingStudyResult, SolvedMass
 
 DEFAULT_STORY_HEIGHT_FT = 14.0
+# Clear air between masses so adjacent wings do not read as one bar.
+MASS_GAP_FT = 20.0
 
 # Same family of colours as the plan drawings, as RGBA.
 _PALETTE = (
@@ -253,6 +255,7 @@ def export_rhino(
         "X is frontage / length, Y is width, Z is up. "
         "Each solid is one program on a checked floor. Cubes of the same mass stack "
         "flush to one end; a shorter story steps back from the other end only. "
+        f"Masses are separated by {MASS_GAP_FT:g} ft so they can be read apart. "
         "Color is the department. Voids stay open."
     )
     try:
@@ -266,11 +269,13 @@ def export_rhino(
     origin_x = 0.0
     written = 0
 
-    for mass in masses:
+    for i, mass in enumerate(masses):
         origin_x, count = _write_mass(
             model, layers, mass, origin_x, height, colors
         )
         written += count
+        if i < len(masses) - 1:
+            origin_x += MASS_GAP_FT
 
     if written == 0:
         raise ValueError("No floor plates to export.")

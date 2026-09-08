@@ -700,10 +700,19 @@ def solve_dimensions(session: StudySession) -> dict[str, Any]:
             sum(m.floors[0].length_ft for m in result.masses if m.floors), 1
         ),
         "instruction": (
-            "Report every failed check to the user verbatim. Do not describe a "
-            "failing mass as fitting."
-            if failed
-            else "All checks passed."
+            (
+                "A length limit on this study is a cap, not a target. "
+                "Do not tell the user the bars are that long on purpose, and "
+                "do not propose setting the length to the cap. Report every "
+                "failed check verbatim."
+                if failed and session.constraints.get("length_limit_is_cap")
+                else (
+                    "Report every failed check to the user verbatim. Do not "
+                    "describe a failing mass as fitting."
+                    if failed
+                    else "All checks passed."
+                )
+            )
         ),
         "resize_suggestions": [s.to_dict() for s in result.resize_suggestions],
         "masses": [
@@ -1080,13 +1089,50 @@ def execute_tool(session: StudySession, name: str, arguments: dict[str, Any]) ->
     elif name == "get_grouping_summary":
         result = get_grouping_summary(session)
     elif name == "set_grouping":
-        result = set_grouping(session, arguments.get("masses", []))
+        if session.brief_locked:
+            result = {
+                "ok": False,
+                "error": (
+                    "The user brief already set the wings. Do not call "
+                    "set_grouping. Report the masses already on the study."
+                ),
+                "grouping": get_grouping_summary(session),
+            }
+        else:
+            result = set_grouping(session, arguments.get("masses", []))
     elif name == "set_story_count":
-        result = set_story_count(
-            session, arguments["mass_id"], int(arguments["story_count"])
-        )
+        lock = session.constraints.get("story_lock") or {}
+        mid, err = resolve_mass_id(session, str(arguments.get("mass_id") or ""))
+        if err:
+            result = err
+        elif session.brief_locked and mid in lock:
+            result = {
+                "ok": False,
+                "error": (
+                    f"{mid} story count is set by the brief "
+                    f"({lock[mid]}). Do not change it."
+                ),
+            }
+        else:
+            result = set_story_count(
+                session, arguments["mass_id"], int(arguments["story_count"])
+            )
     elif name == "set_constraint":
-        result = set_constraint(session, arguments["key"], arguments["value"])
+        key = str(arguments.get("key") or "")
+        blocked = session.brief_locked and (
+            key in session.constraints
+            or key.endswith("_width_ft")
+            or key in {"max_stories", "preferred_width_ft", "length_over_width"}
+        )
+        if blocked:
+            result = {
+                "ok": False,
+                "error": (
+                    f"{key} is already set by the brief. Do not override it."
+                ),
+            }
+        else:
+            result = set_constraint(session, arguments["key"], arguments["value"])
     elif name == "add_adjacency_note":
         result = add_adjacency_note(session, arguments["note"])
     elif name == "mark_double_height":
@@ -1112,14 +1158,42 @@ def execute_tool(session: StudySession, name: str, arguments: dict[str, Any]) ->
         else:
             result = solve_dimensions(session)
     elif name == "pair_masses":
-        result = pair_masses(
-            session,
-            [str(m) for m in arguments.get("mass_ids", [])],
-            float(arguments["total_length_ft"]),
-            arguments.get("pairing_id"),
-        )
+        if session.brief_locked and not session.pairings:
+            result = {
+                "ok": False,
+                "error": (
+                    "The brief did not pair these masses. Do not pair them "
+                    "or treat the length cap as a length to fill."
+                ),
+            }
+        elif session.brief_locked and any(
+            getattr(p, "length_is_cap", False) for p in session.pairings
+        ):
+            result = {
+                "ok": False,
+                "error": (
+                    "Those wings are already paired under a length cap from "
+                    "the brief. Do not replace that with a length to fill."
+                ),
+                "pairings": [p.to_dict() for p in session.pairings],
+            }
+        else:
+            result = pair_masses(
+                session,
+                [str(m) for m in arguments.get("mass_ids", [])],
+                float(arguments["total_length_ft"]),
+                arguments.get("pairing_id"),
+                length_is_cap=bool(arguments.get("length_is_cap", False)),
+            )
     elif name == "clear_pairings":
-        result = clear_pairings(session)
+        if session.brief_locked and session.pairings:
+            result = {
+                "ok": False,
+                "error": "The brief pairing is already set. Do not clear it.",
+                "pairings": [p.to_dict() for p in session.pairings],
+            }
+        else:
+            result = clear_pairings(session)
     elif name == "set_floor_steps":
         # Small models reach for a synonym of "weights" about as often as the
         # real name; they all mean the same list, so accept them.
@@ -1139,36 +1213,70 @@ def execute_tool(session: StudySession, name: str, arguments: dict[str, Any]) ->
     elif name == "clear_floor_steps":
         result = clear_floor_steps(session, str(arguments.get("mass_id", "")))
     elif name == "search_site_schemes":
-        result = search_site_schemes(
-            session,
-            max_total_length_ft=arguments.get("max_total_length_ft"),
-            max_length_ft=arguments.get("max_length_ft"),
-            max_width_ft=arguments.get("max_width_ft"),
-            max_stories=(
-                int(arguments["max_stories"])
-                if arguments.get("max_stories") is not None
-                else None
-            ),
-            preference=str(arguments.get("preference", "balanced")),
-            top_n=int(arguments.get("top_n", 3)),
-        )
+        if session.brief_locked:
+            result = {
+                "ok": False,
+                "error": (
+                    "The brief is already applied. Do not search for a new "
+                    "scheme or treat the length cap as a site length to fill."
+                ),
+                "grouping": get_grouping_summary(session),
+            }
+        else:
+            result = search_site_schemes(
+                session,
+                max_total_length_ft=arguments.get("max_total_length_ft"),
+                max_length_ft=arguments.get("max_length_ft"),
+                max_width_ft=arguments.get("max_width_ft"),
+                max_stories=(
+                    int(arguments["max_stories"])
+                    if arguments.get("max_stories") is not None
+                    else None
+                ),
+                preference=str(arguments.get("preference", "balanced")),
+                top_n=int(arguments.get("top_n", 3)),
+            )
     elif name == "apply_scheme":
-        result = apply_scheme(session, int(arguments.get("index", 0)))
+        if session.brief_locked:
+            result = {
+                "ok": False,
+                "error": "The brief is already applied. Do not replace it with a scheme.",
+            }
+        else:
+            result = apply_scheme(session, int(arguments.get("index", 0)))
     elif name == "pin_department_to_floor":
-        result = pin_department_to_floor(
-            session, str(arguments["department"]), int(arguments["level"])
-        )
+        if session.brief_locked:
+            result = {
+                "ok": False,
+                "error": "Floor placement comes from the brief. Do not re-pin it.",
+            }
+        else:
+            result = pin_department_to_floor(
+                session, str(arguments["department"]), int(arguments["level"])
+            )
     elif name == "unpin_department":
-        result = unpin_department(session, str(arguments["department"]))
+        if session.brief_locked and session.floor_pins:
+            result = {
+                "ok": False,
+                "error": "Floor pins come from the brief. Do not unpin them.",
+            }
+        else:
+            result = unpin_department(session, str(arguments["department"]))
     elif name == "resize_mass":
-        width = arguments.get("width_ft")
-        stories = arguments.get("story_count")
-        result = resize_mass(
-            session,
-            str(arguments["mass_id"]),
-            float(width) if width is not None else None,
-            int(stories) if stories is not None else None,
-        )
+        if session.brief_locked:
+            result = {
+                "ok": False,
+                "error": "Mass size comes from the brief. Do not resize it.",
+            }
+        else:
+            width = arguments.get("width_ft")
+            stories = arguments.get("story_count")
+            result = resize_mass(
+                session,
+                str(arguments["mass_id"]),
+                float(width) if width is not None else None,
+                int(stories) if stories is not None else None,
+            )
     else:
         result = {"ok": False, "error": f"Unknown tool: {name}"}
 

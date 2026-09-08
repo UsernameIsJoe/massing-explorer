@@ -67,10 +67,27 @@ def build_allocated_mass(
     ground_required = S._ground_required_departments(
         session, mass_def.departments, voids
     )
+    dh_depts = set(session.constraints.get("double_height_departments") or [])
+    co_double = bool(dh_depts) and set(mass_def.departments) <= dh_depts
     stack_above = bool(
-        ground_required and session.constraints.get("stack_above_double_height")
+        ground_required
+        and session.constraints.get("stack_above_double_height")
+        and not co_double
     )
-    if stack_above:
+    if co_double:
+        target = S._mass_target_gsf(session, mass_def.departments)
+        length = target / width if width else 0.0
+        floors = [
+            FloorPlate(
+                level=0,
+                width_ft=width,
+                length_ft=length,
+                area_sf=target,
+                programs=list(mass_def.departments),
+            )
+        ]
+        actual = target
+    elif stack_above:
         ground_gsf = sum(
             depts[d].target_gsf for d in ground_required if d in depts
         )
@@ -98,7 +115,11 @@ def build_allocated_mass(
         d: depts[d].target_gsf for d in mass_def.departments if d in depts
     }
     alloc_notes: list[str] = []
-    if stack_above:
+    if co_double:
+        alloc_notes.append(
+            "double-height programs share the ground plate and are both two stories"
+        )
+    elif stack_above:
         alloc_notes.append(
             "double-height program is two stories; programs above sit on its roof"
         )
@@ -119,6 +140,13 @@ def build_allocated_mass(
             skip_ground_leftover=stack_above,
         )
     )
+    if co_double:
+        for floor in floors:
+            if floor.level != 0:
+                continue
+            for alloc in floor.allocations:
+                if alloc.department in dh_depts:
+                    alloc.double_height = True
     layout_notes, layout_fails = layout_programs(
         floors, config=config, departments=list(mass_def.departments)
     )
@@ -177,9 +205,8 @@ def layout_retry_candidates(
         void_plate = plates[1] if len(plates) > 1 and voids else plates[0]
         ground = plates[0]
         local_lo = lo
-        max_len = limits.get("max_building_length_ft")
-        if max_len:
-            local_lo = max(local_lo, max(plates) / float(max_len))
+        # A length cap is checked after sizing. Do not raise the trial width
+        # to plate / cap — that would make the cap the length.
 
         if paired:
             pairing = next(

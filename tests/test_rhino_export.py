@@ -99,11 +99,11 @@ class TestRhinoExport(unittest.TestCase):
             self.assertAlmostEqual(first.Min.X, 0, places=2)
             self.assertAlmostEqual(first.Min.Z, 0, places=2)
             self.assertAlmostEqual(first.Max.Z, 14, places=2)
-            self.assertAlmostEqual(second.Min.X, 200, places=2)
+            self.assertAlmostEqual(second.Min.X, 220, places=2)
             self.assertAlmostEqual(upper.Min.Z, 14, places=2)
             self.assertAlmostEqual(upper.Max.Z, 28, places=2)
             self.assertAlmostEqual(upper.Max.X - upper.Min.X, 140, places=2)
-            self.assertAlmostEqual(second.Max.X, 500, places=2)
+            self.assertAlmostEqual(second.Max.X, 520, places=2)
 
     def test_void_is_cut_not_filled(self) -> None:
         upper = FloorPlate(

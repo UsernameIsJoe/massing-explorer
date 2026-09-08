@@ -269,8 +269,8 @@ def _mass_options(
         longest = max(plates)  # a cantilever can put the worst floor upstairs
 
         lo = envelope.min_width_ft
-        if envelope.max_building_length_ft:
-            lo = max(lo, longest / envelope.max_building_length_ft)
+        # A length cap rejects bars that run past it. It is not the length to
+        # generate, so the width grid does not start at plate / cap.
         # Without a stated width cap, stop at a square plate; wider than that is
         # the same rectangle rotated.
         hi = envelope.max_building_width_ft or max(lo, math.sqrt(ground))

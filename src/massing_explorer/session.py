@@ -32,6 +32,8 @@ class StudySession:
     floor_tapers: dict[str, float] = field(default_factory=dict)
     last_massing: dict[str, Any] | None = None
     last_search: list[dict[str, Any]] = field(default_factory=list)
+    # Once a brief names the wings, the chat model must not regroup them.
+    brief_locked: bool = False
 
     @property
     def study_dir(self) -> Path:
@@ -60,6 +62,7 @@ class StudySession:
             "floor_tapers": self.floor_tapers,
             "last_massing": self.last_massing,
             "last_search": self.last_search,
+            "brief_locked": self.brief_locked,
             "messages": [m.to_dict() for m in self.messages],
         }
 
@@ -118,6 +121,7 @@ class StudySession:
             },
             last_massing=data.get("last_massing"),
             last_search=data.get("last_search") or [],
+            brief_locked=bool(data.get("brief_locked", False)),
             messages=[ChatMessage.from_dict(m) for m in data.get("messages", [])],
         )
 

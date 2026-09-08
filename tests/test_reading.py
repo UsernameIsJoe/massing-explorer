@@ -56,6 +56,49 @@ class TestValidateReading(unittest.TestCase):
         self.assertEqual(reading.preference, "low_rise")
         self.assertTrue(any("width_ft" in d for d in reading.dropped))
 
+    def test_clauses_keep_roles_and_do_not_fill_a_cap(self) -> None:
+        reading = validate_reading(
+            {
+                "clauses": [
+                    {
+                        "kind": "requirement",
+                        "lever": "same_mass",
+                        "text": "dining and gym must share a mass",
+                        "departments": ["dining", "gym"],
+                    },
+                    {
+                        "kind": "requirement",
+                        "lever": "max_length",
+                        "text": "length under 50 m",
+                        "value": 50,
+                        "unit": "m",
+                    },
+                    {
+                        "kind": "preference",
+                        "lever": "pin_ground",
+                        "text": "art and music on the ground floor",
+                        "departments": ["art"],
+                    },
+                    {
+                        "kind": "preference",
+                        "lever": "ratio",
+                        "text": "prefer ratio 3:5",
+                        "length": 3,
+                        "width": 5,
+                    },
+                ]
+            },
+            self.names,
+        )
+        kinds = {c["lever"]: c["kind"] for c in reading.clauses}
+        self.assertEqual(kinds["same_mass"], "requirement")
+        self.assertEqual(kinds["max_length"], "limitation")
+        self.assertEqual(kinds["pin_ground"], "preference")
+        self.assertEqual(kinds["ratio"], "preference")
+        self.assertAlmostEqual(reading.clauses[1]["value"], 50 * 3.280839895)
+        self.assertIn("ART & MUSIC", reading.pin_ground)
+        self.assertFalse(any(depts == ["ART & MUSIC"] for _, depts in reading.masses))
+
     def test_unknown_department_is_dropped(self) -> None:
         reading = validate_reading(
             {"pin_ground": ["planetarium"], "preference": "tower"},
