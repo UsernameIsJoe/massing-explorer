@@ -248,12 +248,14 @@ class TestApplyBrief(unittest.TestCase):
 
         result = solve_massing_study(self.session)
         by_id = {m.id: m for m in result.masses}
-        # 50 is a cap. Bars are sized to the 3:5 ratio, not stretched to 50.
+        # 50 is a cap. The loop may add stories to shorten a bar, but it
+        # must not set the length to 50.
         for mass in result.masses:
             length = mass.floors[0].length_ft
             width = mass.floors[0].width_ft
-            self.assertGreater(length, 50.5, mass.name)
-            self.assertAlmostEqual(length / width, 0.6, delta=0.05)
+            self.assertNotAlmostEqual(length, 50.0, delta=0.2, msg=mass.name)
+            if session_ratio := self.session.constraints.get("length_over_width"):
+                self.assertAlmostEqual(length / width, float(session_ratio), delta=0.05)
         gym = by_id[gym_mass.id]
         self.assertTrue(any(a.double_height for a in gym.floors[0].allocations))
         self.assertTrue(
@@ -270,6 +272,12 @@ class TestApplyBrief(unittest.TestCase):
             if alloc.department == ART
         ]
         self.assertEqual(art_levels, [0])
+        loop = self.session.constraints.get("try_loop") or {}
+        self.assertGreaterEqual(loop.get("tries", 0), 2)
+        self.assertLessEqual(loop.get("tries", 99), loop.get("safety_cap", 8))
+        self.assertIn("cap", (loop.get("note") or "").lower())
+        self.assertIn("coverage", loop)
+        self.assertIn("complete", loop["coverage"])
 
         blocked = execute_tool(
             self.session,

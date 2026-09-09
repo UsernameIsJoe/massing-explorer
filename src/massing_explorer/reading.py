@@ -65,6 +65,7 @@ PREFERENCE_LEVERS = {
     "low_rise",
     "compact",
     "spread",
+    "mass_shape",
 }
 _LIMIT_TEXT = re.compile(
     r"\b(?:under|below|shorter than|less than|no more than|not more than|"
@@ -105,6 +106,8 @@ class DesignReading:
     dropped: list[str] = field(default_factory=list)
     # Each user clause, already sorted into the role the pipeline must honor.
     clauses: list[dict[str, Any]] = field(default_factory=list)
+    # How each named mass should look. A preference, not a requirement.
+    mass_preferences: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -130,6 +133,7 @@ class DesignReading:
             "requirements": [c for c in self.clauses if c.get("kind") == "requirement"],
             "limitations": [c for c in self.clauses if c.get("kind") == "limitation"],
             "preferences": [c for c in self.clauses if c.get("kind") == "preference"],
+            "mass_preferences": list(self.mass_preferences),
         }
 
     @property
@@ -148,6 +152,7 @@ class DesignReading:
             or self.max_stories
             or self.preference
             or self.clauses
+            or self.mass_preferences
         )
 
 
@@ -302,7 +307,16 @@ def validate_reading(data: dict[str, Any] | None, department_names: list[str]) -
     reasons = data.get("reasons") or []
     if isinstance(reasons, list):
         reading.reasons = [str(r) for r in reasons if str(r).strip()][:6]
+    reading.mass_preferences = _read_mass_preferences(data.get("mass_preferences"))
     reading.clauses = _read_clauses(data.get("clauses"), department_names, reading)
+    for clause in reading.clauses:
+        if clause.get("lever") != "mass_shape":
+            continue
+        from .mass_prefs import parse_mass_preferences
+
+        for pref in parse_mass_preferences(clause.get("text") or ""):
+            if pref not in reading.mass_preferences:
+                reading.mass_preferences.append(pref)
     return reading
 
 
@@ -375,6 +389,55 @@ def _read_clauses(
         }
         out.append(clause)
         _fold_clause_into_reading(reading, clause)
+    return out
+
+
+def _read_mass_preferences(raw: Any) -> list[dict[str, Any]]:
+    """Keep only shape, story, and ratio preferences the model assigned to a mass."""
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        ref = str(item.get("ref") or item.get("mass") or "").strip()
+        if not ref:
+            continue
+        shape = str(item.get("shape") or "").strip().lower()
+        if shape not in {"thin", "box", "cube"}:
+            shape = ""
+        stories = item.get("stories")
+        try:
+            stories_n = max(1, int(stories)) if stories not in (None, "") else None
+        except (TypeError, ValueError):
+            stories_n = None
+        ratio = item.get("ratio")
+        try:
+            ratio_n = float(ratio) if ratio not in (None, "") else None
+        except (TypeError, ValueError):
+            ratio_n = None
+        if ratio_n is not None and ratio_n <= 0:
+            ratio_n = None
+        size = "small" if str(item.get("size") or "").strip().lower() == "small" else None
+        if not shape and stories_n is None and ratio_n is None and size is None:
+            continue
+        token = ref.lower().replace("mass", "").strip()
+        ordinals = {
+            "a": 1, "b": 2, "c": 3, "d": 4,
+            "one": 1, "two": 2, "three": 3, "four": 4,
+            "1": 1, "2": 2, "3": 3, "4": 4,
+        }
+        out.append(
+            {
+                "ref": token or ref.lower(),
+                "ordinal": ordinals.get(token),
+                "stories": stories_n,
+                "shape": shape or None,
+                "ratio": ratio_n,
+                "size": size,
+                "text": str(item.get("text") or f"mass {ref}").strip(),
+            }
+        )
     return out
 
 
@@ -459,7 +522,13 @@ def reading_prompt(text: str, department_names: list[str], parsed: dict[str, Any
         "set a bar's length or height to that number.\n"
         "- preference: desired, and you may decide how, as long as requirements "
         "hold and limitations are not broken. prefer, ideally, if possible, a "
-        "ratio, a ground-floor placement. A floor preference is not its own mass.\n"
+        "ratio, a ground-floor placement, or how one mass should look next to "
+        "another. A floor preference is not its own mass.\n"
+        "- mass_preferences: one object per mass they described, not a "
+        "requirement. {\"ref\": \"A\", \"stories\": 3, \"shape\": \"thin|box|cube\", "
+        "\"ratio\": 1.0, \"size\": \"small\" or null, \"text\": \"...\"}. "
+        "thin = narrow bar; box = square plate; cube = compact square. "
+        "These sit under the mass count and the length cap.\n"
         "clauses: list of "
         '{"kind": "requirement|limitation|preference", "lever": "...", '
         '"text": "the user clause", "departments": ["..."], "value": number or null, '
@@ -467,7 +536,7 @@ def reading_prompt(text: str, department_names: list[str], parsed: dict[str, Any
         "Levers: same_mass, alone, mass_count, double_height, keep_together, "
         "keep_apart, exact_length, max_length, max_width, max_stories, max_height, "
         "site_length, max_total_length, pin_ground, pin_floor, ratio, loading, "
-        "low_rise, compact.\n"
+        "low_rise, compact, mass_shape.\n"
         "Also fill, only when they said it:\n"
         "- masses: required wings only, not leftover programs and not a floor preference\n"
         "- pair_length_ft: a cap on named wings together, never a length to fill\n"
@@ -558,6 +627,108 @@ def request_scheme_index(
     if index < 0 or index >= len(schemes):
         return None
     return index
+
+
+def next_try_prompt(
+    briefing: dict[str, Any],
+    masses: list[dict[str, Any]],
+    failed: list[str],
+    tried: list[str],
+    max_stories: int,
+    locked: dict[str, int],
+    free_departments: list[str],
+    open_slots: int,
+) -> str:
+    return (
+        "The current scheme misses a limitation or a preference. Propose the "
+        "next try, not a repeat of one already tried. Requirements stay locked. "
+        "A limitation is a cap: do not return a width or a length, and do not "
+        "make a bar as long as the cap. You may raise story counts up to the "
+        "height limit, change classroom loading, keep or drop a ratio preference, "
+        "and regroup only the free departments into the open slots. "
+        "Prefer a scheme that fits every limitation, then one that meets more "
+        "preferences. Reply with JSON only:\n"
+        '{"stories": {"mass_id": <int>}, "loading": "single"|"double"|null, '
+        '"use_ratio": true|false|null, "free_groups": [["dept", "..."]], '
+        '"reason": "..."}\n'
+        f"Briefing: {json.dumps(briefing)}\n"
+        f"Max stories: {max_stories}. Locked story counts: {json.dumps(locked)}.\n"
+        f"Free departments: {json.dumps(free_departments)}. Open slots: {open_slots}.\n"
+        f"Already tried: {json.dumps(tried[-6:])}\n"
+        f"Current masses: {json.dumps(masses)}\n"
+        f"Failed checks: {json.dumps(failed[:8])}"
+    )
+
+
+def request_next_try(
+    client: Any,
+    briefing: dict[str, Any],
+    masses: list[dict[str, Any]],
+    failed: list[str],
+    tried: list[str],
+    max_stories: int,
+    locked: dict[str, int],
+    free_departments: list[str],
+    open_slots: int,
+) -> dict[str, Any] | None:
+    if client is None or not masses:
+        return None
+    try:
+        response = client.chat(
+            [
+                {
+                    "role": "system",
+                    "content": "Reply with JSON only. Do not invent a length or a width.",
+                },
+                {
+                    "role": "user",
+                    "content": next_try_prompt(
+                        briefing,
+                        masses,
+                        failed,
+                        tried,
+                        max_stories,
+                        locked,
+                        free_departments,
+                        open_slots,
+                    ),
+                },
+            ]
+        )
+        content = (response.get("message") or {}).get("content") or ""
+    except Exception:
+        return None
+    data = _extract_json(content) or {}
+    stories: dict[str, int] = {}
+    known = {m["id"] for m in masses}
+    for mid, count in (data.get("stories") or {}).items():
+        if str(mid) not in known or str(mid) in locked:
+            continue
+        try:
+            n = int(count)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= n <= max_stories:
+            stories[str(mid)] = n
+    loading = str(data.get("loading") or "").strip().lower()
+    if loading not in {"single", "double"}:
+        loading = ""
+    use_ratio = data.get("use_ratio")
+    if use_ratio is not None:
+        use_ratio = bool(use_ratio)
+    groups = []
+    for group in data.get("free_groups") or []:
+        if isinstance(group, list) and group:
+            groups.append([str(d) for d in group])
+    if not stories and not loading and use_ratio is None and not groups:
+        return None
+    return {
+        "stories": stories,
+        "loading": loading or None,
+        "use_ratio": use_ratio,
+        "free_groups": groups,
+        "reason": str(data.get("reason") or ""),
+    }
 
 
 def cap_reasoning_prompt(

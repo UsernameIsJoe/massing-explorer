@@ -36,6 +36,7 @@ class ParsedBrief:
     free_departments: list[str] = field(default_factory=list)
     open_slots: int | None = None
     length_over_width: float | None = None
+    mass_preferences: list[dict[str, Any]] = field(default_factory=list)
     double_height_departments: list[str] = field(default_factory=list)
     preference: str = "balanced"
     unmatched: list[str] = field(default_factory=list)
@@ -55,6 +56,7 @@ class ParsedBrief:
             "preference": self.preference,
             "unmatched": self.unmatched,
             "pin_ground": list(self.pin_ground),
+            "mass_preferences": list(self.mass_preferences),
             "free_departments": list(self.free_departments),
             "open_slots": self.open_slots,
             "notes": self.notes,
@@ -120,6 +122,8 @@ def parse_brief(text: str, department_names: list[str]) -> ParsedBrief:
             rf"no\s+(?:wing|building|mass)\s+(?:over|longer than)\s*{_NUM}{_UNIT}",
             rf"(?:max(?:imum)?|length)\s+limit\s*(?:is|of|=|:)?\s*{_NUM}{_UNIT}",
             rf"max(?:imum)?\s+(?:building\s+)?length\s*(?:is|of|=|:)?\s*{_NUM}{_UNIT}",
+            rf"length\s+(?:under|below)\s+{_NUM}{_UNIT}",
+            rf"length\s+{_NUM}\s*(m|meter|meters|metre|metres)\b",
         ],
         raw,
     )
@@ -196,7 +200,7 @@ def parse_brief(text: str, department_names: list[str]) -> ParsedBrief:
         exact = _first_length(
             [
                 rf"length\s+should be\s+{_NUM}{_UNIT}",
-                rf"length\s+(?:is|of|=)\s*{_NUM}{_UNIT}",
+                rf"(?<!site\s)(?<!total\s)(?<!combined\s)(?<!overall\s)length\s+(?:is|of|=)\s*{_NUM}{_UNIT}",
                 rf"(?:each\s+)?(?:mass|wing|building)\s+length\s+(?:is|of|=|should be)\s*{_NUM}{_UNIT}",
             ],
             raw,
@@ -206,7 +210,8 @@ def parse_brief(text: str, department_names: list[str]) -> ParsedBrief:
             parsed.notes.append(f"length should be {exact:g} ft (exact)")
 
     ratio = re.search(r"ratio\s+(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)", raw, flags=re.I)
-    if ratio:
+    ratio_window = raw[max(0, ratio.start() - 40) : ratio.start()] if ratio else ""
+    if ratio and not re.search(r"\bmass\s+", ratio_window, flags=re.I):
         length_part = float(ratio.group(1))
         width_part = float(ratio.group(2))
         if width_part > 0:
@@ -221,6 +226,15 @@ def parse_brief(text: str, department_names: list[str]) -> ParsedBrief:
         parsed.preference = "low_rise"
     elif compact:
         parsed.preference = "compact"
+
+    from .mass_prefs import parse_mass_preferences
+
+    parsed.mass_preferences = parse_mass_preferences(raw)
+    if parsed.mass_preferences:
+        parsed.notes.append(
+            "per-mass preferences: "
+            + "; ".join(p["text"][:48] for p in parsed.mass_preferences)
+        )
 
     # --- stay together / keep apart ---------------------------------------
     parsed.keep_together = _extract_pairs(
@@ -588,9 +602,9 @@ def assign_open_departments(parsed: ParsedBrief, reading: Any = None) -> None:
     if it assigns every free department once and does not scatter them.
     """
     free = list(parsed.free_departments)
-    if not free:
+    if not free or not parsed.open_slots:
         return
-    slots = parsed.open_slots if parsed.open_slots is not None else 1
+    slots = parsed.open_slots
     proposal = _proposal_for_free(reading, free, slots, parsed.pin_ground)
     groups = proposal or _pack_free(free, max(1, slots))
     start = len(parsed.named_masses)
@@ -676,6 +690,15 @@ def briefing_from_parsed(parsed: ParsedBrief) -> dict[str, list[dict[str, Any]]]
                 "lever": "ratio",
                 "text": "",
                 "value": parsed.length_over_width,
+            }
+        )
+    for pref in parsed.mass_preferences:
+        preferences.append(
+            {
+                "kind": "preference",
+                "lever": "mass_shape",
+                "text": pref.get("text") or "",
+                "value": pref.get("stories"),
             }
         )
     return {
@@ -786,6 +809,9 @@ def _merge_reading(parsed: ParsedBrief, reading: Any) -> None:
     if stories and parsed.max_stories is None:
         parsed.max_stories = int(stories)
         parsed.notes.append(f"max stories {parsed.max_stories}")
+    for pref in getattr(reading, "mass_preferences", []) or []:
+        if pref not in parsed.mass_preferences:
+            parsed.mass_preferences.append(pref)
 
 
 def _apply_reading_levers(session: StudySession, reading: Any) -> list[str]:
@@ -818,6 +844,9 @@ def _apply_reading_levers(session: StudySession, reading: Any) -> list[str]:
             notes.append(f"pinned {dept} to ground")
 
     named = list(getattr(reading, "masses", []) or [])
+    stated = getattr(reading, "stated_wing_count", None)
+    if stated:
+        named = named[: int(stated)]
     pair_length = getattr(reading, "pair_length_ft", None)
     if pair_length and len(named) >= 2:
         mass_ids: list[str] = []
@@ -972,6 +1001,7 @@ def apply_parsed_brief(
     search: bool = True,
     top_n: int = 3,
     reading: Any = None,
+    client: Any = None,
 ) -> dict[str, Any]:
     """Write the parsed brief onto the session and optionally search for a scheme."""
     from .config import load_project_config
@@ -980,8 +1010,11 @@ def apply_parsed_brief(
     config = load_project_config(session.config_path or None)
     _merge_reading(parsed, reading)
     briefing = apply_classified_clauses(parsed, reading)
+    stated_wings = len(parsed.named_masses)
     assign_open_departments(parsed, reading)
     reading = _prefer_stated_wings(parsed, reading)
+    if reading is not None and stated_wings:
+        reading.stated_wing_count = stated_wings
     session.constraints["briefing"] = briefing
 
     for key, value in parsed.constraints.items():
@@ -1046,6 +1079,12 @@ def apply_parsed_brief(
     if parsed.named_masses or parsed.keep_together or parsed.mass_count:
         session.brief_locked = True
         session.save()
+    if parsed.mass_preferences and session.masses:
+        from .mass_prefs import bind_mass_preferences
+
+        session.constraints["mass_preferences"] = bind_mass_preferences(
+            parsed.mass_preferences, session.masses
+        )
 
     searched = None
     solved = None
@@ -1055,7 +1094,7 @@ def apply_parsed_brief(
             or session.constraints.get("max_stories")
             or 4
         )
-        if parsed.has_site or session.constraints.get("max_total_length_ft"):
+        if session.constraints.get("max_total_length_ft"):
             searched = search_site_schemes(
                 session,
                 max_total_length_ft=session.constraints.get("max_total_length_ft"),
@@ -1070,7 +1109,31 @@ def apply_parsed_brief(
 
                 solved = apply_scheme(session, 0)
         else:
-            solved = solve_dimensions(session)
+            from .try_loop import improve_scheme
+
+            improved = improve_scheme(session, client=client)
+            solved = improved.get("solved")
+            from .preference import describe_weights, next_pair
+
+            schemes = improved.get("schemes") or []
+            session.constraints["preference_learning"] = {
+                "weights": {},
+                "comparisons": [],
+                "pending_pair": next_pair(schemes, {}, []),
+                "note": describe_weights({}),
+            }
+            session.constraints["try_loop"] = {
+                "tries": improved.get("tries"),
+                "safety_cap": improved.get("safety_cap"),
+                "feasible": improved.get("feasible"),
+                "fits_limitations": improved.get("fits_limitations"),
+                "coverage": improved.get("coverage"),
+                "schemes": improved.get("schemes"),
+                "basins": improved.get("basins"),
+                "stage3": improved.get("stage3"),
+                "note": improved.get("note"),
+                "kept": improved.get("kept"),
+            }
 
     return {
         "ok": True,
@@ -1092,6 +1155,7 @@ def apply_parsed_brief(
         ),
         "search": searched,
         "solved": solved,
+        "try_loop": session.constraints.get("try_loop"),
         "briefing": session.constraints.get("briefing"),
         "instruction": (
             "The brief is already split into requirements, limitations, and "

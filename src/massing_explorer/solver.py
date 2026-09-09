@@ -686,10 +686,6 @@ def _width_from_brief(session: StudySession, mass_def: Any, config: dict[str, An
     sets length to that number.
     """
     c = session.constraints
-    stated = c.get(f"{mass_def.id}_width_ft") or c.get("preferred_width_ft")
-    if stated:
-        return functional_bar_width(session, mass_def, config)
-
     dh = set(c.get("double_height_departments") or [])
     if dh and set(mass_def.departments) <= dh:
         plate = _mass_target_gsf(session, mass_def.departments)
@@ -699,6 +695,19 @@ def _width_from_brief(session: StudySession, mass_def: Any, config: dict[str, An
     exact = c.get("exact_building_length_ft")
     if exact and plate > 0:
         return plate / float(exact)
+    from .mass_prefs import width_for_shape
+
+    shaped = width_for_shape(
+        c.get(f"{mass_def.id}_shape"),
+        c.get(f"{mass_def.id}_length_over_width"),
+        plate,
+        width,
+    )
+    if shaped:
+        return shaped
+    stated = c.get(f"{mass_def.id}_width_ft") or c.get("preferred_width_ft")
+    if stated:
+        return width
     ratio = c.get("length_over_width")
     if ratio and plate > 0:
         # Prefer the stated proportion. If that length then exceeds a cap,

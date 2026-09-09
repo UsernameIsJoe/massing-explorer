@@ -68,7 +68,7 @@ def _commit_brief_with_reading(
         reading = request_reading(
             client, user_text, session.department_names(), parsed.to_dict()
         )
-    engine = apply_parsed_brief(session, parsed, reading=reading)
+    engine = apply_parsed_brief(session, parsed, reading=reading, client=client)
     engine["scheme_pick"] = None
     engine["repair"] = None
 
@@ -83,42 +83,7 @@ def _commit_brief_with_reading(
 
     solved = engine.get("solved") or {}
     failed = list(solved.get("failed_checks") or [])
-    if failed and session.constraints.get("length_limit_is_cap"):
-        from .reading import request_cap_reasoning
-
-        cap = float(session.constraints.get("max_building_length_ft") or 0)
-        lock = {
-            str(k): int(v)
-            for k, v in (session.constraints.get("story_lock") or {}).items()
-        }
-        max_stories = int(session.constraints.get("max_stories") or 4)
-        masses = [
-            {
-                "id": m.id,
-                "name": m.name,
-                "stories": m.story_count,
-                "departments": list(m.departments),
-            }
-            for m in session.masses
-        ]
-        reasoned = request_cap_reasoning(
-            client, cap, masses, max_stories, lock
-        )
-        if reasoned:
-            if reasoned.get("loading") in {"single", "double"}:
-                session.constraints["loading"] = reasoned["loading"]
-            for mid, count in (reasoned.get("stories") or {}).items():
-                mass = next((m for m in session.masses if m.id == mid), None)
-                if mass is None or mid in lock:
-                    continue
-                mass.story_count = int(count)
-            from .tools import solve_dimensions
-
-            solved = solve_dimensions(session)
-            engine["solved"] = solved
-            engine["cap_reasoning"] = reasoned
-            failed = list(solved.get("failed_checks") or [])
-    if failed:
+    if failed and not (engine.get("try_loop") or {}).get("fits_limitations"):
         masses = [
             {"id": m.id, "name": m.name, "stories": m.story_count}
             for m in session.masses
@@ -145,6 +110,15 @@ def _commit_brief_with_reading(
 def run_chat_turn(session: StudySession, client: OllamaClient, user_text: str) -> str:
     """Process one user message; may involve multiple tool-call rounds."""
     session.messages.append(ChatMessage(role="user", content=user_text))
+
+    from .preference import take_choice
+
+    choice = take_choice(session, user_text)
+    if choice:
+        reply = choice["reply"]
+        session.messages.append(ChatMessage(role="assistant", content=reply))
+        session.save()
+        return reply
 
     # Grouping and site limits come from the engine, not the LLM. Run the
     # brief through the pipeline first so a message like "custodial and dining
@@ -175,13 +149,17 @@ def run_chat_turn(session: StudySession, client: OllamaClient, user_text: str) -
             "all_checks_passed": (engine.get("solved") or {}).get("all_checks_passed"),
             "failed_checks": (engine.get("solved") or {}).get("failed_checks"),
             "masses": (engine.get("solved") or {}).get("masses"),
+            "try_loop": engine.get("try_loop"),
             "instruction": engine.get("instruction"),
         }
         engine_note = (
             "The brief is already classified. Requirements must hold. Limitations "
             "are caps: do not set a dimension to the cap. Preferences may be met "
             "in more than one way; a ground-floor preference is not its own mass. "
-            "Report those three roles, the scheme kept, and every failed check. "
+            "A preference on a named mass (thin, box, cube, its own story count) "
+            "is how that mass should sit with the others, under the mass count "
+            "and the length cap. Report those three roles, the scheme kept, and "
+            "every failed check. "
             "Do not invent dimensions or regroup a required wing.\n"
             + json.dumps(compact, indent=2)[:6000]
         )
