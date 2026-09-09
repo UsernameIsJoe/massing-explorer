@@ -2,6 +2,11 @@
 
 Step-by-step build plan. Do not skip validation gates between phases.
 
+Phases 1–6 built the **engine** (ingest, chat, solver, pairing, floors, width
+search). The **control loop** on that engine is [BLUEPRINT-search.md](BLUEPRINT-search.md):
+COVER / LEARN / REFINE over a strategy archive. See [CONCEPT.md](CONCEPT.md)
+and [WORKFLOW.md](WORKFLOW.md).
+
 ---
 
 ## Phase 1 — Program engine (no LLM)
@@ -192,6 +197,52 @@ least as strict as the solver on every shared limit.
 | Pairing | members share one width and sum to the stated frontage | PASS |
 | Scenario C | the case that needed manual reasoning now solves automatically | PASS |
 
+Chat no longer *stops* at this enumerator. `search.py` remains the width/story
+**baseline**. A brief now runs COVER / LEARN / REFINE over distinct legal
+strategies in `explore/` (next section).
+
+---
+
+## Strategy search (blueprint, 9 Sep 2026) [COMPLETE]
+
+**Goal:** Drive the existing engine with the control loop in
+[BLUEPRINT-search.md](BLUEPRINT-search.md). COVER / LEARN / REFINE are modes
+over a design archive, not Stage 1 → 2 → 3, and not a width enumerator.
+
+Concept: [CONCEPT.md](CONCEPT.md). Workflow: [WORKFLOW.md](WORKFLOW.md).
+
+### Deliverables
+
+- [x] Constitution — this loop is project law
+- [x] Spine — `explore/`: strategy `S = (P, T, V, G, D)`, typed actions, archive, performance vector, controller
+- [x] Modes — COVER / LEARN / REFINE; pairwise LEARN; lineage REFINE
+- [x] Open P — legal partitions only when grouping was not required
+- [x] Planner — one LLM, ≤5 typed actions, engine apply/reject
+- [x] Explain and robustness — empty-cell sentences; program-area shock on the same strategy
+- [x] CP/CSP — distinct feasible partitions; the LLM does not invent P
+- [x] T and D — only drawable topologies and stated site; courtyard unsupported
+- [x] MCTS — over design actions, planner as expansion prior; `search.py` stays the baseline
+- [x] Bayesian optimization in `explore/bayes.py` — evaluation-budget manager, not a generator, not on feet
+
+### The trust rule (unchanged)
+
+The engine stays the engine. Search only *proposes*. Each candidate still goes
+through `solve_massing_study`. An unsupported topology is not a coverage failure.
+A required grouping is not a Monte Carlo coordinate.
+
+### Test criteria
+
+| Test | Pass condition |
+|------|----------------|
+| Locked P | Four named masses + gym with dining → one partition |
+| Open P | No grouping required → CSP lists several legal organizations |
+| Split illegal | `SPLIT_MASS` rejected when mass count was required |
+| Courtyard | Named, unsupported, not a failed sample |
+| Planner cap | At most five typed actions; invented feet dropped |
+| LEARN | A/B among feasible elites; a written brief is not a choice |
+| MCTS | Sits on actions, not widths; planner is expansion prior |
+| Chat path | `apply_brief` still solves and reports failed checks |
+
 ---
 
 ## Phase 7 — Rhino export (optional)
@@ -226,7 +277,9 @@ Phase 4 (multi-mass + site)
     ↓
 Phase 5 (program per level)
     ↓
-Phase 6 (scheme search / auto-fit)
+Phase 6 (scheme search / auto-fit) — enumeration baseline
+    ↓
+Strategy search (blueprint 0–8) — archive + COVER/LEARN/REFINE
     ↓
 Phase 7 (Rhino) — optional
 ```
@@ -236,16 +289,16 @@ Phase 7 (Rhino) — optional
 ## Out of scope (all phases for now)
 
 - Screenshot / vision program ingest
-- Multiple simultaneous massing options
 - Room-level 2D layout within a floor plate (allocation is by area, and room
   names per floor are indicative only)
-- Searching over *groupings* — Phase 6 searches widths and story counts, but
-  which departments share a mass is still the user's call
-- L-shaped / courtyard site packing (combined length is read as a single row)
-- Rhino site context import
+- Searching over *groupings when the brief already required them* — open P is
+  enumerated only when grouping was not a must
+- Courtyard / podium / perpendicular site packing until layout can draw them
+- Streets, neighbors, topography, EnergyPlus (D waits for those inputs)
 - Web UI
 - Cloud LLM APIs
 - Angled site boundaries
+- Treating Bayesian optimization as a shape generator or putting it on feet
 
 ---
 

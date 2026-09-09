@@ -2,15 +2,19 @@
 
 Decisions locked from the initial planning discussion (Sep 2026). Update this file when a decision changes.
 
+**Search constitution (9 Sep 2026):** [BLUEPRINT-search.md](BLUEPRINT-search.md). Product idea: [CONCEPT.md](CONCEPT.md). Chat path: [WORKFLOW.md](WORKFLOW.md).
+
 ---
 
 ## Product scope
 
-**Massing Explorer** is a standalone **program-to-massing dimension study** tool. It is not a parametric slider toy and not a site-context exporter.
+**Massing Explorer** is a standalone **program-to-massing explorer**. It is not a parametric slider toy, not a site-context exporter, and not an AI shape generator.
 
-Primary goal: automate the manual workflow of translating a program spreadsheet into tested conceptual masses while continuously validating GSF.
+Primary goal: make the architect smarter about the design problem — which legal strategies exist, which archive cells are empty and why — while continuously validating GSF.
 
-Secondary goal (later): export geometry to Rhino.
+Secondary goal: export geometry to Rhino.
+
+A strategy is `S = (P, T, V, G, D)`, not a width. The LLM emits typed design actions. The engine applies or rejects them. COVER / LEARN / REFINE are modes over one archive.
 
 ---
 
@@ -54,12 +58,13 @@ anchor_rooms:
 
 ### Site / planning limits
 
-- **No Rhino site model** in early phases.
+- **No Rhino site model** required.
 - User states constraints in chat or config file:
   - max length / width per mass
   - fixed planning widths (e.g. 80 ft academic)
   - how many masses fit in a given dimension
   - which programs stack in which mass
+- **D** in the strategy is the stated rectangle and frontage. Streets, neighbors, topography, and EnergyPlus wait until those inputs exist.
 
 ---
 
@@ -73,16 +78,18 @@ anchor_rooms:
 
 ### LLM responsibilities
 
-- Interpret program structure
-- Propose department → mass groupings
-- Propose story counts
-- Apply conversational constraints ("keep HPE with dining")
-- Explain tradeoffs in plain language
+- Interpret a brief into requirements, limitations, and preferences
+- Propose at most five typed design actions (planner); the engine falsifies them
+- Explain legal vs empty cells, tradeoffs, and failed checks in plain language
+- Record follow-up constraints after the first brief
+
+The planner does **not** invent program partitions. CSP enumerates P only when grouping was not required. Named masses and stated keep-together stay locked.
 
 ### LLM must NOT
 
 - Perform arithmetic (GSF, areas, dimensions)
 - Output final dimensions without engine validation
+- Undo a required wing, fill a cap, invent a courtyard, or treat a width as a concept
 
 ---
 
@@ -113,12 +120,19 @@ All math is deterministic Python.
 
 ### State
 
-- **Remember** current study across chat turns: active masses, dimensions, assignments, last validation.
+- **Remember** current study across chat turns: active masses, dimensions, assignments, last validation, explore archive.
+
+### Grouping
+
+- Propose partitions **only when the brief did not require a grouping**.
+- Never undo a stated must (named masses, keep-together, keep-apart, alone, same-mass, stated mass count).
+- If the user said four masses and gym with dining, that is one P.
 
 ### Options
 
-- **One massing proposal at a time** for v1.
-- Multi-option comparison deferred to a later phase.
+- **One kept drawing** on the study at a time (what chat shows).
+- The **archive** holds several architecturally distinct elites (different P or T, not three widths of the same bar).
+- LEARN may ask A or B among two feasible drawings. A written brief is not a comparison.
 
 ---
 
@@ -176,7 +190,7 @@ Translate an architectural program spreadsheet into conceptual building masses:
 | 10 | Assign programs to floors; keep departments together |
 | 11 | Solve paired masses: W = (A₁+A₂)/L, L₁ = A₁/W, L₂ = A₂/W |
 | 12 | Apply site constraints; compensate via other dim / floors / distribution |
-| 13 | Compare alternatives (deferred — single option for v1) |
+| 13 | Compare alternatives among **legal** strategies (COVER map, LEARN A/B, REFINE lineages) |
 | 14 | Recalculate on every dimension change |
 | 15 | Final GSF verification: Fit = Actual − Target |
 
@@ -187,16 +201,16 @@ Translate an architectural program spreadsheet into conceptual building masses:
 | 1 | Excel parser + engine verification |
 | 2 | Engine |
 | 3 | Schema + engine |
-| 4 | LLM proposes, user confirms |
-| 5 | LLM proposes, engine validates |
+| 4 | Brief locks P when grouping was required; CSP proposes partitions only when it was not. LLM does not invent P. |
+| 5 | Planner / MCTS may propose story counts; engine validates |
 | 6 | Engine solves, LLM picks proportion preference |
 | 7 | Engine (anchor rooms) |
 | 8 | Engine |
 | 9 | Engine + LLM assignment |
-| 10 | LLM proposes, engine validates per floor |
-| 11 | Engine |
-| 12 | Engine (from config/chat limits) |
-| 13 | Deferred |
+| 10 | Pins from brief/chat; engine allocates per floor |
+| 11 | Engine (pairing is T when the brief actually paired) |
+| 12 | Engine (from config/chat limits). A cap is a filter, never a length to draw. |
+| 13 | `explore/` archive: COVER / LEARN / REFINE. `search.py` is the width/story baseline. |
 | 14–15 | Engine (always) |
 
 ---
@@ -211,7 +225,7 @@ Translate an architectural program spreadsheet into conceptual building masses:
 | 4 | Fixed grossing factors? | No — per project |
 | 5 | Units | Feet first |
 | 6 | UI | Algorithm over UI; CLI |
-| 7 | Multiple options | One at a time for now |
+| 7 | Multiple options | One kept drawing; archive of distinct elites; LEARN A/B |
 | 8 | Remember state | Yes |
 | 9 | Adjacency | Conversational |
 | 10 | Output | Text for now; Rhino later |
@@ -224,7 +238,7 @@ Translate an architectural program spreadsheet into conceptual building masses:
 | 17 | LLM runtime | Ollama |
 | 18 | Local only? | Yes |
 | 19 | Screenshots? | No |
-| 20 | v1 scope | Phased; see PHASES.md |
+| 20 | v1 scope | Phased engine (PHASES.md) plus blueprint search loop |
 
 ---
 

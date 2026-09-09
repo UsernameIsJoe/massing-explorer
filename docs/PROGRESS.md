@@ -5,6 +5,50 @@ Update this file at the end of every work session.
 
 ---
 
+## 2026-09-09 — Blueprint search loop on the existing engine
+
+### Done
+
+Project law is [BLUEPRINT-search.md](BLUEPRINT-search.md). Chat now follows that
+control loop. Product pages: [CONCEPT.md](CONCEPT.md), [WORKFLOW.md](WORKFLOW.md).
+
+- **Spine** — `explore/`: strategy `S = (P, T, V, G, D)`, typed actions, archive,
+  performance vector, controller. `brief.apply_parsed_brief` calls
+  `run_search(mode="cover")`.
+- **Modes** — COVER / LEARN / REFINE over one archive. A written brief is not a
+  LEARN sample. Typing A or B in chat is a comparison of two legal drawings.
+- **Open P / CSP** — partitions only when grouping was not required. Named masses
+  and keep-together stay locked.
+- **Planner** — ≤5 typed actions; engine apply/reject; illegal proposals counted.
+- **Explain / robustness** — empty-cell sentences; grow/shrink a department and
+  re-solve the same strategy.
+- **T and D** — independent bars, paired bars if a frontage cap is stated,
+  L leftover. Courtyard stays unsupported.
+- **MCTS** — over design actions, planner as expansion prior. Does not sit on
+  feet. `search.py` remains the enumeration baseline.
+- **Bayesian optimization** — `explore/bayes.py` is a GP + expected-improvement
+  **budget manager** on COVER. Not a generator. Not on feet. Dedicated tests
+  and a judge board were not finished.
+
+Pushed to GitHub as `76aecd5`. Docs in this session catch README / PHASES /
+DECISIONS up to that loop.
+
+### Discussions
+
+- The workflow is the blueprint loop (the old “diagram 13”), not DECISIONS
+  step 13 as it was originally written. Step 13 in DECISIONS is now LEARN /
+  archive comparison, not “deferred.”
+- Grouping rule stays: propose partitions only when the brief did not require
+  a grouping; never undo a stated must.
+
+### Next steps
+
+- Finish BO tests and a judge board, or keep BO off the critical path until a
+  run costs minutes (constitution).
+- COVER stop-when-no-new-cell, explicit incomplete-map, “Why B?” explain turn.
+
+---
+
 ## 2026-09-03 — Phase 5 complete: floor-by-floor program allocation
 
 ### Done

@@ -92,20 +92,27 @@ sit on feet.
 
 ---
 
-## Boxes that already exist
+## Boxes in the code
 
 | Box | Module today |
 |-----|----------------|
 | Intent interpreter | `reading.py`, `brief.py` |
-| Structured design state | `StudySession` |
+| Structured design state | `StudySession`, `explore/strategy.py` as `S = (P, T, V, G, D)` |
+| Strategy planner | `explore/planner.py` |
+| Semantic actions | `explore/actions.py` |
 | Constraint / massing engine | `solver.py`, `layout.py`, `allocate.py`, pairing, GSF |
-| Measured traits | `traits.py` |
-| LEARN (pairwise) | `preference.py` |
-| COVER / REFINE inside one geometry strategy | `sample_space.py`, `try_loop.py` |
+| Performance vector | `explore/performance.py` |
+| Design archive | `explore/archive.py` |
+| COVER / LEARN / REFINE | `explore/controller.py` |
+| LEARN (pairwise) | `explore/preference.py` |
+| Open P | `explore/csp.py`, `explore/partitions.py` |
+| Drawable T and stated D | `explore/topology.py` |
+| MCTS around planner + engine | `explore/mcts.py` |
+| Bayesian budget manager | `explore/bayes.py` |
+| Width/story enumeration baseline | `search.py` |
 
-The missing spine is a strategy object, typed design actions, a behavior
-archive, a controller that picks COVER / LEARN / REFINE, and (later) a planner
-that proposes actions the engine can reject.
+Chat entry: `brief.apply_parsed_brief` → `explore.controller.run_search`. Product
+pages: [CONCEPT.md](CONCEPT.md), [WORKFLOW.md](WORKFLOW.md).
 
 ---
 
@@ -275,7 +282,9 @@ repository. Do not rewrite the solver to "start over."
 8. **MCTS** — over design actions, planner as expansion prior.
    `search.py` remains the enumeration baseline for experiments.
 
-Do not start MCTS before the archive and action language work.
+Phases 0–8 are in. Bayesian optimization sits beside COVER as an
+evaluation-budget manager; it is not a generator and is not on feet.
+MCTS still does not sit on feet. Do not put either on widths.
 
 ---
 
