@@ -590,6 +590,9 @@ def assign_open_departments(parsed: ParsedBrief, reading: Any = None) -> None:
     free = list(parsed.free_departments)
     if not free:
         return
+    if parsed.mass_count is None and parsed.open_slots is None:
+        # The user did not ask for a mass count. Family grouping owns leftovers.
+        return
     slots = parsed.open_slots if parsed.open_slots is not None else 1
     proposal = _proposal_for_free(reading, free, slots, parsed.pin_ground)
     groups = proposal or _pack_free(free, max(1, slots))
@@ -636,6 +639,14 @@ def briefing_from_parsed(parsed: ParsedBrief) -> dict[str, list[dict[str, Any]]]
     if parsed.mass_count:
         requirements.append(
             {"kind": "requirement", "lever": "mass_count", "text": "", "value": parsed.mass_count}
+        )
+    for a, b in parsed.keep_together:
+        requirements.append(
+            {"kind": "requirement", "lever": "keep_together", "text": "", "departments": [a, b]}
+        )
+    for a, b in parsed.keep_apart:
+        requirements.append(
+            {"kind": "requirement", "lever": "keep_apart", "text": "", "departments": [a, b]}
         )
     for dept in parsed.double_height_departments:
         requirements.append(
@@ -838,6 +849,7 @@ def _apply_reading_levers(session: StudySession, reading: Any) -> list[str]:
                 session, mass_ids, float(pair_length), length_is_cap=True
             )
             if paired.get("ok"):
+                session.constraints["topology_locked"] = True
                 notes.append(
                     "paired "
                     + " + ".join(mass_ids)
@@ -856,6 +868,7 @@ def _apply_reading_levers(session: StudySession, reading: Any) -> list[str]:
         if len(mass_ids) >= 2:
             paired = pair_masses(session, mass_ids, float(total))
             if paired.get("ok"):
+                session.constraints["topology_locked"] = True
                 notes.append(
                     "paired "
                     + " + ".join(mass_ids)
@@ -972,10 +985,12 @@ def apply_parsed_brief(
     search: bool = True,
     top_n: int = 3,
     reading: Any = None,
+    client: Any = None,
+    plan: Any = None,
 ) -> dict[str, Any]:
     """Write the parsed brief onto the session and optionally search for a scheme."""
     from .config import load_project_config
-    from .tools import search_site_schemes, set_constraint, set_grouping, solve_dimensions
+    from .tools import set_constraint, set_grouping
 
     config = load_project_config(session.config_path or None)
     _merge_reading(parsed, reading)
@@ -1003,6 +1018,8 @@ def apply_parsed_brief(
             note = f"{a} stays with {b}"
             if note not in session.adjacency_notes:
                 session.adjacency_notes.append(note)
+        if parsed.keep_apart:
+            session.constraints["keep_apart"] = [list(p) for p in parsed.keep_apart]
         session.save()
 
     reading_notes = _apply_reading_levers(session, reading)
@@ -1049,28 +1066,19 @@ def apply_parsed_brief(
 
     searched = None
     solved = None
+    explored = None
     if search and session.masses:
-        max_stories = int(
-            parsed.max_stories
-            or session.constraints.get("max_stories")
-            or 4
-        )
-        if parsed.has_site or session.constraints.get("max_total_length_ft"):
-            searched = search_site_schemes(
-                session,
-                max_total_length_ft=session.constraints.get("max_total_length_ft"),
-                max_length_ft=session.constraints.get("max_building_length_ft"),
-                max_width_ft=session.constraints.get("max_building_width_ft"),
-                max_stories=max_stories,
-                preference=parsed.preference,
-                top_n=top_n,
-            )
-            if searched.get("ok") and searched.get("found"):
-                from .tools import apply_scheme
+        from .explore.controller import run_search
 
-                solved = apply_scheme(session, 0)
-        else:
-            solved = solve_dimensions(session)
+        explored = run_search(session, mode="cover", client=client, plan=plan)
+        solved = explored.get("solved")
+        searched = {
+            "ok": True,
+            "found": len(session.last_search or []),
+            "schemes": session.last_search or [],
+            "notes": [explored.get("note") or ""],
+            "archive": explored.get("archive"),
+        }
 
     return {
         "ok": True,
@@ -1092,6 +1100,7 @@ def apply_parsed_brief(
         ),
         "search": searched,
         "solved": solved,
+        "explore": (session.constraints.get("explore") or None),
         "briefing": session.constraints.get("briefing"),
         "instruction": (
             "The brief is already split into requirements, limitations, and "

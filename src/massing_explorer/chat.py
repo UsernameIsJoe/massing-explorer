@@ -68,7 +68,7 @@ def _commit_brief_with_reading(
         reading = request_reading(
             client, user_text, session.department_names(), parsed.to_dict()
         )
-    engine = apply_parsed_brief(session, parsed, reading=reading)
+    engine = apply_parsed_brief(session, parsed, reading=reading, client=client)
     engine["scheme_pick"] = None
     engine["repair"] = None
 
@@ -146,6 +146,15 @@ def run_chat_turn(session: StudySession, client: OllamaClient, user_text: str) -
     """Process one user message; may involve multiple tool-call rounds."""
     session.messages.append(ChatMessage(role="user", content=user_text))
 
+    from .explore.preference import take_choice
+
+    choice = take_choice(session, user_text)
+    if choice:
+        reply = choice["reply"]
+        session.messages.append(ChatMessage(role="assistant", content=reply))
+        session.save()
+        return reply
+
     # Grouping and site limits come from the engine, not the LLM. Run the
     # brief through the pipeline first so a message like "custodial and dining
     # should stay together, site length is 300" is already applied.
@@ -175,13 +184,19 @@ def run_chat_turn(session: StudySession, client: OllamaClient, user_text: str) -
             "all_checks_passed": (engine.get("solved") or {}).get("all_checks_passed"),
             "failed_checks": (engine.get("solved") or {}).get("failed_checks"),
             "masses": (engine.get("solved") or {}).get("masses"),
+            "explore": engine.get("explore"),
             "instruction": engine.get("instruction"),
         }
         engine_note = (
             "The brief is already classified. Requirements must hold. Limitations "
             "are caps: do not set a dimension to the cap. Preferences may be met "
             "in more than one way; a ground-floor preference is not its own mass. "
-            "Report those three roles, the scheme kept, and every failed check. "
+            "COVER/LEARN/REFINE ran over the design archive. A planner may have "
+            "proposed up to five typed actions; report how many were applied, "
+            "illegal, or unsupported. Name empty cells (unsupported, locked, "
+            "infeasible) and whether the kept strategy survived a program-area "
+            "shock. Report legal vs infeasible cells, the pending A/B pair if any, "
+            "the scheme kept, and every failed check. "
             "Do not invent dimensions or regroup a required wing.\n"
             + json.dumps(compact, indent=2)[:6000]
         )
