@@ -2,6 +2,8 @@
 
 Recorded 8 Sep 2026. This is the discussion as it stood. It is not an implementation spec and it does not change the current search code.
 
+**Project law is now `docs/BLUEPRINT-search.md` (9 Sep 2026).** That file turns the three jobs below into COVER / LEARN / REFINE modes over an archive, with a strategy planner and a locked grouping rule. This note stays as the earlier argument.
+
 ---
 
 ## Proposal
