@@ -157,6 +157,13 @@ class TestController(unittest.TestCase):
         self.session = StudySession(
             study_id="explore_phase1", program=program, config_path=str(CONFIG)
         )
+        # Keep suite fast; production COVER uses start=40 / max=120.
+        self.session.constraints["cover_budget"] = {
+            "start": 8,
+            "step_small": 4,
+            "step_large": 6,
+            "max": 20,
+        }
         self.session.save()
 
     def tearDown(self) -> None:

@@ -5,6 +5,31 @@ Update this file at the end of every work session.
 
 ---
 
+## 2026-09-09 — Adaptive multi-axis COVER + brief number guarantee
+
+### Done
+
+- **Adaptive COVER** — `explore/cover.py` samples joint strategies across P,
+  story patterns, drawable T, loading, and envelope (balanced / compact /
+  elongated). Budget: start ~40 → +10/+20 while new legal regions appear →
+  stagnant stop → cap ~120 with incomplete-map flag. Wired as the default
+  `_cover` path; cell keys include envelope.
+- **Default schedule** (unchanged order, richer COVER map): intent → COVER →
+  LLM planner → MCTS → BO → REFINE → LEARN pair prep.
+- **Brief numbers** — digits and spelled values must be robust-parsed, LLM-
+  interpreted (all numbers in a clause), or asked; modality memory + UI ask
+  for unknown wording / unplaced sizes. `each length under 40 m` / forty
+  meters → per-mass length cap.
+- **Docs** — [BLUEPRINT-search.md](BLUEPRINT-search.md), [WORKFLOW.md](WORKFLOW.md)
+  updated for adaptive COVER and the full schedule.
+
+### Next steps
+
+- “Why B?” explain turn; richer BO / MCTS use of envelope in encodings.
+- Courtyard and other unsupported T remain named, not sampled.
+
+---
+
 ## 2026-09-09 — Blueprint search loop on the existing engine
 
 ### Done

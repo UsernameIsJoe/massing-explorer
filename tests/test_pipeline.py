@@ -47,6 +47,16 @@ class TestParseBrief(unittest.TestCase):
         program = load_program_file(UNDERWOOD, config_path=CONFIG)
         self.names = [d.name for d in program.departments]
 
+    def test_attached_to_and_paired_with(self) -> None:
+        parsed = parse_brief(
+            "custodial should be attached to dining, and media should be "
+            "paired with administration",
+            self.names,
+        )
+        pairs = {tuple(sorted(p)) for p in parsed.keep_together}
+        self.assertIn(tuple(sorted((CUSTODIAL, DINING))), pairs)
+        self.assertIn(tuple(sorted((MEDIA, ADMIN))), pairs)
+
     def test_example_prompt(self) -> None:
         parsed = parse_brief(
             "custodial and dining should stay together, site length is 300, "

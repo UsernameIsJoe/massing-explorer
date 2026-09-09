@@ -103,7 +103,7 @@ sit on feet.
 | Constraint / massing engine | `solver.py`, `layout.py`, `allocate.py`, pairing, GSF |
 | Performance vector | `explore/performance.py` |
 | Design archive | `explore/archive.py` |
-| COVER / LEARN / REFINE | `explore/controller.py` |
+| COVER / LEARN / REFINE | `explore/controller.py`, `explore/cover.py` |
 | LEARN (pairwise) | `explore/preference.py` |
 | Open P | `explore/csp.py`, `explore/partitions.py` |
 | Drawable T and stated D | `explore/topology.py` |
@@ -178,16 +178,23 @@ Unknown departments and invented sizes are dropped, as in `reading.py`.
 ```
 
 The archive holds one elite per **behavior cell**, not per width. A cell is a
-legal typology: organization (and partition id when P was open), shape family,
-story band, loading. Illegal evaluations are attempts, not coverage.
+legal typology: organization (and partition id when P was open), story band,
+loading, topology, and envelope family. Illegal evaluations are attempts, not
+coverage.
 
 ### COVER
 
 What fundamentally different feasible strategies have we not investigated?
 
-Generate proposals that fill empty **supported** cells. Stop when the remaining
-design cannot open a new legal cell, or say the map is incomplete if a safety
-cap hits first. Do not call a truncated story product a joint sample.
+Sample **joint** points across open axes — program organization (P), story
+*patterns* (not one-mass increments), drawable topology (T), loading, and
+envelope family (balanced / compact / elongated) — rather than a product of
+story margins around the baseline.
+
+**Adaptive budget:** start ~40 evaluations → measure new legal regions → if
+still discovering, add +10 or +20 → stop when stagnant → hard cap ~100–120.
+If the cap hits while regions are still opening, mark the map incomplete.
+Do not call a truncated story product a joint sample.
 
 ### LEARN
 
@@ -207,10 +214,16 @@ widths of the same bar). Allocate local tries by weight, with a floor so a
 light lineage is not deleted. After a choice, reweight; do not open a new
 sample by inventing feet.
 
-Default schedule for a fresh brief: COVER until no new legal supported cell,
-LEARN when two feasible elites exist, REFINE only in kept cells. A later turn
-can switch mode. The three jobs from the earlier plan remain; they are no
-longer the identity of the algorithm.
+Default schedule for a fresh brief:
+
+```
+Intent extraction → COVER → LLM planner → MCTS → Bayesian optimization
+→ REFINE → LEARN pair preparation
+```
+
+COVER fills the archive first so planner / MCTS / BO see a real multi-axis map.
+A later turn can switch mode (`cover` / `learn` / `refine`). The three jobs
+from the earlier plan remain; they are no longer the identity of the algorithm.
 
 ---
 

@@ -63,18 +63,17 @@ MCTS sits around the **planner + engine** loop. Bayesian optimization, when it r
 ## First brief (default COVER)
 
 1. **Ingest.** Excel/CSV program is already on the study (or loaded with the chat command).
-2. **Interpret.** `reading.py` + `brief.py` split the message into requirements, limitations, and preferences. Unknown departments and invented sizes are dropped.
+2. **Interpret.** `brief.py` + `reading.py` (and modality memory / ask when needed) split the message into requirements, limitations, and preferences. Every stated number — digit or spelled — must land on a lever, be LLM-mapped, or trigger an ask; unknown departments are dropped.
 3. **Lock what was stated.** Named masses, keep-together, keep-apart, alone, same-mass, and a stated mass count stay locked. Pairing from the brief locks topology. A length cap is stored as a filter, not a target.
-4. **COVER the archive.**
-   - Realize the stated strategy through the engine.
-   - If T is open, sample drawable topologies only (independent bars, or paired bars when a frontage cap is stated).
-   - If P is open, CSP enumerates distinct legal partitions. The LLM does not invent P.
-   - The planner proposes at most five typed actions. The engine applies or rejects them.
-   - MCTS searches over those actions, using the planner as an expansion prior.
-   - Bayesian optimization may spend a few more evaluations on high expected-improvement actions.
-   - REFINE then allocates local tries among several kept lineages (different P or T, not three widths of the same bar).
-5. **LEARN prepares a pair** when two feasible elites exist. A written brief is not a comparison.
-6. **Keep one drawing** on the study. Report legal vs infeasible cells, empty-cell reasons, robustness survive/collapse, applied vs illegal vs unsupported planner moves, the scheme kept, any pending A/B, and every failed check.
+4. **COVER the archive** (`explore/cover.py`).
+   - Stratified joint samples across open axes: P, story patterns, drawable T, loading, envelope (balanced / compact / elongated).
+   - Adaptive budget: start ~40 → expand +10/+20 while new legal regions appear → stop when stagnant → cap ~120 (incomplete map if still discovering).
+5. **LLM planner** proposes at most five typed actions. The engine applies or rejects them.
+6. **MCTS** searches over those actions, using the planner as an expansion prior.
+7. **Bayesian optimization** spends a few more evaluations on high expected-improvement actions, fit from the COVER archive.
+8. **REFINE** allocates local tries among several kept lineages (different P or T, not three widths of the same bar).
+9. **LEARN prepares a pair** when two feasible elites exist. A written brief is not a comparison.
+10. **Keep one drawing** on the study. Report legal vs infeasible cells, empty-cell reasons, robustness, applied vs illegal vs unsupported planner moves, the scheme kept, any pending A/B, and every failed check.
 
 Chat entry: `apply_parsed_brief` → `explore.controller.run_search(mode="cover")`.
 
@@ -115,9 +114,9 @@ The LLM does not emit geometry. It emits moves. The engine applies or rejects.
 
 ## Three modes, one archive
 
-The archive holds one elite per **behavior cell**, not per width. A cell is a legal typology: organization (and partition id when P was open), shape family, story band, loading. Illegal evaluations are attempts, not coverage.
+The archive holds one elite per **behavior cell**, not per width. A cell is a legal typology: organization (and partition id when P was open), story band, loading, topology, envelope family. Illegal evaluations are attempts, not coverage.
 
-**COVER** — What fundamentally different feasible strategies have we not investigated? Fill empty **supported** cells. An unsupported cell is not a coverage failure.
+**COVER** — What fundamentally different feasible strategies have we not investigated? Joint multi-axis samples with an adaptive evaluation budget. An unsupported cell is not a coverage failure.
 
 **LEARN** — What comparison would teach us the most about what the designer values? Pairwise A/B among feasible schemes only. Bradley–Terry on measured traits (spread, height variance, likeness, street edge if a frontage exists).
 
@@ -131,7 +130,7 @@ The archive holds one elite per **behavior cell**, not per width. A cell is a le
 |-------|------|
 | `solver.py`, `layout.py`, `allocate.py` | Footprints, pairing, voids, GSF, floors |
 | `search.py` | Width/story enumeration baseline for experiments |
-| `explore/` | Strategy, actions, archive, modes, planner, CSP, MCTS, BO budget |
+| `explore/` | Strategy, actions, archive, adaptive COVER, modes, planner, CSP, MCTS, BO budget |
 
 Every scheme written onto the study is still verified through `solve_massing_study`. Search cannot claim something the solver rejects.
 

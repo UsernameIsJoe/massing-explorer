@@ -112,6 +112,7 @@ def read_strategy(session: Any) -> dict[str, Any]:
         "G": {
             "stories": {m["id"]: m["stories"] for m in masses},
             "loading": loading,
+            "envelope": session.constraints.get("cover_envelope") or "balanced",
         },
         "D": {
             "max_building_length_ft": session.constraints.get("max_building_length_ft"),
@@ -129,10 +130,11 @@ def read_strategy(session: Any) -> dict[str, Any]:
 
 
 def cell_key(session: Any) -> str:
-    """Behavior cell: organization, story band, loading, topology."""
+    """Behavior cell: organization, story band, loading, topology, envelope."""
     loading = session.constraints.get("loading") or "double"
     topo = topology_of(session)
-    parts = [f"loading:{loading}", f"topo:{topo}"]
+    env = session.constraints.get("cover_envelope") or "balanced"
+    parts = [f"loading:{loading}", f"topo:{topo}", f"env:{env}"]
     for mass in session.masses:
         depts = ",".join(mass.departments)
         parts.append(f"{mass.id}:{story_band(mass.story_count)}:{depts}")

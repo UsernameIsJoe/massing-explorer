@@ -1,9 +1,8 @@
 """
 Search controller: COVER / LEARN / REFINE over the archive.
 
-Default after a brief: COVER until story margins are tried, REFINE around
-several legal lineages, LEARN prepares an A/B pair. A written brief is not
-a pairwise sample.
+Default after a brief: adaptive multi-axis COVER (start ~40, expand while
+new regions appear, cap ~120), then planner / MCTS / BO / REFINE / LEARN pair.
 """
 
 from __future__ import annotations
@@ -13,13 +12,13 @@ from typing import Any
 from ..solver import solve_massing_study
 from ..tools import solve_dimensions
 from . import archive as archive_mod
+from .cover import run_cover
 from .partitions import apply_partition, enumerate_partitions
 from .performance import measure
 from .preference import next_pair, schemes_from_archive, taste_weight
 from .strategy import grouping_is_required, partition_id, read_strategy
 
 REFINE_CAP = 6
-
 
 def run_search(session: Any, mode: str = "cover", client: Any = None, plan: Any = None) -> dict[str, Any]:
     mode = (mode or "cover").lower()
@@ -266,24 +265,25 @@ def _run_bayes(session: Any, archive: dict[str, Any]) -> dict[str, Any]:
 
 
 def _cover(session: Any, archive: dict[str, Any]) -> None:
-    origin = archive_mod.capture(session)
-    archive["stated_partition"] = partition_id(session)
-    _cover_geometry(session, archive)
-    _cover_topology(session, archive)
-    if grouping_is_required(session):
-        archive_mod.restore_snapshot(session, origin)
-        return
-    stated = partition_signature_of(session)
-    for item in enumerate_partitions(session):
-        if partition_signature_of_groups(item["groups"]) == stated:
-            continue
-        apply_partition(session, item["groups"])
-        _evaluate(session, archive, f"open P: {item['reason']}")
-    archive_mod.restore_snapshot(session, origin)
+    """Adaptive multi-axis COVER: P × stories × T × loading × envelope."""
+
+    def evaluate(current: Any, store: dict[str, Any], reason: str) -> None:
+        _evaluate(current, store, reason)
+
+    cfg = dict(session.constraints.get("cover_budget") or {})
+    run_cover(
+        session,
+        archive,
+        evaluate=evaluate,
+        start=int(cfg.get("start", 40)),
+        step_small=int(cfg.get("step_small", 10)),
+        step_large=int(cfg.get("step_large", 20)),
+        max_attempts=int(cfg.get("max", 120)),
+    )
 
 
 def _cover_topology(session: Any, archive: dict[str, Any]) -> None:
-    """Sample paired bars only when T is open and D is stated."""
+    """Legacy helper retained for tests that call it directly."""
     from ..tools import pair_masses
     from .topology import pairing_proposals, stated_frontage_ft, topology_is_required
 
@@ -319,6 +319,7 @@ def partition_signature_of_groups(groups: list[dict[str, Any]]) -> frozenset:
 
 
 def _cover_geometry(session: Any, archive: dict[str, Any]) -> None:
+    """Legacy single-axis story sweep — kept for direct unit tests."""
     _evaluate(session, archive, "stated strategy")
     lock = session.constraints.get("story_lock") or {}
     cap = max(1, int(session.constraints.get("max_stories") or 4))

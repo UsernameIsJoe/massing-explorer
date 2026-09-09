@@ -88,6 +88,14 @@ def explain(archive: dict[str, Any], grouping_locked: bool) -> str:
     else:
         bits.append(f"{len(parts)} program organization(s) in the archive.")
     bits.append("A length cap was a filter, not a target.")
+    cover = archive.get("cover") or {}
+    if cover.get("ran"):
+        bits.append(
+            f"Adaptive COVER used {cover.get('attempts')} attempt(s) "
+            f"across {cover.get('legal_regions')} legal region(s)"
+            f"{' (stopped: stagnant)' if cover.get('stagnant') else ''}"
+            f"{' (map incomplete at cap)' if cover.get('incomplete') else ''}."
+        )
     return " ".join(bits)
 
 
@@ -124,6 +132,11 @@ def restore_snapshot(session: Any, snap: dict[str, Any], stories: dict[str, Any]
             mass.story_count = int(stories[mass.id])
     if snap.get("loading"):
         session.constraints["loading"] = snap["loading"]
+    if "cover_envelope" in snap:
+        if snap.get("cover_envelope"):
+            session.constraints["cover_envelope"] = snap["cover_envelope"]
+        else:
+            session.constraints.pop("cover_envelope", None)
     if "pins" in snap:
         session.floor_pins = dict(snap.get("pins") or {})
     for mid, width in (snap.get("widths") or {}).items():
@@ -153,6 +166,7 @@ def _snapshot(session: Any) -> dict[str, Any]:
         "masses": [m.to_dict() for m in session.masses],
         "pairings": [p.to_dict() for p in (session.pairings or [])],
         "loading": session.constraints.get("loading"),
+        "cover_envelope": session.constraints.get("cover_envelope"),
         "pins": dict(session.floor_pins or {}),
         "widths": {
             m.id: session.constraints.get(f"{m.id}_width_ft") for m in session.masses

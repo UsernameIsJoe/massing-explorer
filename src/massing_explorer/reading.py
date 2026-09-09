@@ -434,12 +434,19 @@ def _fold_clause_into_reading(reading: DesignReading, clause: dict[str, Any]) ->
 
 
 def _positive_number(value: Any) -> float | None:
-    if isinstance(value, bool) or value is None:
+    if isinstance(value, bool) or value is None or value == "":
         return None
-    try:
+    if isinstance(value, (int, float)):
         number = float(value)
-    except (TypeError, ValueError):
-        return None
+    else:
+        from massing_explorer.brief import _parse_num
+
+        token = str(value).strip().lower().replace(",", "")
+        token = re.split(r"\s+", token, maxsplit=1)[0]
+        try:
+            number = _parse_num(token)
+        except (TypeError, ValueError):
+            return None
     if number <= 0:
         return None
     return number
@@ -457,10 +464,15 @@ def reading_prompt(text: str, department_names: list[str], parsed: dict[str, Any
         "a fixed template. Split every clause into one of three roles, then map "
         "it onto a lever. Do not invent sizes they did not state. Reply with one "
         "JSON object only.\n"
+        "NUMBERS: Digits (40, 85.5) and spelled forms (four, forty, twenty-five, "
+        "eighty-five) are VALUES only — never the modality role. Always emit "
+        "Arabic numerals in JSON numeric fields (value, length, width). "
+        "You MUST account for EVERY number in the user text — none may be ignored. "
+        "If a clause has two sizes (e.g. 3 stories and 210 ft), emit both. "
+        "Example: 'under forty meters' → value 40, unit m. Do not invent sizes.\n"
         "Roles:\n"
         "- requirement / limitation / preference are decided ONLY by modality "
-        "words. Digits and spelled numbers (4, four, thirty-five, 85 ft) "
-        "are VALUES only — never the role.\n"
+        "words. Digits and spelled numbers are VALUES only — never the role.\n"
         "- requirement cues: must, needs to, has to, requires, exactly "
         "(also maintain / same mass / together when they insist on organization).\n"
         "- limitation cues: should be, cannot exceed, no more than, at least, "
@@ -474,7 +486,7 @@ def reading_prompt(text: str, department_names: list[str], parsed: dict[str, Any
         "clauses: list of "
         '{"kind": "requirement|limitation|preference", "lever": "...", '
         '"text": "the user clause", "departments": ["..."], "value": number or null, '
-        '"unit": "ft|m|null", "length": number or null, "width": number or null}.\n"
+        '"unit": "ft|m|null", "length": number or null, "width": number or null}.\n'
         "Levers: same_mass, alone, mass_count, double_height, keep_together, "
         "keep_apart, exact_length, exact_width, exact_depth, dept_width, "
         "max_length, max_width, max_stories, max_height, "
@@ -506,8 +518,10 @@ def request_reading(client: Any, text: str, department_names: list[str], parsed:
                     "content": (
                         "Reply with JSON only. Classify each clause as a requirement, "
                         "a limitation, or a preference, and pass it on with a lever. "
-                        "Copy numbers the user stated. Do not invent any. A limitation "
-                        "is a cap, not a length to design to."
+                        "Process every stated number — digits and spelled (forty, four). "
+                        "Put Arabic numerals in value/length/width. Never ignore a number "
+                        "in the user text; if unsure, omit that clause rather than invent. "
+                        "Do not invent sizes. A limitation is a cap, not a length to design to."
                     ),
                 },
                 {

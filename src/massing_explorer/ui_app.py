@@ -557,6 +557,97 @@ HTML = r"""<!DOCTYPE html>
     z-index: 1;
   }
   .empty.hide { display: none; }
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.72);
+    display: none;
+    place-items: center;
+    z-index: 40;
+    padding: 24px;
+  }
+  .modal-backdrop.show { display: grid; }
+  .modal {
+    width: min(560px, 100%);
+    max-height: min(80vh, 720px);
+    overflow: auto;
+    background: #0e0e0e;
+    border: 1px solid var(--line-strong);
+    padding: 22px 22px 18px;
+  }
+  .modal h2 {
+    margin: 0 0 8px;
+    font-size: 13px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    font-weight: 500;
+    color: var(--accent);
+  }
+  .modal .lead {
+    margin: 0 0 16px;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .modal-q {
+    border-top: 1px solid var(--line);
+    padding: 14px 0 10px;
+  }
+  .modal-q .clause {
+    color: var(--text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 12px;
+    line-height: 1.45;
+    margin-bottom: 10px;
+  }
+  .modal-q .hint {
+    color: var(--faint);
+    font-size: 11px;
+    margin-bottom: 10px;
+  }
+  .modal-q .choices {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .modal-q .choices label {
+    margin: 0;
+    letter-spacing: 0;
+    text-transform: none;
+    font-size: 12px;
+    color: var(--muted);
+    border: 1px solid var(--line-strong);
+    padding: 8px 10px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .modal-q .choices label:has(input:checked) {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .modal-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 16px;
+  }
+  .modal-actions button {
+    flex: 1;
+    border: 1px solid var(--accent);
+    background: transparent;
+    color: var(--accent);
+    padding: 11px 14px;
+    font-family: inherit;
+    font-size: 11px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+  .modal-actions button.ghost {
+    border-color: var(--line-strong);
+    color: var(--muted);
+  }
   @media (max-width: 860px) {
     body { grid-template-columns: 1fr; height: auto; }
     aside { min-height: auto; }
@@ -621,6 +712,22 @@ HTML = r"""<!DOCTYPE html>
     </section>
   </main>
 
+  <div class="modal-backdrop" id="modalityModal" aria-hidden="true">
+    <div class="modal" role="dialog" aria-labelledby="modalityTitle">
+      <h2 id="modalityTitle">Classify wording</h2>
+      <p class="lead">
+        These clauses use wording we have not learned yet. Pick requirement,
+        limitation, or preference — numbers are values only. Your choice is
+        remembered across projects.
+      </p>
+      <div id="modalityQuestions"></div>
+      <div class="modal-actions">
+        <button type="button" class="ghost" id="modalitySkip">Skip for now</button>
+        <button type="button" id="modalityApply">Save &amp; generate</button>
+      </div>
+    </div>
+  </div>
+
 <script type="importmap">
 {
   "imports": {
@@ -656,6 +763,69 @@ let activeTab = "interpreted";
 let selectedSchemeRank = 0;
 let studyId = null;
 let selectedBoxId = null;
+let pendingModality = null;
+
+const modalityModal = document.getElementById("modalityModal");
+const modalityQuestions = document.getElementById("modalityQuestions");
+const modalityApply = document.getElementById("modalityApply");
+const modalitySkip = document.getElementById("modalitySkip");
+
+function openModalityModal(questions) {
+  pendingModality = questions || [];
+  const unresolved = pendingModality.some((q) => q.reason === "unresolved");
+  const title = document.getElementById("modalityTitle");
+  const lead = modalityModal.querySelector(".lead");
+  if (title) title.textContent = unresolved ? "Need a reading" : "Classify wording";
+  if (lead) {
+    lead.textContent = unresolved
+      ? "Every number in these clauses (digits or spelled) must land on a lever. Confirm requirement / limitation / preference so we can interpret and remember — nothing should be ignored."
+      : "These clauses use wording we have not learned yet. Pick requirement, limitation, or preference — numbers are values only. Your choice is remembered across projects.";
+  }
+  modalityQuestions.innerHTML = pendingModality.map((q, i) => {
+    const sug = q.suggested ? ` · model lean: ${q.suggested} (${Math.round((q.confidence||0)*100)}%)` : "";
+    const unp = q.unplaced_numbers ? ` · unplaced: ${q.unplaced_numbers}` : "";
+    const why = q.rationale ? ` — ${q.rationale}` : "";
+    const pre = q.suggested || "";
+    return `<div class="modal-q" data-idx="${i}">
+      <div class="clause">${esc(q.text)}</div>
+      <div class="hint">${esc((q.source || "unknown") + sug + unp + why)}</div>
+      <div class="choices">
+        <label><input type="radio" name="mod${i}" value="requirement" ${pre==="requirement"?"checked":""}/> Requirement</label>
+        <label><input type="radio" name="mod${i}" value="limitation" ${pre==="limitation"?"checked":""}/> Limitation</label>
+        <label><input type="radio" name="mod${i}" value="preference" ${pre==="preference"?"checked":""}/> Preference</label>
+      </div>
+    </div>`;
+  }).join("");
+  modalityModal.classList.add("show");
+  modalityModal.setAttribute("aria-hidden", "false");
+}
+
+function closeModalityModal() {
+  modalityModal.classList.remove("show");
+  modalityModal.setAttribute("aria-hidden", "true");
+}
+
+function collectModalityAnswers() {
+  if (!pendingModality) return [];
+  return pendingModality.map((q, i) => {
+    const picked = modalityQuestions.querySelector(`input[name="mod${i}"]:checked`);
+    return {
+      text: q.text,
+      kind: picked ? picked.value : (q.suggested || null),
+      cue: q.cue || "",
+    };
+  }).filter(a => a.kind);
+}
+
+modalityApply.addEventListener("click", async () => {
+  const answers = collectModalityAnswers();
+  closeModalityModal();
+  await runGenerate(answers, false);
+});
+modalitySkip.addEventListener("click", async () => {
+  closeModalityModal();
+  await runGenerate([], true);
+});
 
 processTabs.addEventListener("click", (e) => {
   const btn = e.target.closest("button[data-tab]");
@@ -698,15 +868,30 @@ go.addEventListener("click", async () => {
   if (!hasFile) { setStatus("Drop a program file first.", "warn"); return; }
   const text = brief.value.trim();
   if (!text) { setStatus("Type a brief.", "warn"); return; }
+  await runGenerate([], false);
+});
+
+async function runGenerate(modalityAnswers, skipModalityAsk) {
+  const text = brief.value.trim();
   go.disabled = true;
-  setStatus("Exploring archive…");
+  setStatus(skipModalityAsk ? "Exploring archive…" : "Reading brief…");
   try {
     const res = await fetch("/api/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ brief: text, explore: true }),
+      body: JSON.stringify({
+        brief: text,
+        explore: true,
+        modality_answers: modalityAnswers || [],
+        skip_modality_ask: !!skipModalityAsk,
+      }),
     });
     const data = await res.json();
+    if (data.needs_modality && (data.questions || []).length) {
+      setStatus("Need your read on a few clauses…", "warn");
+      openModalityModal(data.questions);
+      return;
+    }
     if (!data.ok) {
       setStatus(data.error || "Generate failed", "bad");
       return;
@@ -725,11 +910,12 @@ go.addEventListener("click", async () => {
       pass ? "ok" : "warn"
     );
     updateHud(data.mesh);
+  } catch (err) {
     setStatus(String(err), "bad");
   } finally {
     go.disabled = false;
   }
-});
+}
 
 function setStatus(text, kind) {
   status.textContent = text;
@@ -1286,6 +1472,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._generate()
             elif path == "/api/apply_scheme":
                 self._apply_scheme()
+            elif path == "/api/modality_resolve":
+                self._modality_resolve()
             else:
                 self.send_error(404)
         except Exception as exc:
@@ -1356,18 +1544,41 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": False, "error": "Brief is empty."}, 400)
             return
 
-        from .brief import apply_brief, parse_brief, briefing_from_parsed
+        from .brief import apply_parsed_brief, briefing_from_parsed, should_apply_brief
         from .config import load_project_config
         from .explore.ui_payload import transparency_payload
         from .load import load_program_file
+        from .modality import find_brief_questions
         from .preview3d import preview_mesh
         from .session import StudySession, slugify_study_id
         from .solver import solve_massing_study
+
+        modality_answers = list(payload.get("modality_answers") or [])
+        skip_ask = bool(payload.get("skip_modality_ask"))
 
         config_path = _STATE.get("config_path") or (
             str(DEFAULT_CONFIG) if DEFAULT_CONFIG.exists() else None
         )
         program = load_program_file(path, config_path=config_path)
+        dept_names = sorted({d.name for d in program.departments})
+
+        questions, parsed = find_brief_questions(
+            brief,
+            answers=modality_answers,
+            use_llm=True,
+            department_names=dept_names,
+        )
+        if questions and not skip_ask:
+            self._json(
+                {
+                    "ok": True,
+                    "needs_modality": True,
+                    "questions": questions,
+                    "brief": brief,
+                }
+            )
+            return
+
         study_id = slugify_study_id(f"ui_{int(time.time())}")
         session = StudySession(
             study_id=study_id,
@@ -1377,8 +1588,16 @@ class Handler(BaseHTTPRequestHandler):
         session.save()
 
         note = ""
-        parsed = parse_brief(brief, session.department_names())
-        out = apply_brief(session, brief)
+        if not should_apply_brief(session, parsed) and session.masses:
+            self._json(
+                {
+                    "ok": False,
+                    "error": "Brief did not change grouping or site.",
+                },
+                400,
+            )
+            return
+        out = apply_parsed_brief(session, parsed)
         if out.get("skipped"):
             self._json(
                 {
@@ -1485,6 +1704,23 @@ class Handler(BaseHTTPRequestHandler):
                 "transparency": transparency,
             }
         )
+
+    def _modality_resolve(self) -> None:
+        length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(length)
+        payload = json.loads(raw.decode("utf-8") or "{}")
+        answers = list(payload.get("answers") or payload.get("modality_answers") or [])
+        from .modality_memory import KINDS, remember
+
+        saved = []
+        for ans in answers:
+            text = str(ans.get("text") or "").strip()
+            kind = str(ans.get("kind") or "").strip().lower()
+            if not text or kind not in KINDS:
+                continue
+            remember(text, kind, cue=str(ans.get("cue") or "") or None)
+            saved.append({"text": text, "kind": kind})
+        self._json({"ok": True, "saved": saved, "count": len(saved)})
 
     def _apply_scheme(self) -> None:
         length = int(self.headers.get("Content-Length", "0"))

@@ -17,6 +17,13 @@ from .group import GroupingResult, group_departments, match_department
 from .session import StudySession
 
 _NUM = r"((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)"
+# Digits or common spelled lengths/sizes (wording patterns; not hard-coded call sites).
+_SPELLED_LEN = (
+    r"(?:fourteen|fifteen|sixteen|eighteen|twenty(?:-five|-two)?|"
+    r"thirty(?:-five)?|forty(?:-five)?|fifty(?:-five)?|sixty(?:-five)?|"
+    r"seventy|eighty|ninety|hundred)"
+)
+_NUM_OR_WORD = rf"({_NUM[1:-1]}|{_SPELLED_LEN})"
 _FT = r"(?:\s*(?:ft|feet|foot|'|′))?"
 _UNIT = r"(?:\s*(ft|feet|foot|'|′|m|meter|meters|metre|metres))?"
 _LEN_UNIT = r"(?:\s*(ft|feet|foot|'|′|m|meter|meters|metre|metres))?"
@@ -52,9 +59,32 @@ _WORD_COUNTS = {
     "nine": 9,
     "ten": 10,
     "twelve": 12,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "eighteen": 18,
+    "twenty": 20,
+    "twenty-two": 22,
+    "twenty-five": 25,
+    "thirty": 30,
+    "thirty-five": 35,
+    "forty": 40,
+    "forty-five": 45,
+    "fifty": 50,
+    "fifty-five": 55,
+    "sixty": 60,
+    "sixty-five": 65,
+    "seventy": 70,
+    "eighty": 80,
+    "ninety": 90,
+    "hundred": 100,
 }
-_WORD = r"(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|twelve|\d+)"
-
+_WORD = (
+    r"(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|twelve|"
+    r"fourteen|fifteen|sixteen|eighteen|twenty(?:-five|-two)?|"
+    r"thirty(?:-five)?|forty(?:-five)?|fifty(?:-five)?|sixty(?:-five)?|"
+    r"seventy|eighty|ninety|hundred|\d+)"
+)
 
 
 @dataclass
@@ -178,6 +208,11 @@ def _first_length(patterns: list[str], text: str) -> float | None:
     for pattern in patterns:
         match = re.search(pattern, text, flags=re.I)
         if match:
+            after = text[match.end() : match.end() + 8].lstrip().lower()
+            if after.startswith("%") or after.startswith("percent"):
+                continue
+            if "%" in match.group(0) or re.search(r"\bpercent", match.group(0), flags=re.I):
+                continue
             unit = match.group(2) if match.lastindex and match.lastindex >= 2 else None
             return _to_feet(_parse_num(match.group(1)), unit)
     return None
@@ -187,6 +222,15 @@ def _first_area(patterns: list[str], text: str) -> float | None:
     for pattern in patterns:
         match = re.search(pattern, text, flags=re.I)
         if match:
+            # Require an area unit so story counts are not treated as sqft.
+            span = match.group(0)
+            if not re.search(
+                r"sq\.?\s*ft|sqft|\bsf\b|square\s*feet|square\s*foot|"
+                r"sq\.?\s*m|sqm|m\u00b2|m2|square\s*meters|square\s*metres",
+                span,
+                flags=re.I,
+            ):
+                continue
             unit = match.group(2) if match.lastindex and match.lastindex >= 2 else None
             return _to_sf(_parse_num(match.group(1)), unit)
     return None
@@ -416,6 +460,26 @@ def _extract_vertical_limits(
         if word_s:
             stories = float(_WORD_COUNTS[word_s.group(1).lower()])
             story_clause = word_s.group(0)
+    if story_clause is None and stories is not None:
+        # Recover the clause that produced the numeric story cap.
+        for pattern in [
+            rf"[^.!?]{{0,40}}no\s+taller\s+than\s+(?:{_WORD}|{_NUM})\s+(?:stories?|storeys?|floors?|levels?)",
+            rf"[^.!?]{{0,40}}(?:stories?|storeys?|floors?)\s+or\s+(?:less|fewer|below)",
+            rf"[^.!?]{{0,40}}(?:should\s+not|must\s+not|cannot|can't|not)\s+exceed\s+(?:{_WORD}|{_NUM})\s+"
+            rf"(?:stories?|storeys?|floors?|levels?)",
+            rf"[^.!?]{{0,40}}no\s+more\s+than\s+(?:{_WORD}|{_NUM})\s+(?:floors?|stories?|levels?|storeys?)",
+            rf"[^.!?]{{0,40}}have\s+more\s+than\s+(?:{_WORD}|{_NUM})\s+(?:floors?|stories?|levels?)",
+            rf"all\s+masses\s+max(?:imum)?\s+stor(?:y|ies|eys)?\s+is\s+{_NUM}",
+            rf"max(?:imum)?\s+stor(?:y|ies|eys)?\s+is\s+{_NUM}",
+            rf"max(?:imum)?\s+stor(?:y|ies|eys)?\s*(?:of|count|=|:)?\s*{_NUM}",
+            rf"around\s+({_WORD})\s+stories?\s+if\s+possible",
+            rf"ideally\s+({_WORD})\s+storeys?\s+each",
+            rf"prefer(?:ably|red)?\s+(?:about\s+|around\s+)?({_WORD})\s+(?:to\s+({_WORD})\s+)?(?:stories?|floors?|levels?)",
+        ]:
+            m = re.search(pattern, text, flags=re.I)
+            if m:
+                story_clause = m.group(0)
+                break
     if story_clause is None:
         for pattern in [
             rf"all\s+masses\s+max(?:imum)?\s+stor(?:y|ies|eys)?\s+is\s+{_NUM}",
@@ -431,9 +495,15 @@ def _extract_vertical_limits(
                 break
     if stories is not None and hard_max is None:
         # Role from the story clause words only — never from other brief numbers/words.
-        role = _role_from_words(story_clause or "maximum", default="limitation")
+        # Stay inside the same sentence so prior "must/have to" clauses do not leak.
+        role_src = story_clause or "maximum"
+        if story_clause:
+            idx = text.lower().find(story_clause.lower())
+            if idx >= 0:
+                role_src = _sentence_at(text, idx, idx + len(story_clause))
+        role = _role_from_words(role_src, default="limitation")
         _set_max_stories(
-            parsed, int(stories), source_text=story_clause or "", role=role
+            parsed, int(stories), source_text=role_src, role=role
         )
     elif stories is not None and hard_max is not None:
         # Soft numeric preference under a hard cap.
@@ -676,7 +746,13 @@ def _strip_values_for_role(text: str) -> str:
     return t
 
 
-def _role_from_words(text: str, *, default: str = "requirement") -> str:
+def _role_from_words(
+    text: str,
+    *,
+    default: str = "requirement",
+    allow_unknown: bool = False,
+    use_memory: bool = True,
+) -> str:
     """
     requirement / limitation / preference from modality words only.
 
@@ -685,6 +761,7 @@ def _role_from_words(text: str, *, default: str = "requirement") -> str:
       requirement — must, needs to, has to, requires, exactly
       limitation  — should be, cannot exceed, no more than, at least, should stay under
       preference  — prefer, ideally, would rather, better if, if possible, around, closer to
+    Also consults cross-project modality memory for learned cues/phrases.
     """
     t = _strip_values_for_role(text)
     has_req = bool(_ROLE_REQUIRE.search(t))
@@ -701,6 +778,19 @@ def _role_from_words(text: str, *, default: str = "requirement") -> str:
         return "limitation"
     if has_pref:
         return "preference"
+
+    if use_memory:
+        try:
+            from .modality_memory import role_from_memory
+
+            memorized = role_from_memory(text)
+            if memorized:
+                return memorized
+        except Exception:
+            pass
+
+    if allow_unknown:
+        return "unknown"
     return default
 
 
@@ -940,6 +1030,13 @@ def _extract_scoped_dimensions(
             + _NUM
             + _LEN_UNIT
             + r"\s+wide",
+        ),
+        (
+            "not_below_width",
+            r"(?:its\s+|their\s+|the\s+)?(?:width|mass).{0,40}?"
+            r"(?:should\s+not|must\s+not|cannot|can't)\s+"
+            r"(?:go\s+)?(?:below|under|be\s+narrower\s+than)\s*"
+            + _NUM + _LEN_UNIT,
         ),
     ]
 
@@ -1199,6 +1296,22 @@ def _extract_scoped_dimensions(
                     scope="building",
                     text=match.group(0),
                 )
+            elif kind == "not_below_width":
+                num, unit = g[0], g[1]
+                depts = []
+                for prev in reversed(parsed.dimensions):
+                    if prev.get("departments"):
+                        depts = list(prev["departments"])
+                        break
+                _append_dimension(
+                    parsed,
+                    lever="width",
+                    mode="min",
+                    value_ft=_to_feet(_parse_num(num), unit),
+                    departments=depts,
+                    scope="department" if depts else "building",
+                    text=match.group(0),
+                )
 
     # Fold department exact/preferred widths into a lookup the solver can use
     # before mass ids exist; mass keys are written after grouping.
@@ -1268,6 +1381,9 @@ def parse_brief(text: str, department_names: list[str]) -> ParsedBrief:
             rf"(?:overall\s+)?site\s+should\s+stay\s+under\s*{_NUM}{_LEN_UNIT}\s+long",
             rf"site\s+(?:should\s+)?(?:stay\s+)?under\s*{_NUM}{_LEN_UNIT}\s+long",
             rf"(?:overall\s+)?site\s+length\s+(?:should\s+)?(?:stay\s+)?under\s*{_NUM}{_LEN_UNIT}",
+            rf"(?:combined|total)\s+length\s+of\s+the\s+masses\s+"
+            rf"(?:should\s+)?(?:stay\s+)?under\s*{_NUM}{_LEN_UNIT}",
+            rf"(?:combined|total)\s+length\s+(?:should\s+)?(?:stay\s+)?under\s*{_NUM}{_LEN_UNIT}",
             rf"(?:overall\s+)?site\s+length\s+(?:should\s+)?(?:remain|be)\s+(?:under|below)\s*{_NUM}{_LEN_UNIT}",
             rf"site\s+(?:length|frontage)\s+(?:should\s+)?(?:stay\s+|remain\s+)?(?:under|below)\s*{_NUM}{_LEN_UNIT}",
         ],
@@ -1296,56 +1412,84 @@ def parse_brief(text: str, department_names: list[str]) -> ParsedBrief:
 
     per_len = _first_length(
         [
-            rf"nothing\s+longer\s+than\s*{_NUM}{_LEN_UNIT}",
-            rf"no\s+(?:wing|building|mass)\s+(?:over|longer than)\s*{_NUM}{_LEN_UNIT}",
-            rf"(?:max(?:imum)?|length)\s+limit\s*(?:is|of|=|:)?\s*{_NUM}{_LEN_UNIT}",
-            rf"max(?:imum)?\s+(?:building\s+)?length\s*(?:is|of|=|:)?\s*{_NUM}{_LEN_UNIT}",
+            # "each length should be under 40 m" / "lengths stay under forty meters"
+            rf"(?:each|every|any|per(?:-|\s+)?mass)\s+lengths?\s+"
+            rf"(?:should\s+be|must\s+be|should\s+stay|must\s+stay|stay|remain|be)?\s*"
+            rf"(?:under|below|at\s+most|no\s+more\s+than|not\s+more\s+than)\s*{_NUM_OR_WORD}{_LEN_UNIT}",
+            rf"lengths?\s+(?:should\s+be|must\s+be|should\s+stay|must\s+stay|stay|remain)\s+"
+            rf"(?:under|below|at\s+most|no\s+more\s+than)\s*{_NUM_OR_WORD}{_LEN_UNIT}",
+            rf"(?:each|every|any)\s+(?:mass|wing|building|bar|volume|block|piece)\s+"
+            rf"lengths?\s+(?:should\s+be|must\s+be|stay|remain|be)?\s*"
+            rf"(?:under|below|at\s+most|no\s+more\s+than)\s*{_NUM_OR_WORD}{_LEN_UNIT}",
+            rf"nothing\s+longer\s+than\s*{_NUM_OR_WORD}{_LEN_UNIT}",
+            rf"no\s+(?:wing|building|mass)\s+(?:over|longer than)\s*{_NUM_OR_WORD}{_LEN_UNIT}",
+            rf"(?:max(?:imum)?|length)\s+limit\s*(?:is|of|=|:)?\s*{_NUM_OR_WORD}{_LEN_UNIT}",
+            rf"max(?:imum)?\s+(?:building\s+)?length\s*(?:is|of|=|:)?\s*{_NUM_OR_WORD}{_LEN_UNIT}",
             # "each mass should not be longer than 75 meters"
             rf"(?:each|every|any)\s+(?:mass|wing|building|bar|volume|block|piece)\s+"
-            rf"(?:should|must)\s+not\s+be\s+longer\s+than\s*{_NUM}{_LEN_UNIT}",
+            rf"(?:should|must)\s+not\s+be\s+longer\s+than\s*{_NUM_OR_WORD}{_LEN_UNIT}",
             rf"(?:masses|wings|buildings|bars|volumes|blocks)\s+"
-            rf"(?:should|must)\s+not\s+be\s+longer\s+than\s*{_NUM}{_LEN_UNIT}",
+            rf"(?:should|must)\s+not\s+be\s+longer\s+than\s*{_NUM_OR_WORD}{_LEN_UNIT}",
             # "each mass can be no more than 3 stories and no longer than 210 ft"
             rf"(?:each|every|any)\s+(?:mass|wing|building|bar|volume|block|piece)"
-            rf".{{0,90}}?(?:no|not)\s+longer\s+than\s*{_NUM}{_LEN_UNIT}",
+            rf".{{0,90}}?(?:no|not)\s+longer\s+than\s*{_NUM_OR_WORD}{_LEN_UNIT}",
             rf"(?:each|every|any)\s+(?:mass|wing|building|bar)"
-            rf".{{0,60}}?no\s+more\s+than\s*{_NUM}{_LEN_UNIT}\s+long",
+            rf".{{0,60}}?no\s+more\s+than\s*{_NUM_OR_WORD}{_LEN_UNIT}\s+long",
             rf"no\s+(?:mass|wing|building|bar|volume|block|piece)\s+"
-            rf"should\s+be\s+longer\s+than\s*{_NUM}{_LEN_UNIT}",
+            rf"should\s+be\s+longer\s+than\s*{_NUM_OR_WORD}{_LEN_UNIT}",
             rf"(?:each|every)\s+(?:mass|wing|building|bar)\s+"
-            rf"(?:no\s+longer\s+than|at\s+most|under|below)\s*{_NUM}{_LEN_UNIT}",
+            rf"(?:no\s+longer\s+than|at\s+most|under|below)\s*{_NUM_OR_WORD}{_LEN_UNIT}",
             rf"(?:each|every)\s+(?:mass|wing|building|bar)\s+"
-            rf"(?:cannot|can't|must\s+not|should\s+not)\s+exceed\s*{_NUM}{_LEN_UNIT}",
-            rf"no\s+building\s+should\s+be\s+longer\s+than\s*{_NUM}{_LEN_UNIT}",
-            rf"(?:that\s+)?mass\s+should\s+stay\s+under\s*{_NUM}{_LEN_UNIT}\s+long",
-            rf"stay\s+under\s*{_NUM}{_LEN_UNIT}\s+long",
+            rf"(?:cannot|can't|must\s+not|should\s+not)\s+exceed\s*{_NUM_OR_WORD}{_LEN_UNIT}",
+            rf"no\s+building\s+should\s+be\s+longer\s+than\s*{_NUM_OR_WORD}{_LEN_UNIT}",
+            rf"(?:that\s+)?mass\s+should\s+stay\s+under\s*{_NUM_OR_WORD}{_LEN_UNIT}\s+long",
+            rf"stay\s+under\s*{_NUM_OR_WORD}{_LEN_UNIT}\s+long",
             rf"no\s+building\s+over\s*{_NUM}(?=\s*['′]|\s*(?:ft|feet)\b)",
-            rf"no\s+building\s+over\s*{_NUM}{_LEN_UNIT}",
+            rf"no\s+building\s+over\s*{_NUM_OR_WORD}{_LEN_UNIT}",
             rf"no\s+piece\s+over\s*{_NUM}(?=\s*['′]|\s*(?:ft|feet)\b)",
-            rf"no\s+(?:piece|form|bar|box|cube|slab|block)\s+over\s*{_NUM}{_LEN_UNIT}",
-            rf"(?:main\s+)?bar\s+should\s+stay\s+under\s*{_NUM}{_LEN_UNIT}\s+long",
-            rf"(?:that\s+)?block\s+should\s+stay\s+under\s*{_NUM}{_LEN_UNIT}\s+long",
-            rf"no\s+bar\s+should\s+be\s+longer\s+than\s*{_NUM}{_LEN_UNIT}",
+            rf"no\s+(?:piece|form|bar|box|cube|slab|block)\s+over\s*{_NUM_OR_WORD}{_LEN_UNIT}",
+            rf"(?:main\s+)?bar\s+should\s+stay\s+under\s*{_NUM_OR_WORD}{_LEN_UNIT}\s+long",
+            rf"(?:that\s+)?block\s+should\s+stay\s+under\s*{_NUM_OR_WORD}{_LEN_UNIT}\s+long",
+            rf"no\s+bar\s+should\s+be\s+longer\s+than\s*{_NUM_OR_WORD}{_LEN_UNIT}",
             # "no mass can exceed N ft in length" / "should not exceed N ft in length"
             rf"no\s+(?:mass|wing|building|bar|volume|block|piece)\s+"
-            rf"(?:can|may|should|must)\s+exceed\s*{_NUM}{_LEN_UNIT}"
+            rf"(?:can|may|should|must)\s+exceed\s*{_NUM_OR_WORD}{_LEN_UNIT}"
             rf"(?:\s+in\s+length)?",
             rf"(?:mass|wing|building|volume|block|piece).{{0,40}}?"
-            rf"(?:should\s+not|must\s+not|cannot|can't)\s+exceed\s*{_NUM}{_LEN_UNIT}"
+            rf"(?:should\s+not|must\s+not|cannot|can't)\s+exceed\s*{_NUM_OR_WORD}{_LEN_UNIT}"
             rf"(?:\s+in\s+length)?",
             rf"(?:longest|any|each|every|shared|their|that|the)\s+"
             rf"(?:mass|wing|building|volume|block|piece).{{0,30}}?"
-            rf"(?:should\s+not|must\s+not|cannot|not)\s+(?:go\s+)?beyond\s*{_NUM}{_LEN_UNIT}",
-            rf"(?:not\s+go\s+beyond|go\s+beyond)\s*{_NUM}{_LEN_UNIT}",
-            rf"(?:mass|building)?\s*length\s+(?:should\s+be\s+)?capped\s+at\s*{_NUM}{_LEN_UNIT}",
-            rf"capped\s+at\s*{_NUM}{_LEN_UNIT}",
-            rf"(?:no|not)\s+longer\s+than\s*{_NUM}{_LEN_UNIT}",
-            rf"should\s+be\s+no\s+longer\s+than\s*{_NUM}{_LEN_UNIT}",
-            rf"(?:stories?|floors?|levels?).{{0,20}}?or\s+{_NUM}{_LEN_UNIT}\s+in\s+length",
-            rf"or\s+{_NUM}{_LEN_UNIT}\s+in\s+length",
+            rf"(?:should\s+not|must\s+not|cannot|not)\s+(?:go\s+)?beyond\s*{_NUM_OR_WORD}{_LEN_UNIT}",
+            rf"(?:not\s+go\s+beyond|go\s+beyond)\s*{_NUM_OR_WORD}{_LEN_UNIT}",
+            rf"(?:mass|building)?\s*length\s+(?:should\s+be\s+)?capped\s+at\s*{_NUM_OR_WORD}{_LEN_UNIT}",
+            rf"capped\s+at\s*{_NUM_OR_WORD}{_LEN_UNIT}",
+            rf"(?:no|not)\s+longer\s+than\s*{_NUM_OR_WORD}{_LEN_UNIT}",
+            rf"should\s+be\s+no\s+longer\s+than\s*{_NUM_OR_WORD}{_LEN_UNIT}",
+            rf"(?:stories?|floors?|levels?).{{0,20}}?or\s+{_NUM_OR_WORD}{_LEN_UNIT}\s+in\s+length",
+            rf"or\s+{_NUM_OR_WORD}{_LEN_UNIT}\s+in\s+length",
+            # Prefer the length number when paired with a story cap in one clause.
+            rf"(?:stories?|floors?|levels?).{{0,30}}?or\s+{_NUM_OR_WORD}{_LEN_UNIT}",
+            rf"(?:should\s+not|must\s+not)\s+exceed\s*{_NUM_OR_WORD}{_LEN_UNIT}",
+            rf"no\s+(?:primary\s+|main\s+)?(?:mass|wing|building|volume|block)\s+"
+            rf"(?:may|can|should|must)\s+be\s+longer\s+than\s*{_NUM_OR_WORD}{_LEN_UNIT}",
+            rf"(?:may|can)\s+be\s+longer\s+than\s*{_NUM_OR_WORD}{_LEN_UNIT}",
         ],
         raw,
     )
+    # "N stories or M ft in length" — if we captured the story count as length, fix it.
+    story_or_len = re.search(
+        rf"({_WORD}|\d+)\s+(?:stories?|floors?|levels?)\s+or\s+{_NUM}{_LEN_UNIT}"
+        rf"(?:\s+in\s+length)?",
+        raw,
+        flags=re.I,
+    )
+    if story_or_len and per_len is not None:
+        story_n = _word_or_digit(str(story_or_len.group(1)))
+        length_val = _to_feet(_parse_num(story_or_len.group(2)), story_or_len.group(3))
+        if story_n is not None and abs(per_len - float(story_n)) < 0.01:
+            per_len = length_val
+
     if per_len is not None:
         already = "max_building_length_ft" in parsed.constraints
         parsed.constraints["max_building_length_ft"] = round(per_len, 4)
@@ -1427,7 +1571,7 @@ def parse_brief(text: str, department_names: list[str]) -> ParsedBrief:
         ],
         raw,
     )
-    # Word-number height: "sixty feet in height"
+    # Word-number height: "sixty feet in height" — never steal length clauses.
     if height is None:
         word_h = re.search(
             rf"(?:exceed|taller than|below|under|over)\s+"
@@ -1436,6 +1580,17 @@ def parse_brief(text: str, department_names: list[str]) -> ParsedBrief:
             raw,
             flags=re.I,
         )
+        if word_h:
+            window = raw[max(0, word_h.start() - 48) : word_h.end() + 24].lower()
+            cue = word_h.group(0).lower()
+            lengthish = bool(re.search(r"\blength|\blonger|\blong\b|\bwidth|\bwider\b", window))
+            heightish = bool(re.search(r"\bheight|\btall(?:er)?\b|\btower\b", window))
+            under_bare = cue.startswith("under") or cue.startswith("below")
+            # "each length … under forty meters" is length, not height.
+            if lengthish and not heightish:
+                word_h = None
+            elif under_bare and not heightish and "taller" not in cue and "exceed" not in cue:
+                word_h = None
         if word_h:
             words = {
                 "fourteen": 14,
@@ -1461,9 +1616,10 @@ def parse_brief(text: str, department_names: list[str]) -> ParsedBrief:
     # Exception / soft upper story caps are handled in _extract_vertical_limits.
     shorter = _first_length(
         [
-            rf"length\s+should be\s+shorter than\s+{_NUM}{_LEN_UNIT}",
-            rf"length\s+(?:shorter|less)\s+than\s+{_NUM}{_LEN_UNIT}",
-            rf"(?:each\s+)?(?:mass|wing|building)\s+length\s+(?:shorter|less|under)\s+than\s+{_NUM}{_LEN_UNIT}",
+            rf"length\s+should be\s+shorter than\s+{_NUM_OR_WORD}{_LEN_UNIT}",
+            rf"length\s+(?:shorter|less)\s+than\s+{_NUM_OR_WORD}{_LEN_UNIT}",
+            rf"(?:each\s+)?(?:mass|wing|building)\s+length\s+(?:shorter|less|under)\s+than\s+{_NUM_OR_WORD}{_LEN_UNIT}",
+            rf"(?:each|every|any)?\s*lengths?\s+(?:should\s+be\s+)?(?:under|below)\s+{_NUM_OR_WORD}{_LEN_UNIT}",
         ],
         raw,
     )
@@ -1513,6 +1669,8 @@ def parse_brief(text: str, department_names: list[str]) -> ParsedBrief:
             rf"(?:total\s+)?(?:gsf|gfa)\s+(?:should\s+)?(?:stay\s+)?(?:below|under)\s*{_NUM}{_AREA_UNIT}",
             rf"(?:stay\s+)?(?:below|under)\s*{_NUM}\s+square\s+feet",
             rf"(?:total\s+)?(?:gsf|gfa).{{0,30}}?(?:below|under)\s*{_NUM}",
+            rf"(?:shared\s+)?(?:building|mass).{{0,40}}?(?:cannot|can't|should\s+not|must\s+not)\s+exceed\s*{_NUM}{_AREA_UNIT}",
+            rf"cannot\s+exceed\s*{_NUM}{_AREA_UNIT}\s*(?:gsf|gfa)?",
         ],
         raw,
     )
@@ -1555,6 +1713,24 @@ def parse_brief(text: str, department_names: list[str]) -> ParsedBrief:
     if footprint is not None:
         parsed.constraints["max_footprint_sf"] = round(footprint, 1)
         parsed.notes.append(f"max single footprint {footprint:g} sf")
+    pref_foot = _first_area(
+        [
+            rf"footprints?\s+closer\s+to\s+{_NUM}{_AREA_UNIT}",
+            rf"(?:rather|prefer).{{0,40}}?footprints?\s+closer\s+to\s+{_NUM}{_AREA_UNIT}",
+            rf"(?:rather|prefer).{{0,60}}?closer\s+to\s+{_NUM}{_AREA_UNIT}",
+        ],
+        raw,
+    )
+    if pref_foot is not None:
+        parsed.constraints["preferred_footprint_sf"] = round(pref_foot, 1)
+        parsed.notes.append(f"preferred footprint {pref_foot:g} sf")
+    elif re.search(
+        r"(?:slightly\s+)?larger\s+(?:ground[- ]floor\s+)?footprint",
+        raw,
+        flags=re.I,
+    ):
+        parsed.constraints["prefer_larger_footprint"] = 1
+        parsed.notes.append("prefer larger footprint")
 
     # Soft min / preferred mass floor area
     min_area = _first_area(
@@ -1569,19 +1745,37 @@ def parse_brief(text: str, department_names: list[str]) -> ParsedBrief:
         raw,
     )
     if min_area is not None:
-        role = _role_from_words(
-            re.search(
-                rf".{{0,80}}{_NUM}{_AREA_UNIT}",
-                raw,
-                flags=re.I,
-            ).group(0)
-            if re.search(rf".{{0,80}}{_NUM}{_AREA_UNIT}", raw, flags=re.I)
-            else "prefer",
-            default="preference",
-        )
+        area_m = None
+        for pat in [
+            rf"(?:masses|mass|volumes?|blocks?).{{0,40}}?"
+            rf"(?:larger\s+than|at\s+least|no\s+smaller\s+than|not\s+be\s+under|"
+            r"not\s+be\s+smaller\s+than)\s*{_NUM}{_AREA_UNIT}",
+            rf"(?:smallest\s+mass).{{0,40}}?(?:not\s+be\s+under|larger\s+than|at\s+least)\s*{_NUM}{_AREA_UNIT}",
+            rf"(?:rather\s+avoid|prefer).{{0,40}}?(?:smaller\s+than|under)\s*{_NUM}{_AREA_UNIT}",
+            rf"larger\s+than\s+{_NUM}{_AREA_UNIT}\s+if\s+possible",
+        ]:
+            area_m = re.search(pat, raw, flags=re.I)
+            if area_m:
+                break
+        clause = area_m.group(0) if area_m else "if possible"
+        role = _role_from_words(clause, default="preference")
+        if re.search(r"if\s+possible|prefer|rather|avoid", clause, flags=re.I):
+            role = "preference"
         key = "preferred_min_area_sf" if role == "preference" else "min_mass_area_sf"
         parsed.constraints[key] = round(min_area, 1)
         parsed.notes.append(f"{key.replace('_', ' ')} {min_area:g} sf")
+    # Preferred floor-area floor when a separate prefer clause exists
+    pref_area = _first_area(
+        [
+            rf"(?:prefer|rather).{{0,60}}?(?:larger\s+than|at\s+least)\s*{_NUM}{_AREA_UNIT}",
+            rf"(?:prefer|rather).{{0,60}}?avoid.{{0,30}}?smaller\s+than\s*{_NUM}{_AREA_UNIT}",
+            rf"prefer.{{0,40}}?smallest.{{0,40}}?larger\s+than\s*{_NUM}{_AREA_UNIT}",
+        ],
+        raw,
+    )
+    if pref_area is not None:
+        parsed.constraints["preferred_min_area_sf"] = round(pref_area, 1)
+        parsed.notes.append(f"preferred min area {pref_area:g} sf")
 
     open_pct = re.search(
         rf"(?:at\s+least|preserve\s+at\s+least|remain)\s*{_NUM}\s*%\s*"
@@ -1642,16 +1836,35 @@ def parse_brief(text: str, department_names: list[str]) -> ParsedBrief:
         }.get(str(token).lower().replace("  ", " "))
         if pct is None:
             pct = _parse_num(token)
-        role = _role_from_words(open_pct.group(0), default="preference")
+        sent = _sentence_at(raw, open_pct.start(), open_pct.end())
+        role = _role_from_words(sent, default="preference")
+        if re.search(r"\b(?:needs?|must|required|at\s+least)\b", sent, flags=re.I) and not re.search(
+            r"prefer|better|around|ideally", sent, flags=re.I
+        ):
+            role = "requirement"
+        if re.search(r"prefer|better|around|ideally|would\s+be", sent, flags=re.I):
+            role = "preference"
         parsed.constraints["min_open_space_pct"] = round(pct, 2)
         parsed.constraints["open_space_role"] = role
-        parsed.notes.append(f"prefer at least {pct:g}% open space")
-    elif coverage:
+        parsed.notes.append(f"open space {pct:g}% ({role})")
+    # Preferred open space (may coexist with a required minimum)
+    pref_open = re.search(
+        rf"(?:around|about|roughly)\s*{_NUM}\s*%\s+open\s+space\s+would\s+be\s+(?:better|preferred|preferable|ideal)"
+        rf"|(?:around|about|roughly)\s*{_NUM}\s*%\s+open\s+space",
+        raw,
+        flags=re.I,
+    )
+    if pref_open and re.search(r"prefer|better|ideal|would", pref_open.group(0), flags=re.I):
+        parsed.constraints["preferred_open_space_pct"] = round(_parse_num(pref_open.group(1)), 2)
+        parsed.notes.append(
+            f"preferred open space {parsed.constraints['preferred_open_space_pct']:g}%"
+        )
+    if coverage:
         cov = _parse_num(coverage.group(1))
         pct = max(0.0, 100.0 - cov)
-        parsed.constraints["min_open_space_pct"] = round(pct, 2)
-        parsed.constraints["open_space_role"] = "limitation"
-        parsed.notes.append(f"built coverage ≤{cov:g}% → open ≥{pct:g}%")
+        parsed.constraints.setdefault("min_open_space_pct", round(pct, 2))
+        parsed.constraints.setdefault("open_space_role", "limitation")
+        parsed.notes.append(f"built coverage <={cov:g}% -> open >={pct:g}%")
 
     # "length should be 50" is an exact length. "shorter than / under" is not.
     if shorter is None and not re.search(
@@ -1811,7 +2024,10 @@ _TOGETHER = re.compile(
 _SAME_BUILDING = re.compile(
     r"([a-z][a-z0-9&/' \-]{1,48}?)\s+(?:and|&|/)\s+([a-z][a-z0-9&/' \-]{1,48}?)"
     r"\s+(?:should\s+be\s+|must\s+be\s+|have to\s+be\s+|need to\s+be\s+)?"
-    r"(?:in|share|sharing)?\s*(?:the\s+)?same\s+(?:mass|building|wing|volume|one|block|box|structure|form)",
+    r"(?:in|share|sharing)?\s*(?:the\s+)?same\s+(?:mass|building|wing|volume|one|block|box|structure|form)"
+    r"|([a-z][a-z0-9&/' \-]{1,48}?)\s+(?:must|should|has to|have to|needs? to)\s+be\s+"
+    r"in\s+the\s+same\s+(?:building|mass|wing|volume)\s+as\s+"
+    r"([A-Za-z][A-Za-z0-9&/' \-]{1,48})\b",
     flags=re.I,
 )
 _KEEP_TOGETHER = re.compile(
@@ -1821,9 +2037,25 @@ _KEEP_TOGETHER = re.compile(
     flags=re.I,
 )
 _BESIDE = re.compile(
-    r"([a-z][a-z0-9&/' \-]{1,40}?)\s+"
-    r"(?:beside|next to|near|close to|with)\s+"
-    r"([a-z][a-z0-9&/' \-]{1,40}?)",
+    r"([a-z][a-z0-9&/' \-]{1,48}?)\s+"
+    r"(?:beside|next to|near|close to|with|adjacent to)\s+"
+    r"([a-z][a-z0-9&/' \-]{1,48})\b",
+    flags=re.I,
+)
+_ADJACENT_MUST = re.compile(
+    r"([a-z][a-z0-9&/' \-]{1,48}?)\s+"
+    r"(?:must|should|needs? to|has to|have to)\s+be\s+adjacent\s+to\s+"
+    r"([a-z][a-z0-9&/' \-]{1,48})\b",
+    flags=re.I,
+)
+# "custodial should be attached to dining" / "media paired with administration"
+_ATTACHED_OR_PAIRED = re.compile(
+    r"([a-z][a-z0-9&/' \-]{1,48}?)\s+"
+    r"(?:should\s+|must\s+|needs?\s+to\s+|has\s+to\s+|have\s+to\s+)?"
+    r"(?:be\s+)?"
+    r"(?:attached|paired|joined|linked|connected|grouped|tied)\s+"
+    r"(?:to|with)\s+"
+    r"([a-z][a-z0-9&/' \-]{1,48})\b",
     flags=re.I,
 )
 _APART = re.compile(
@@ -1910,11 +2142,20 @@ def _extract_pairs(
             if leftover.lower() not in unmatched:
                 unmatched.append(leftover)
 
-    patterns = (_TOGETHER, _KEEP_TOGETHER, _SAME_BUILDING, _BESIDE) if together else (_APART, _KEEP_AWAY)
+    patterns = (
+        (_TOGETHER, _KEEP_TOGETHER, _SAME_BUILDING, _BESIDE, _ADJACENT_MUST, _ATTACHED_OR_PAIRED)
+        if together
+        else (_APART, _KEEP_AWAY)
+    )
     for pattern in patterns:
         for match in pattern.finditer(text):
-            a = match_department(match.group(1), names)
-            b = match_department(match.group(2), names) if match.lastindex and match.lastindex >= 2 else None
+            groups = [g for g in match.groups() if g]
+            if len(groups) < 2:
+                continue
+            left = re.sub(r"^(?:and|&|or|,)\s+", "", groups[0].strip(), flags=re.I)
+            right = re.sub(r"^(?:and|&|or|,)\s+", "", groups[1].strip(), flags=re.I)
+            a = match_department(left, names)
+            b = match_department(right, names)
             if a and b and a != b:
                 key = tuple(sorted((a, b)))
                 if key not in seen:
@@ -2317,7 +2558,12 @@ def _apply_counted_masses(
     def _pin(dept: str, clause: str) -> None:
         if dept not in parsed.pin_ground:
             parsed.pin_ground.append(dept)
-        pin_kinds[dept] = _role_from_words(clause, default="preference")
+        role = _role_from_words(clause, default="preference")
+        if re.search(r"\b(?:must|has\s+to|have\s+to|needs?\s+to|required)\b", clause, flags=re.I):
+            role = "requirement"
+        elif role == "limitation":
+            role = "preference"
+        pin_kinds[dept] = role
 
     for match in re.finditer(
         r"(?:better\s+)?on\s+(?:the\s+)?ground\s+floor|"
@@ -2326,6 +2572,8 @@ def _apply_counted_masses(
         r"prefer(?:ably)?\s+(?:on\s+)?(?:the\s+)?ground(?:\s+floor)?|"
         r"better\s+(?:on\s+)?(?:the\s+)?ground(?:\s+floor)?|"
         r"first\s+occupied\s+level|"
+        r"occupy\s+(?:the\s+)?ground\s+floor|"
+        r"occupies\s+(?:the\s+)?ground\s+floor|"
         r"directly\s+accessible\s+from\s+grade|"
         r"accessible\s+from\s+grade",
         text,
@@ -2418,6 +2666,17 @@ def _apply_counted_masses(
         before = text[max(0, match.start() - 100) : match.start()]
         for dept in _clause_departments(before, names):
             _pin(dept, match.group(0))
+    
+    for match in re.finditer(
+        r"([A-Za-z][A-Za-z0-9&/' \-]{0,40}?)\s+"
+        r"(?:must|should|needs?\s+to|has\s+to|have\s+to)\s+"
+        r"occup(?:y|ies)\s+(?:the\s+)?ground\s+floor",
+        text,
+        flags=re.I,
+    ):
+        for dept in _clause_departments(match.group(1), names):
+            _pin(dept, match.group(0))
+
     if pin_kinds:
         parsed.constraints["pin_ground_kind"] = pin_kinds
 
@@ -2512,7 +2771,8 @@ def _extract_mass_count(parsed: ParsedBrief, text: str) -> None:
         rf"(?:{_MASS_NOUN}|feels\s+right)"
         rf"|({_WORD})\s+or\s+({_WORD})\s+(?:larger\s+)?(?:{_MASS_NOUN})"
         rf"|somewhere\s+between\s+({_WORD})\s+and\s+({_WORD})\s+feels\s+right"
-        rf"|({_WORD})\s+or\s+({_WORD})\s+massing\s+pieces",
+        rf"|({_WORD})\s+or\s+({_WORD})\s+massing\s+pieces"
+        rf"|({_WORD})\s+to\s+({_WORD})\s+{_MASS_NOUN}",
         text,
         flags=re.I,
     )
@@ -2526,12 +2786,73 @@ def _extract_mass_count(parsed: ParsedBrief, text: str) -> None:
                 parsed.mass_count_max = hi
                 parsed.mass_count = hi
                 parsed.constraints["mass_count_role"] = _role_from_words(
-                    range_pat.group(0), default="requirement"
+                    _sentence_at(text, range_pat.start(), range_pat.end()),
+                    default="requirement",
                 )
                 parsed.notes.append(f"mass count range {lo}-{hi}")
-                return
 
-    # "four main masses/volumes/blocks ... plus 1 smaller pavilion" → 5
+    at_least = re.search(
+        rf"(?:at\s+least|no\s+fewer\s+than)\s+({_WORD})\s+{_MASS_NOUN}",
+        text,
+        flags=re.I,
+    )
+    if at_least:
+        n = _word_or_digit(at_least.group(1))
+        clause = _sentence_at(text, at_least.start(), at_least.end()).lower()
+        # "at least 2 masses should remain under 3 stories" is a story rule, not a count min.
+        if n and not re.search(
+            r"remain under|stay under|under\s+\d+\s*(?:stor|floor|level)", clause
+        ):
+            parsed.mass_count_min = n if parsed.mass_count_min is None else min(parsed.mass_count_min, n)
+            if parsed.mass_count is None:
+                parsed.mass_count = n
+            parsed.constraints["mass_count_role"] = _role_from_words(
+                clause, default="requirement"
+            )
+            parsed.notes.append(f"mass count min {n}")
+
+    at_most = re.search(
+        rf"(?:no\s+more\s+than|not\s+more\s+than|at\s+most)\s+({_WORD})\s+{_MASS_NOUN}"
+        rf"|(?:count|masses|mass\s+count)\s+should\s+not\s+exceed\s+({_WORD})"
+        rf"|(?:should\s+not|must\s+not|cannot|can't)\s+exceed\s+({_WORD})\s+{_MASS_NOUN}",
+        text,
+        flags=re.I,
+    )
+    if at_most:
+        token = next((g for g in at_most.groups() if g), None)
+        n = _word_or_digit(str(token)) if token else None
+        if n:
+            clause = _sentence_at(text, at_most.start(), at_most.end()).lower()
+            if not re.search(r"exceed\s+\d+\s+(?:stor|floor|level)", clause):
+                parsed.mass_count_max = n if parsed.mass_count_max is None else max(parsed.mass_count_max, n)
+                if parsed.mass_count is None:
+                    parsed.mass_count = n
+                parsed.notes.append(f"mass count max {n}")
+
+    pref = re.search(
+        rf"({_WORD})\s+{_MASS_NOUN}\s+"
+        rf"(?:would\s+be\s+)?(?:my\s+)?(?:preferable|preferred(?:\s+option)?|ideal)"
+        rf"(?:\s+if\s+the\s+site\s+allows(?:\s+it)?)?"
+        rf"|prefer(?:ably|red)?\s+({_WORD})\s+{_MASS_NOUN}"
+        rf"|(?:ideally|prefer)\s+({_WORD})\s+{_MASS_NOUN}",
+        text,
+        flags=re.I,
+    )
+    if pref:
+        token = next((g for g in pref.groups() if g), None)
+        n = _word_or_digit(str(token)) if token else None
+        if n:
+            parsed.constraints["preferred_mass_count"] = n
+            parsed.notes.append(f"preferred mass count {n}")
+            if parsed.mass_count is None and parsed.mass_count_min is None:
+                parsed.mass_count = n
+                parsed.constraints["mass_count_role"] = "preference"
+
+    if parsed.mass_count_min is not None and parsed.mass_count_max is not None:
+        parsed.mass_count = parsed.mass_count_max
+        parsed.constraints.setdefault("mass_count_role", "requirement")
+        return
+
     plus = re.search(
         rf"({_WORD})\s+main\s+(?:masses|volumes|blocks|buildings).{{0,80}}?\bplus\s+({_WORD})\s+"
         rf"(?:smaller\s+)?(?:pavilion|volume|building|mass|box)",
@@ -2542,10 +2863,12 @@ def _extract_mass_count(parsed: ParsedBrief, text: str) -> None:
         a, b = _word_or_digit(plus.group(1)), _word_or_digit(plus.group(2))
         if a and b:
             parsed.mass_count = a + b
+            parsed.constraints["mass_count_role"] = _role_from_words(
+                _sentence_at(text, plus.start(), plus.end()), default="requirement"
+            )
             parsed.notes.append(f"mass count {a}+{b} pavilion = {a + b}")
             return
 
-    # "three main blocks and one smaller standalone box/pavilion"
     and_pav = re.search(
         rf"({_WORD})\s+main\s+(?:masses|volumes|blocks|buildings)\s+and\s+({_WORD})\s+"
         rf"(?:smaller\s+)?(?:standalone\s+)?(?:pavilion|box|volume|form)",
@@ -2556,17 +2879,20 @@ def _extract_mass_count(parsed: ParsedBrief, text: str) -> None:
         a, b = _word_or_digit(and_pav.group(1)), _word_or_digit(and_pav.group(2))
         if a and b:
             parsed.mass_count = a + b
+            parsed.constraints["mass_count_role"] = _role_from_words(
+                _sentence_at(text, and_pav.start(), and_pav.end()), default="requirement"
+            )
             parsed.notes.append(f"mass count {a}+{b} pavilion = {a + b}")
             return
 
-    # Prefer an early explicit count ("5 chunky masses") over later "two masses".
     patterns = [
         rf"(?:exactly|scheme needs exactly)\s+(\d+)\s+{_MASS_NOUN}",
-        rf"\b({_WORD})\s+(?:separate\s+|main\s+|small\s+|larger\s+|large\s+|chunky\s+|"
+        rf"\b({_WORD})\s+(?:separate\s+|main\s+|primary\s+|small\s+|larger\s+|large\s+|chunky\s+|"
         rf"built\s+|standalone\s+|low-rise\s+)?"
         rf"(?:pavilion-like\s+)?{_MASS_NOUN}\b",
-        rf"(?:use|make|want|need|have|into|organize.*?into|arrange)\s+({_WORD})\s+"
-        rf"(?:main\s+|small\s+|large\s+|chunky\s+|built\s+|standalone\s+|low-rise\s+)?"
+        rf"(?:use|make|want|need|have|into|organize.*?into|arrange|contain|include|require|requires)\s+"
+        rf"(?:exactly\s+)?({_WORD})\s+"
+        rf"(?:main\s+|primary\s+|small\s+|large\s+|chunky\s+|built\s+|standalone\s+|low-rise\s+)?"
         rf"(?:separate\s+)?{_MASS_NOUN}",
         rf"(?:broken into|organize the project into|scheme needs exactly|"
         rf"break the project into|think of the project as)\s+"
@@ -2575,32 +2901,45 @@ def _extract_mass_count(parsed: ParsedBrief, text: str) -> None:
         rf"({_WORD})\s+(?:built\s+)?{_MASS_NOUN}\s+should be enough",
         rf"campus should have\s+({_WORD})\s+{_MASS_NOUN}",
         rf"project should have exactly\s+({_WORD})\s+{_MASS_NOUN}",
+        rf"(?:there\s+)?(?:need|needs|must)\s+(?:to\s+be\s+)?({_WORD})\s+{_MASS_NOUN}",
         rf"I need\s+({_WORD})\s+(?:pieces\s+of\s+massing|volumes|{_MASS_NOUN})",
         rf"Make\s+({_WORD})\s+{_MASS_NOUN}",
         rf"design can have\s+({_WORD})\s+towers",
         rf"around\s+({_WORD})\s+(?:pavilions|blocks|masses|structures)",
+        rf"(?:scheme|plan|project)\s+(?:must|needs?\s+to)\s+(?:contain|include|use)\s+"
+        rf"({_WORD})\s+{_MASS_NOUN}",
+        rf"({_WORD})\s+{_MASS_NOUN}\s+in\s+total",
     ]
     best_n: int | None = None
     best_pos = 10**9
+    best_end = 0
     for pattern in patterns:
         for match in re.finditer(pattern, text, flags=re.I):
             n = _word_or_digit(match.group(1))
             if not n:
                 continue
-            # Skip relational leftovers like "the quieter two masses"
             prefix = text[max(0, match.start() - 18) : match.start()].lower()
-            if re.search(r"\b(?:quieter|other|remaining|those|these|narrow)\s+$", prefix):
+            if re.search(r"\b(?:quieter|other|remaining|those|these|narrow|share\s+one|one)\s+$", prefix):
+                continue
+            # Skip "share one mass" / "in one mass" relational counts
+            span = match.group(0).lower()
+            if re.search(r"\b(?:share|same|own|single)\b", text[max(0, match.start()-24):match.start()].lower()):
+                continue
+            sent = _sentence_at(text, match.start(), match.end()).lower()
+            if parsed.mass_count is not None and re.search(
+                r"prefer|ideal|preferable|if\s+the\s+site", sent
+            ):
                 continue
             if match.start() < best_pos:
                 best_pos = match.start()
+                best_end = match.end()
                 best_n = n
-    if best_n is not None:
+    if best_n is not None and parsed.mass_count is None:
         parsed.mass_count = best_n
-        window = text[max(0, best_pos - 28) : min(len(text), best_pos + 56)]
         parsed.constraints["mass_count_role"] = _role_from_words(
-            window, default="requirement"
+            _sentence_at(text, best_pos, best_end), default="requirement"
         )
-        return
+
 
 
 def _proposal_for_free(
@@ -2730,33 +3069,63 @@ def briefing_from_parsed(parsed: ParsedBrief) -> dict[str, list[dict[str, Any]]]
                     "departments": list(depts),
                 }
             )
-    if parsed.mass_count:
-        mass_role = str(
-            parsed.constraints.get("mass_count_role")
-            or _role_from_words("masses", default="requirement")
-        )
-        entry: dict[str, Any]
-        if (
-            parsed.mass_count_min
-            and parsed.mass_count_max
-            and parsed.mass_count_min != parsed.mass_count_max
-        ):
-            entry = {
-                "kind": mass_role,
+    if (
+        parsed.mass_count_min is not None
+        and parsed.mass_count_max is not None
+        and parsed.mass_count_min != parsed.mass_count_max
+    ):
+        requirements.append(
+            {
+                "kind": "requirement",
                 "lever": "mass_count",
                 "text": "range",
                 "value": [parsed.mass_count_min, parsed.mass_count_max],
             }
-        else:
-            entry = {
-                "kind": mass_role,
+        )
+        limitations.append(
+            {
+                "kind": "limitation",
                 "lever": "mass_count",
-                "text": "",
-                "value": parsed.mass_count,
+                "text": "max",
+                "value": parsed.mass_count_max,
             }
-        {"requirement": requirements, "limitation": limitations, "preference": preferences}[
-            mass_role if mass_role in {"requirement", "limitation", "preference"} else "requirement"
-        ].append(entry)
+        )
+    elif parsed.mass_count_min is not None and parsed.mass_count_max is None:
+        requirements.append(
+            {
+                "kind": "requirement",
+                "lever": "mass_count",
+                "text": "min",
+                "value": parsed.mass_count_min,
+            }
+        )
+    elif parsed.mass_count_max is not None and parsed.mass_count_min is None:
+        limitations.append(
+            {
+                "kind": "limitation",
+                "lever": "mass_count",
+                "text": "max",
+                "value": parsed.mass_count_max,
+            }
+        )
+    elif parsed.mass_count:
+        mass_role = str(
+            parsed.constraints.get("mass_count_role")
+            or _role_from_words("masses", default="requirement")
+        )
+        entry = {
+            "kind": mass_role
+            if mass_role in {"requirement", "limitation", "preference"}
+            else "requirement",
+            "lever": "mass_count",
+            "text": "",
+            "value": parsed.mass_count,
+        }
+        {
+            "requirement": requirements,
+            "limitation": limitations,
+            "preference": preferences,
+        }[entry["kind"]].append(entry)
     for a, b in parsed.keep_together:
         requirements.append(
             {"kind": "requirement", "lever": "keep_together", "text": "", "departments": [a, b]}
@@ -2885,6 +3254,34 @@ def briefing_from_parsed(parsed: ParsedBrief) -> dict[str, list[dict[str, Any]]]
                 "unit": "sf",
             }
         )
+    if parsed.constraints.get("preferred_footprint_sf"):
+        preferences.append(
+            {
+                "kind": "preference",
+                "lever": "preferred_footprint",
+                "text": "",
+                "value": parsed.constraints["preferred_footprint_sf"],
+                "unit": "sf",
+            }
+        )
+    elif parsed.constraints.get("prefer_larger_footprint"):
+        preferences.append(
+            {
+                "kind": "preference",
+                "lever": "preferred_footprint",
+                "text": "larger",
+            }
+        )
+    if parsed.constraints.get("preferred_open_space_pct"):
+        preferences.append(
+            {
+                "kind": "preference",
+                "lever": "open_space",
+                "text": "preferred",
+                "value": parsed.constraints["preferred_open_space_pct"],
+                "unit": "%",
+            }
+        )
     for dept in parsed.pin_ground:
         pin_kinds = parsed.constraints.get("pin_ground_kind") or {}
         pin_role = str(pin_kinds.get(dept) or "preference")
@@ -2912,6 +3309,15 @@ def briefing_from_parsed(parsed: ParsedBrief) -> dict[str, list[dict[str, Any]]]
                 "lever": "preferred_stories",
                 "text": "",
                 "value": parsed.constraints["preferred_stories"],
+            }
+        )
+    if parsed.constraints.get("stories_min") and not parsed.constraints.get("stories_max"):
+        limitations.append(
+            {
+                "kind": "limitation",
+                "lever": "min_stories",
+                "text": "",
+                "value": parsed.constraints["stories_min"],
             }
         )
     if parsed.constraints.get("stories_min") or parsed.constraints.get("stories_max"):
