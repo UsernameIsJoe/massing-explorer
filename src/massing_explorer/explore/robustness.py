@@ -15,7 +15,7 @@ from .strategy import partition_id
 
 GROW = 1.15
 SHRINK = 0.85
-HARD_KINDS = {"site_length", "site_width", "gsf_fit", "anchor_fit", "layout_dims"}
+HARD_KINDS = {"site_length", "site_width", "site_total_length", "site_total_width", "gsf_fit", "anchor_fit", "layout_dims"}
 
 
 def probe_strategy(

@@ -40,8 +40,9 @@ def match_department(query: str, names: list[str]) -> str | None:
     """
     Map a loose user phrase onto one department name.
 
-    Exact / substring first, then token overlap, then a cheap edit-distance
-    fallback so typos like "custodiala" still resolve.
+    Exact / substring first, then common aliases (gym → PE), then token
+    overlap, then a cheap edit-distance fallback so typos like "custodiala"
+    still resolve.
     """
     q = _norm(query)
     if not q or not names:
@@ -51,6 +52,68 @@ def match_department(query: str, names: list[str]) -> str | None:
     if q in by_norm:
         return by_norm[q]
 
+    # Short architect words that never appear in the schedule name itself.
+    aliases: dict[str, tuple[str, ...]] = {
+        "gym": ("health", "physical", "gym", "athletics", "pe"),
+        "gymnasium": ("health", "physical", "gym", "athletics"),
+        "recreation": ("health", "physical", "gym", "athletics"),
+        "cafeteria": ("dining", "food", "kitchen"),
+        "kitchen": ("dining", "food", "kitchen"),
+        "dining hall": ("dining", "food"),
+        "dining": ("dining", "food"),
+        "food": ("dining", "food"),
+        "fitness": ("health", "physical", "gym", "athletics"),
+        "library": ("media",),
+        "classroom": ("academic",),
+        "classrooms": ("academic",),
+        "admin": ("administration", "guidance"),
+        "administration": ("administration", "guidance"),
+        "pe": ("health", "physical", "gym"),
+        "athletics": ("health", "physical", "gym"),
+        "art": ("art", "music"),
+        "arts": ("art", "music"),
+        "art spaces": ("art", "music"),
+        "art studios": ("art", "music"),
+        "gallery": ("art", "music"),
+        "music": ("art", "music"),
+        "student life": ("dining", "food", "administration"),
+        "loading": ("custodial", "maintenance"),
+        "service": ("custodial", "maintenance"),
+        "service/loading": ("custodial", "maintenance"),
+        "loading area": ("custodial", "maintenance"),
+    }
+    if q in aliases:
+        keys = aliases[q]
+        for name in names:
+            n = _norm(name)
+            if any(k in n for k in keys):
+                return name
+
+    # Typo against an alias key ("gyma" → gym, "arta" → art) before
+    # comparing the whole schedule name (which is usually much longer).
+    if len(q) >= 3:
+        best_alias = None
+        best_d = 99
+        for key in aliases:
+            if " " in key:
+                continue
+            d = _edits(q, key)
+            limit = max(1, min(2, len(q) // 4))
+            if d < best_d and d <= limit:
+                best_d = d
+                best_alias = key
+        if best_alias is not None:
+            keys = aliases[best_alias]
+            for name in names:
+                n = _norm(name)
+                if any(k in n for k in keys):
+                    return name
+
+    # Single letters / glue words ("i", "and", "the") must not substring-hit
+    # every schedule name that happens to contain that letter.
+    if len(q) < 3:
+        return None
+
     contained = [n for n in names if q in _norm(n) or _norm(n) in q]
     if len(contained) == 1:
         return contained[0]
@@ -58,36 +121,24 @@ def match_department(query: str, names: list[str]) -> str | None:
         contained.sort(key=lambda n: abs(len(_norm(n)) - len(q)))
         return contained[0]
 
-    q_tokens = set(q.split())
-    scored: list[tuple[float, str]] = []
-    for name in names:
-        tokens = set(_norm(name).split())
-        if not tokens:
-            continue
-        overlap = len(q_tokens & tokens) / len(q_tokens | tokens)
-        if overlap:
-            scored.append((overlap, name))
-    if scored:
-        scored.sort(key=lambda t: -t[0])
-        if scored[0][0] >= 0.4:
-            return scored[0][1]
+    q_tokens = {t for t in q.split() if len(t) >= 3}
+    if q_tokens:
+        scored: list[tuple[float, str]] = []
+        for name in names:
+            tokens = set(_norm(name).split())
+            if not tokens:
+                continue
+            overlap = len(q_tokens & tokens) / len(q_tokens | tokens)
+            if overlap:
+                scored.append((overlap, name))
+        if scored:
+            scored.sort(key=lambda t: -t[0])
+            if scored[0][0] >= 0.4:
+                return scored[0][1]
 
-    def _edits(a: str, b: str) -> int:
-        if a == b:
-            return 0
-        if not a:
-            return len(b)
-        if not b:
-            return len(a)
-        prev = list(range(len(b) + 1))
-        for i, ca in enumerate(a, 1):
-            cur = [i]
-            for j, cb in enumerate(b, 1):
-                cur.append(
-                    prev[j - 1] if ca == cb else 1 + min(prev[j], cur[j - 1], prev[j - 1])
-                )
-            prev = cur
-        return prev[-1]
+    # Typos need a real stem; "and"/"want" must not fuzzy-match "art".
+    if len(q) < 4:
+        return None
 
     best_name = None
     best_d = 99
@@ -97,12 +148,29 @@ def match_department(query: str, names: list[str]) -> str | None:
         candidates = [n, n.split()[0] if n.split() else n]
         for c in candidates:
             d = _edits(q, c)
-            limit = max(2, len(q) // 3)
+            limit = max(1, min(2, len(q) // 4))
             if d < best_d and d <= limit:
                 best_d = d
                 best_name = name
     return best_name
 
+
+def _edits(a: str, b: str) -> int:
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(
+                prev[j - 1] if ca == cb else 1 + min(prev[j], cur[j - 1], prev[j - 1])
+            )
+        prev = cur
+    return prev[-1]
 
 class _UnionFind:
     def __init__(self, items: list[str]) -> None:

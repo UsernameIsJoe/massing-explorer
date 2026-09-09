@@ -41,10 +41,18 @@ def required_together(session: Any) -> list[frozenset[str]]:
 
 
 def required_mass_count(session: Any) -> int | None:
+    """Stated mass count. Ranges like 3–4 use the high end (same as parse)."""
     briefing = session.constraints.get("briefing") or {}
     for clause in briefing.get("requirements") or []:
-        if clause.get("lever") == "mass_count" and clause.get("value"):
-            return int(clause["value"])
+        if clause.get("lever") != "mass_count":
+            continue
+        value = clause.get("value")
+        if value is None or value == "":
+            continue
+        if isinstance(value, (list, tuple)):
+            nums = [int(v) for v in value if v is not None and v != ""]
+            return max(nums) if nums else None
+        return int(value)
     return None
 
 

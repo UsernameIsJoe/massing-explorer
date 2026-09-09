@@ -160,11 +160,22 @@ def _resolve_fixed_width(
     keys = [f"{mass_id}_width_ft", "fixed_width_ft"]
     if is_academic:
         keys.append("academic_width_ft")
-    keys.append("max_building_width_ft")
 
     for key in keys:
         if key in c and c[key] is not None:
             return float(c[key])
+
+    # Department-scoped brief widths (before / without mass-id keys).
+    dept_widths = c.get("department_widths")
+    if isinstance(dept_widths, dict):
+        mass = next((m for m in session.masses if m.id == mass_id), None)
+        if mass:
+            for dept in mass.departments:
+                if dept in dept_widths and dept_widths[dept] is not None:
+                    return float(dept_widths[dept])
+
+    if "max_building_width_ft" in c and c["max_building_width_ft"] is not None:
+        return float(c["max_building_width_ft"])
 
     planning = config.get("planning_limits", {})
     config_keys = (

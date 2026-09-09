@@ -333,7 +333,7 @@ def _cover_geometry(session: Any, archive: dict[str, Any]) -> None:
             _evaluate(session, archive, f"cover stories on {mass.name}: {stories}")
         mass.story_count = baseline[mass.id]
 
-    if session.constraints.get("max_total_length_ft"):
+    if session.masses:
         _ingest_site_search(session, archive)
 
     for mass in session.masses:
@@ -522,11 +522,21 @@ def _pick_kept(
     preferred_partition: str | None = None,
 ) -> dict[str, Any]:
     legal = archive_mod.legal_cells(archive)
-    if not legal:
+    if legal:
+        tasted = bool(weights and any(abs(float(v)) > 1e-9 for v in weights.values()))
+        if not tasted and preferred_partition:
+            same = [e for e in legal if e.get("partition") == preferred_partition]
+            if same:
+                return max(same, key=lambda e: taste_weight(e, weights))
+        return max(legal, key=lambda e: taste_weight(e, weights))
+    # No legal cell: keep the least-bad attempt so the UI still shows the brief.
+    cells = list((archive.get("cells") or {}).values())
+    if not cells:
         return {}
-    tasted = bool(weights and any(abs(float(v)) > 1e-9 for v in weights.values()))
-    if not tasted and preferred_partition:
-        same = [e for e in legal if e.get("partition") == preferred_partition]
-        if same:
-            return max(same, key=lambda e: taste_weight(e, weights))
-    return max(legal, key=lambda e: taste_weight(e, weights))
+    def _badness(entry: dict[str, Any]) -> tuple[int, float]:
+        perf = entry.get("performance") or {}
+        return (
+            int(perf.get("limit_fails") or 0) + int(perf.get("failed_checks") or 0),
+            float(perf.get("preference_distance") or 0.0),
+        )
+    return min(cells, key=_badness)

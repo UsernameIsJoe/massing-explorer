@@ -135,7 +135,7 @@ def empty_cells(session: Any, archive: dict[str, Any] | None = None) -> dict[str
         site = 0
         for _key, entry in infeasible:
             kinds = (entry.get("performance") or {}).get("failed_kinds") or []
-            if "site_length" in kinds or "site_width" in kinds:
+            if "site_length" in kinds or "site_width" in kinds or "site_total" in kinds:
                 site += 1
         items.append(
             {
@@ -186,7 +186,7 @@ def empty_cells(session: Any, archive: dict[str, Any] | None = None) -> dict[str
 
 def _cap_clause(kinds: list[str], entry: dict[str, Any]) -> str:
     reason = entry.get("reason") or "this attempt"
-    if "site_length" in kinds or "site_width" in kinds:
+    if "site_length" in kinds or "site_width" in kinds or "site_total" in kinds:
         return (
             f"A sampled cell from {reason} missed a site cap. "
             "Infeasible cells do not count as coverage. A cap is a filter, not a target."

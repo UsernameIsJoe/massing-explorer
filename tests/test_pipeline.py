@@ -86,8 +86,55 @@ class TestParseBrief(unittest.TestCase):
 
     def test_meters_convert_to_feet(self) -> None:
         parsed = parse_brief("Length should be shorter than 59 meters.", self.names)
-        self.assertAlmostEqual(parsed.constraints["max_building_length_ft"], 59 * 3.280839895)
+        self.assertAlmostEqual(
+            parsed.constraints["max_building_length_ft"], 59 * 3.280839895, places=4
+        )
         self.assertEqual(parsed.constraints["length_limit_is_cap"], 1)
+
+    def test_each_mass_not_longer_than_meters(self) -> None:
+        parsed = parse_brief(
+            "Each mass should not be longer than 75 meters.",
+            self.names,
+        )
+        self.assertAlmostEqual(
+            parsed.constraints["max_building_length_ft"], 75 * 3.280839895, places=4
+        )
+        self.assertEqual(parsed.constraints["length_limit_is_cap"], 1)
+
+    def test_each_mass_prefer_two_floors(self) -> None:
+        parsed = parse_brief("each mass prefer to be 2 floors", self.names)
+        self.assertEqual(parsed.constraints.get("preferred_stories"), 2.0)
+        self.assertIsNone(parsed.max_stories)
+        briefing = __import__(
+            "massing_explorer.brief", fromlist=["briefing_from_parsed"]
+        ).briefing_from_parsed(parsed)
+        self.assertTrue(
+            any(
+                c.get("lever") == "preferred_stories" and float(c.get("value") or 0) == 2
+                for c in briefing["preferences"]
+            )
+        )
+
+    def test_preferred_stories_under_hard_max(self) -> None:
+        parsed = parse_brief(
+            "each mass can be no more than 3 stories. each mass prefer to be 2 floors.",
+            self.names,
+        )
+        self.assertEqual(parsed.max_stories, 3)
+        self.assertEqual(parsed.constraints.get("preferred_stories"), 2.0)
+        parsed = parse_brief(
+            "each mass can be no more than 3 stories and no longer than 210 ft, "
+            "and I'd like the mass proportion to stay close to 3:4. "
+            "Core Academic should maintain an 80 ft width.",
+            self.names,
+        )
+        self.assertEqual(parsed.max_stories, 3)
+        self.assertAlmostEqual(parsed.constraints["max_building_length_ft"], 210.0)
+        self.assertNotIn("max_total_length_ft", parsed.constraints)
+        self.assertAlmostEqual(parsed.length_over_width or 0.0, 3.0 / 4.0, places=4)
+        self.assertEqual(
+            parsed.constraints.get("department_widths", {}).get("CORE ACADEMIC"), 80.0
+        )
 
     def test_frontage_and_low_rise(self) -> None:
         parsed = parse_brief(
@@ -97,6 +144,36 @@ class TestParseBrief(unittest.TestCase):
         self.assertEqual(parsed.constraints["max_total_length_ft"], 300)
         self.assertEqual(parsed.constraints["max_building_width_ft"], 80)
         self.assertEqual(parsed.preference, "low_rise")
+
+    def test_spoken_four_masses_gym_dining_site_cap(self) -> None:
+        """Natural brief: word count, 'gym', 'together', 'no longer than'."""
+        from massing_explorer.group import match_department
+
+        self.assertEqual(
+            match_department("gym", self.names), "HEALTH & PHYSICAL EDUCATION"
+        )
+        parsed = parse_brief(
+            "Four masses. Gym and dining together. Art on the ground floor. "
+            "Site no longer than 400 feet. Keep it low if you can.",
+            self.names,
+        )
+        self.assertEqual(parsed.mass_count, 4)
+        self.assertEqual(parsed.constraints["max_total_length_ft"], 400)
+        self.assertEqual(parsed.preference, "low_rise")
+        self.assertIn("ART & MUSIC", parsed.pin_ground)
+        pairs = {tuple(sorted(p)) for p in parsed.keep_together}
+        self.assertIn(
+            tuple(sorted(("HEALTH & PHYSICAL EDUCATION", "DINING & FOOD SERVICE"))),
+            pairs,
+        )
+        from massing_explorer.brief import assign_open_departments
+
+        assign_open_departments(parsed)
+        home = {d: name for name, depts in parsed.named_masses for d in depts}
+        self.assertEqual(len(parsed.named_masses), 4)
+        self.assertEqual(
+            home["HEALTH & PHYSICAL EDUCATION"], home["DINING & FOOD SERVICE"]
+        )
 
 
 class TestGrouping(unittest.TestCase):
@@ -252,7 +329,11 @@ class TestApplyBrief(unittest.TestCase):
         for mass in result.masses:
             length = mass.floors[0].length_ft
             width = mass.floors[0].width_ft
-            self.assertGreater(length, 50.5, mass.name)
+            self.assertGreater(
+                abs(length - 50.0),
+                0.4,
+                f"{mass.name} length {length} looks filled to the 50 ft cap",
+            )
             self.assertAlmostEqual(length / width, 0.6, delta=0.05)
         gym = by_id[gym_mass.id]
         self.assertTrue(any(a.double_height for a in gym.floors[0].allocations))

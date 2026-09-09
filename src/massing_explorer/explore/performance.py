@@ -20,7 +20,10 @@ def measure(result: Any, session: Any = None, archive: dict[str, Any] | None = N
     failed = [c for c in (getattr(result, "validation", None) or []) if not c.passed]
     limit_fails = [
         c for c in failed
-        if str(c.check).startswith("site_length") or str(c.check).startswith("site_width")
+        if str(c.check).startswith("site_length")
+        or str(c.check).startswith("site_width")
+        or str(c.check) in {"site_total_length", "site_total_width"}
+        or str(c.check).startswith("site_total_")
     ]
     masses = list(getattr(result, "masses", None) or [])
     areas: list[float] = []

@@ -48,6 +48,9 @@ REQUIREMENT_LEVERS = {
     "keep_together",
     "keep_apart",
     "exact_length",
+    "exact_width",
+    "exact_depth",
+    "dept_width",
 }
 LIMITATION_LEVERS = {
     "max_length",
@@ -56,6 +59,7 @@ LIMITATION_LEVERS = {
     "max_height",
     "site_length",
     "max_total_length",
+    "min_width",
 }
 PREFERENCE_LEVERS = {
     "pin_ground",
@@ -65,6 +69,7 @@ PREFERENCE_LEVERS = {
     "low_rise",
     "compact",
     "spread",
+    "preferred_width",
 }
 _LIMIT_TEXT = re.compile(
     r"\b(?:under|below|shorter than|less than|no more than|not more than|"
@@ -316,15 +321,19 @@ def _stated_number(value: Any, unit: str | None = None) -> float | None:
 
 
 def _force_kind(kind: str, text: str, lever: str) -> str:
-    """The wording decides the role. A cap is never a requirement to hit."""
-    if lever in LIMITATION_LEVERS or _LIMIT_TEXT.search(text or ""):
-        if not re.search(r"\b(?:must be exactly|exactly|shall be)\b", text or "", flags=re.I):
+    """Modality words decide the role. Digits / spelled numbers are values only."""
+    # Strip values so "prefer 3 stories" / "four masses" cannot flip the role by number.
+    from massing_explorer.brief import _strip_values_for_role
+
+    cues = _strip_values_for_role(text or "")
+    if lever in LIMITATION_LEVERS or _LIMIT_TEXT.search(cues):
+        if not re.search(r"\b(?:must be exactly|exactly|shall be)\b", cues, flags=re.I):
             return "limitation"
     if lever in PREFERENCE_LEVERS or (
-        _PREFER_TEXT.search(text or "") and not _REQUIRE_TEXT.search(text or "")
+        _PREFER_TEXT.search(cues) and not _REQUIRE_TEXT.search(cues)
     ):
         return "preference"
-    if lever in REQUIREMENT_LEVERS or _REQUIRE_TEXT.search(text or ""):
+    if lever in REQUIREMENT_LEVERS or _REQUIRE_TEXT.search(cues):
         return "requirement"
     if kind in KINDS:
         return kind
@@ -449,25 +458,31 @@ def reading_prompt(text: str, department_names: list[str], parsed: dict[str, Any
         "it onto a lever. Do not invent sizes they did not state. Reply with one "
         "JSON object only.\n"
         "Roles:\n"
-        "- requirement: must be executed. Organization they insist on: a count of "
-        "masses, programs that must share a mass, a program that must be alone, "
-        "double-height, keep apart. Words like must, shall, is, same mass, by "
-        "itself, one mass. A requirement is not a length to hit.\n"
-        "- limitation: a cap to check, never a target to fill. under, shorter than, "
-        "less than, no more than, at most, maximum, cannot exceed, max stories, "
-        "max height. Copy the number. If they said meters, set unit to m. Do not "
-        "set a bar's length or height to that number.\n"
-        "- preference: desired, and you may decide how, as long as requirements "
-        "hold and limitations are not broken. prefer, ideally, if possible, a "
-        "ratio, a ground-floor placement. A floor preference is not its own mass.\n"
+        "- requirement / limitation / preference are decided ONLY by modality "
+        "words. Digits and spelled numbers (4, four, thirty-five, 85 ft) "
+        "are VALUES only — never the role.\n"
+        "- requirement cues: must, needs to, has to, requires, exactly "
+        "(also maintain / same mass / together when they insist on organization).\n"
+        "- limitation cues: should be, cannot exceed, no more than, at least, "
+        "should stay under (also max / under / below / no longer than as caps). "
+        "A limitation is a bound to check, never a target to fill.\n"
+        "- preference cues: prefer, ideally, would rather, better if, if possible, "
+        "around, closer to (also roughly / would like). Soft intent you may decide how.\n"
+        "- If preference cues appear with a bound word, keep preference. "
+        "If require cues appear with a bound word, keep requirement "
+        "(except must not / cannot exceed → limitation).\n"
         "clauses: list of "
         '{"kind": "requirement|limitation|preference", "lever": "...", '
         '"text": "the user clause", "departments": ["..."], "value": number or null, '
-        '"unit": "ft|m|null", "length": number or null, "width": number or null}.\n'
+        '"unit": "ft|m|null", "length": number or null, "width": number or null}.\n"
         "Levers: same_mass, alone, mass_count, double_height, keep_together, "
-        "keep_apart, exact_length, max_length, max_width, max_stories, max_height, "
+        "keep_apart, exact_length, exact_width, exact_depth, dept_width, "
+        "max_length, max_width, max_stories, max_height, "
         "site_length, max_total_length, pin_ground, pin_floor, ratio, loading, "
-        "low_rise, compact.\n"
+        "low_rise, compact, preferred_width.\n"
+        "For a stated size on one program (e.g. 'core academic width must be "
+        "80 ft'), use exact_width / preferred_width / max_width with "
+        "departments filled and value in feet (convert m→ft only if unit is m).\n"
         "Also fill, only when they said it:\n"
         "- masses: required wings only, not leftover programs and not a floor preference\n"
         "- pair_length_ft: a cap on named wings together, never a length to fill\n"
