@@ -21,6 +21,10 @@ SUPPORTED = (
     "SET_STORIES",
     "SET_LOADING",
     "PAIR_MASSES",
+    "CLEAR_PAIRINGS",
+    "SET_WIDTH",
+    "SET_ENVELOPE",
+    "APPLY_PARTITION",
 )
 
 UNSUPPORTED = ("COURTYARD", "PODIUM", "PERPENDICULAR_WINGS", "SET_SHAPE")
@@ -44,6 +48,10 @@ def apply_action(session: Any, action: dict[str, Any]) -> dict[str, Any]:
         "SET_STORIES": _set_stories,
         "SET_LOADING": _set_loading,
         "PAIR_MASSES": _pair_masses,
+        "CLEAR_PAIRINGS": _clear_pairings,
+        "SET_WIDTH": _set_width,
+        "SET_ENVELOPE": _set_envelope,
+        "APPLY_PARTITION": _apply_partition,
     }.get(name)
     if handler is None:
         return _reject(name or "UNKNOWN", "Not a known design action.")
@@ -228,6 +236,100 @@ def _pair_masses(session: Any, action: dict[str, Any]) -> dict[str, Any]:
     if not out.get("ok"):
         return _reject("PAIR_MASSES", str(out.get("error") or "pair failed"))
     return _ok("PAIR_MASSES", f"Paired {', '.join(ids)} under {frontage:g} ft (cap).")
+
+
+def _clear_pairings(session: Any, action: dict[str, Any]) -> dict[str, Any]:
+    from .topology import topology_is_required
+
+    if topology_is_required(session):
+        return _reject("CLEAR_PAIRINGS", "Topology was required by the brief.")
+    if not session.pairings:
+        return _ok("CLEAR_PAIRINGS", "Already independent bars.")
+    session.pairings = []
+    if hasattr(session, "save"):
+        session.save()
+    return _ok("CLEAR_PAIRINGS", "Masses size independently again.")
+
+
+def _set_width(session: Any, action: dict[str, Any]) -> dict[str, Any]:
+    """Nearby width step from the current plate — not an invented target."""
+    mass_id = str(action.get("mass") or action.get("mass_id") or "")
+    try:
+        delta = float(action.get("delta_ft") or 0)
+    except (TypeError, ValueError):
+        return _reject("SET_WIDTH", "Need a nearby width step (delta_ft).")
+    if abs(delta) < 0.1:
+        return _reject("SET_WIDTH", "Width step is empty.")
+    mass = next((m for m in (session.masses or []) if m.id == mass_id), None)
+    if mass is None:
+        return _reject("SET_WIDTH", f"Unknown mass: {mass_id}")
+    from ..solver import required_width_ft
+
+    if required_width_ft(session, mass) is not None:
+        return _reject("SET_WIDTH", "Exact brief width is locked for this mass.")
+    if any(mass_id in (p.mass_ids or []) for p in (session.pairings or [])):
+        return _reject("SET_WIDTH", "Paired width is not independent.")
+    current = session.constraints.get(f"{mass_id}_width_ft")
+    if current is None:
+        current = _width_from_last(session, mass_id) or 60.0
+    try:
+        current = float(current)
+    except (TypeError, ValueError):
+        current = 60.0
+    nxt = current + delta
+    min_w = 45.0
+    max_w = session.constraints.get("max_building_width_ft")
+    if nxt < min_w:
+        return _reject("SET_WIDTH", f"Width would drop below {min_w:g} ft.")
+    if max_w is not None and nxt > float(max_w) + 0.01:
+        return _reject("SET_WIDTH", "Width would exceed the stated max.")
+    session.constraints[f"{mass_id}_width_ft"] = round(nxt, 4)
+    if hasattr(session, "save"):
+        session.save()
+    return _ok("SET_WIDTH", f"{mass_id} width {current:g} → {nxt:g} ft (nearby step).")
+
+
+def _set_envelope(session: Any, action: dict[str, Any]) -> dict[str, Any]:
+    env = str(action.get("envelope") or action.get("type") or "").lower()
+    if env not in {"balanced", "compact", "elongated"}:
+        return _reject("SET_ENVELOPE", "Envelope must be balanced, compact, or elongated.")
+    session.constraints["cover_envelope"] = env
+    if hasattr(session, "save"):
+        session.save()
+    if getattr(session, "program", None) is not None:
+        try:
+            from .cover import _apply_envelope_geometry
+
+            _apply_envelope_geometry(session, env)
+        except Exception:
+            pass
+    return _ok("SET_ENVELOPE", f"Envelope family is {env}.")
+
+
+def _apply_partition(session: Any, action: dict[str, Any]) -> dict[str, Any]:
+    if grouping_is_required(session):
+        return _reject("APPLY_PARTITION", "Program organization was required by the brief.")
+    groups = list(action.get("groups") or [])
+    if not groups:
+        return _reject("APPLY_PARTITION", "APPLY_PARTITION needs CSP groups.")
+    from .partitions import apply_partition
+
+    apply_partition(session, groups)
+    return _ok("APPLY_PARTITION", "Applied a CSP partition.")
+
+
+def _width_from_last(session: Any, mass_id: str) -> float | None:
+    last = getattr(session, "last_massing", None) or {}
+    for mass in last.get("masses") or []:
+        if str(mass.get("id") or "") != mass_id:
+            continue
+        floors = mass.get("floors") or []
+        if floors:
+            try:
+                return float(floors[0].get("width_ft") or 0) or None
+            except (TypeError, ValueError, AttributeError):
+                return None
+    return None
 
 
 def _fresh_id(session: Any, seed: str) -> str:

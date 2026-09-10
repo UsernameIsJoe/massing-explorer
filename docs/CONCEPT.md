@@ -60,6 +60,7 @@ A useful run reports:
 
 - which **legal** strategies were found
 - which cells are **empty**, and why (unsupported vs locked vs cap-miss vs infeasible)
+- when COVER finds **no** legal cells: a **DIAGNOSE** class (search / conflict / model), optional targeted COVER, and **relaxation probes the architect must choose** — never auto-applied
 - whether the kept strategy **survived** a program-area shock
 - a pending **A/B** pair among drawings that already fit, if LEARN has two elites
 
@@ -69,6 +70,6 @@ It does not invent a courtyard, fill a cap, or call three widths of the same bar
 
 ## What Bayesian optimization is (and is not)
 
-Bayesian optimization is an **evaluation-budget manager** for expensive simulations. A small Gaussian process ranks unevaluated typed actions by expected improvement, then spends a few engine evaluations. It is not an architectural generator. It does not sit on feet. It is not on the critical path until a run costs minutes.
+Bayesian optimization is an **evaluation-budget manager** for expensive simulations. After COVER has filled the archive, a small Gaussian process ranks unevaluated typed actions by expected improvement, evaluates one, refits, and repeats (~10–15 sequential proposals, or until new evaluations stop improving or adding feature diversity). It is not an architectural generator. It does not sit on invented feet. It is not on the critical path until a run costs minutes.
 
 `search.py` (`balanced` / `low_rise` / `compact`) remains an experimental enumeration baseline, not “quality.”

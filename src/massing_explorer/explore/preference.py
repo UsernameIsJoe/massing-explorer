@@ -11,7 +11,13 @@ import math
 import re
 from typing import Any
 
-TRAIT_NAMES = ("spread", "height_variance", "footprint_likeness", "street_edge")
+# Soft LEARN axes. Hard gate stays requirements + limitations only.
+TRAIT_NAMES = (
+    "program_coherence",
+    "preference_alignment",
+    "performance_efficiency",
+    "robustness",
+)
 
 
 def utility(weights: dict[str, float], traits: dict[str, Any]) -> float:
@@ -86,11 +92,22 @@ def next_pair(
     unseen = [s for s in legal if s["id"] not in compared]
     seen = [s for s in legal if s["id"] in compared]
     if unseen and seen:
-        fresh = unseen[0]
-        other = max(seen, key=lambda s: abs(utility(weights, s["traits"]) - utility(weights, fresh["traits"])))
+        fresh = max(
+            unseen,
+            key=lambda s: max(_pair_diversity(s, o) for o in seen),
+        )
+        other = max(seen, key=lambda s: _pair_diversity(s, fresh))
         return _pair(fresh, other, "connecting")
     if len(unseen) >= 2:
-        return _pair(unseen[0], unseen[1], "connecting")
+        best = None
+        best_div = -1.0
+        for i, left in enumerate(unseen):
+            for right in unseen[i + 1 :]:
+                d = _pair_diversity(left, right)
+                if d > best_div:
+                    best_div = d
+                    best = _pair(left, right, "connecting")
+        return best or _pair(unseen[0], unseen[1], "connecting")
     best = None
     best_score = -1.0
     for i, left in enumerate(legal):
@@ -98,7 +115,7 @@ def next_pair(
             if _already(comparisons, left["id"], right["id"]):
                 continue
             pa = chance_a_beats_b(left["traits"], right["traits"], weights)
-            score = information(pa)
+            score = information(pa) * (1.0 + 0.35 * _pair_diversity(left, right))
             if score > best_score:
                 best_score = score
                 best = _pair(left, right, "ambiguous" if score >= 0.2 else "obvious")
@@ -152,20 +169,17 @@ def schemes_from_archive(archive: dict[str, Any]) -> list[dict[str, Any]]:
 def describe_weights(weights: dict[str, float]) -> str:
     ranked = sorted(weights.items(), key=lambda item: abs(item[1]), reverse=True)
     parts = []
+    labels = {
+        "program_coherence": "program coherence",
+        "preference_alignment": "preference alignment",
+        "performance_efficiency": "performance efficiency",
+        "robustness": "robustness",
+    }
     for name, value in ranked:
         if abs(value) < 0.05:
             continue
-        label = name.replace("_", " ")
-        if name == "height_variance":
-            parts.append(("less " if value < 0 else "more ") + "height variance")
-        elif name == "spread":
-            parts.append(("less " if value < 0 else "more ") + "spread")
-        elif name == "footprint_likeness":
-            parts.append(("less " if value < 0 else "more ") + "alike footprints")
-        elif name == "street_edge":
-            parts.append(("weaker " if value < 0 else "stronger ") + "street edge")
-        else:
-            parts.append(f"{label} {value:+.2f}")
+        label = labels.get(name, name.replace("_", " "))
+        parts.append(("less " if value < 0 else "more ") + label)
         if len(parts) == 3:
             break
     if not parts:
@@ -222,6 +236,32 @@ def take_choice(session: Any, text: str) -> dict[str, Any] | None:
 
 def _pair(left: dict[str, Any], right: dict[str, Any], kind: str) -> dict[str, Any]:
     return {"a": left["id"], "b": right["id"], "kind": kind}
+
+
+def _pair_diversity(left: dict[str, Any], right: dict[str, Any]) -> float:
+    """How different two legal archive schemes are (P / T / envelope / traits)."""
+    ea = left.get("entry") or {}
+    eb = right.get("entry") or {}
+    score = 0.0
+    if ea.get("partition") != eb.get("partition"):
+        score += 2.0
+    ta = ((ea.get("strategy") or {}).get("T") or {}).get("kind")
+    tb = ((eb.get("strategy") or {}).get("T") or {}).get("kind")
+    if ta != tb:
+        score += 2.0
+    ga = ((ea.get("strategy") or {}).get("G") or {}).get("envelope")
+    gb = ((eb.get("strategy") or {}).get("G") or {}).get("envelope")
+    if ga != gb:
+        score += 1.0
+    la = ((ea.get("strategy") or {}).get("G") or {}).get("loading")
+    lb = ((eb.get("strategy") or {}).get("G") or {}).get("loading")
+    if la != lb:
+        score += 1.0
+    traits_a = left.get("traits") or {}
+    traits_b = right.get("traits") or {}
+    for name in TRAIT_NAMES:
+        score += abs(float(traits_a.get(name, 0.0) or 0.0) - float(traits_b.get(name, 0.0) or 0.0))
+    return score
 
 
 def _already(comparisons: list[dict[str, Any]], left: str, right: str) -> bool:

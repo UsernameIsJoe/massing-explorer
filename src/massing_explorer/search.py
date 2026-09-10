@@ -33,10 +33,12 @@ from typing import Any, Iterator
 
 from .config import load_project_config
 from .solver import (
+    _mass_edge_cap_ft,
     _mass_target_gsf,
     _match_anchor_rooms,
     _void_area_for_mass,
     rectangle_fits_room,
+    required_width_ft,
     resolve_step_weights,
     solve_massing_study,
     solve_paired_masses,
@@ -230,6 +232,21 @@ def _is_daylight_sensitive(departments: list[str], keywords: tuple[str, ...]) ->
     return any(k in d.lower() for d in departments for k in keywords)
 
 
+def _required_width_ft(session: StudySession, mass_def: Any) -> float | None:
+    """Exact brief width for this mass, if stated as a number."""
+    return required_width_ft(session, mass_def)
+
+
+def _story_range_for_mass(session: StudySession, mass_def: Any, envelope: SiteEnvelope) -> list[int]:
+    locks = session.constraints.get("story_lock") or {}
+    if mass_def.id in locks:
+        return [max(1, int(locks[mass_def.id]))]
+    explicit_steps = session.floor_steps.get(mass_def.id)
+    if explicit_steps:
+        return [len(explicit_steps)]
+    return list(range(1, envelope.max_stories + 1))
+
+
 def _mass_context(
     session: StudySession, mass_def: Any, config: dict[str, Any]
 ) -> tuple[float, float, list[dict[str, Any]]]:
@@ -253,12 +270,8 @@ def _mass_options(
 
     # Explicit step weights describe named levels, so they pin the height. A
     # taper is a shape rather than a set of floors, so the height stays free.
-    explicit_steps = session.floor_steps.get(mass_def.id)
-    story_range = (
-        [len(explicit_steps)]
-        if explicit_steps
-        else list(range(1, envelope.max_stories + 1))
-    )
+    # story_lock (including temporary COVER pins) also pins height.
+    story_range = _story_range_for_mass(session, mass_def, envelope)
 
     for stories in story_range:
         weights = resolve_step_weights(session, mass_def.id, stories)
@@ -274,12 +287,35 @@ def _mass_options(
         # Without a stated width cap, stop at a square plate; wider than that is
         # the same rectangle rotated.
         hi = envelope.max_building_width_ft or max(lo, math.sqrt(ground))
+        mass_cap = _mass_edge_cap_ft(session, mass_def)
+        if envelope.max_building_length_ft is not None and envelope.max_building_width_ft is not None:
+            hi = min(hi, envelope.max_building_length_ft, envelope.max_building_width_ft)
+        if mass_cap is not None:
+            hi = min(hi, mass_cap)
 
-        for width in _width_grid(lo, hi):
-            if (
+        required_w = _required_width_ft(session, mass_def)
+        if required_w is not None:
+            # Exact width is a requirement — do not offer alternate widths.
+            widths = [float(required_w)]
+        else:
+            widths = list(_width_grid(lo, hi))
+
+        for width in widths:
+            over_len = bool(
                 envelope.max_building_length_ft
                 and longest / width > envelope.max_building_length_ft + LIMIT_EPS
-            ):
+            )
+            over_wid = bool(
+                envelope.max_building_width_ft
+                and width > envelope.max_building_width_ft + LIMIT_EPS
+            )
+            if mass_cap is not None:
+                over_len = over_len or (longest / width > mass_cap + LIMIT_EPS)
+                over_wid = over_wid or (width > mass_cap + LIMIT_EPS)
+            required_here = (
+                required_w is not None and abs(width - float(required_w)) <= 0.05
+            )
+            if (over_len or over_wid) and not required_here:
                 continue
             # Anchor rooms sit on the ground floor
             if not _anchors_fit(width, ground / width, anchors):
@@ -375,6 +411,12 @@ def _pairing_options(
                 return
             group: list[MassOption] = []
             for i, member in enumerate(members):
+                cap = _mass_edge_cap_ft(session, member)
+                if cap and (
+                    width > cap + LIMIT_EPS
+                    or longest[i] / width > cap + LIMIT_EPS
+                ):
+                    return
                 if (
                     envelope.max_building_length_ft
                     and longest[i] / width
@@ -404,10 +446,7 @@ def _pairing_options(
             return
 
         member = members[index]
-        explicit = session.floor_steps.get(member.id)
-        story_range = (
-            [len(explicit)] if explicit else range(1, envelope.max_stories + 1)
-        )
+        story_range = _story_range_for_mass(session, member, envelope)
         for stories in story_range:
             walk(index + 1, [*chosen, stories])
 
@@ -559,9 +598,11 @@ def apply_scheme_from_dict(
         if mass is None:
             continue
         mass.story_count = int(entry["stories"])
-        session.constraints[f"{mass_id}_width_ft"] = float(entry["width_ft"])
+        required = required_width_ft(session, mass)
+        width = float(required) if required is not None else float(entry["width_ft"])
+        session.constraints[f"{mass_id}_width_ft"] = width
         applied.append(
-            f"{entry.get('mass_name', mass_id)}: {entry['width_ft']:g} ft wide, "
+            f"{entry.get('mass_name', mass_id)}: {width:g} ft wide, "
             f"{entry['stories']} stories"
         )
     if save:
@@ -580,7 +621,11 @@ def apply_scheme(
         mass = by_id.get(option.mass_id)
         if mass is not None:
             mass.story_count = option.stories
-        session.constraints[f"{option.mass_id}_width_ft"] = round(option.width_ft, 2)
+            required = required_width_ft(session, mass)
+            width = float(required) if required is not None else round(option.width_ft, 2)
+        else:
+            width = round(option.width_ft, 2)
+        session.constraints[f"{option.mass_id}_width_ft"] = width
     if save:
         session.save()
     return {

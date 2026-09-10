@@ -152,6 +152,12 @@ def _resolve_fixed_width(
 ) -> float:
     """Prefer mass-specific constraint, then global constraints, then config defaults."""
     c = session.constraints
+    # Department exact width beats a search-stamped mass-id key.
+    mass = next((m for m in session.masses if m.id == mass_id), None)
+    if mass is not None:
+        required = required_width_ft(session, mass)
+        if required is not None:
+            return float(required)
     # `academic_width_ft` is a per-mass key carried over from the manual
     # workflow, so it must only size an academic mass. Left in the general
     # chain, one mistyped key silently gave every other mass the academic
@@ -164,15 +170,6 @@ def _resolve_fixed_width(
     for key in keys:
         if key in c and c[key] is not None:
             return float(c[key])
-
-    # Department-scoped brief widths (before / without mass-id keys).
-    dept_widths = c.get("department_widths")
-    if isinstance(dept_widths, dict):
-        mass = next((m for m in session.masses if m.id == mass_id), None)
-        if mass:
-            for dept in mass.departments:
-                if dept in dept_widths and dept_widths[dept] is not None:
-                    return float(dept_widths[dept])
 
     if "max_building_width_ft" in c and c["max_building_width_ft"] is not None:
         return float(c["max_building_width_ft"])
@@ -610,6 +607,10 @@ def functional_bar_width(
     than their clear dimension.
     """
     c = session.constraints
+    required = required_width_ft(session, mass_def)
+    if required is not None:
+        # Exact department width is a requirement — do not clamp it to a length cap.
+        return max(float(required), 20.0)
     stated = c.get(f"{mass_def.id}_width_ft") or c.get("preferred_width_ft")
     if stated:
         width = float(stated)
@@ -624,10 +625,77 @@ def functional_bar_width(
             width = (2 * depth) + corridor
     for anchor in _match_anchor_rooms(session, mass_def.departments, config):
         width = max(width, float(anchor.get("min_width_ft") or 0))
-    max_w = c.get("max_building_width_ft")
+    max_w = c.get("max_building_width_ft") or c.get("max_edge_ft")
+    edge = _mass_edge_cap_ft(session, mass_def)
+    if edge:
+        max_w = float(edge) if max_w is None else min(float(max_w), float(edge))
     if max_w:
         width = min(width, float(max_w))
     return max(width, 20.0)
+
+
+def required_width_ft(session: StudySession, mass_def: Any) -> float | None:
+    """Exact brief width for this mass (department-scoped requirement)."""
+    dept_w = session.constraints.get("department_widths") or {}
+    if not isinstance(dept_w, dict):
+        return None
+    values: list[float] = []
+    for dept in mass_def.departments or []:
+        raw = dept_w.get(dept)
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw > 0:
+            values.append(float(raw))
+    if not values:
+        return None
+    # Conflicting dept requirements on one mass: keep the first stated value.
+    return values[0]
+
+
+def _mass_has_exact_width(session: StudySession, mass_def: Any) -> bool:
+    if required_width_ft(session, mass_def) is not None:
+        return True
+    if session.constraints.get(f"{mass_def.id}_width_ft"):
+        return True
+    return False
+
+
+def _mass_edge_cap_ft(session: StudySession, mass_def: Any) -> float | None:
+    """Tightest all-edge length cap for this mass (global and/or targeted)."""
+    caps: list[float] = []
+    c = session.constraints
+    mass_id = str(getattr(mass_def, "id", "") or "")
+    for key in (f"{mass_id}_max_edge_ft", "max_edge_ft"):
+        raw = c.get(key)
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw > 0:
+            caps.append(float(raw))
+    dept_caps = c.get("department_max_edge_ft") or {}
+    if isinstance(dept_caps, dict):
+        for dept in getattr(mass_def, "departments", None) or []:
+            raw = dept_caps.get(dept)
+            if isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw > 0:
+                caps.append(float(raw))
+    return min(caps) if caps else None
+
+
+def _clamp_width_to_edge_cap(
+    width: float,
+    plate_sf: float,
+    cap_ft: float,
+    *,
+    exact_width: bool,
+) -> float:
+    """Keep every plan edge ≤ cap when width is not a stated requirement."""
+    cap = float(cap_ft or 0)
+    w = max(float(width or 0), 20.0)
+    if cap <= 0 or exact_width:
+        return w
+    w = min(w, cap)
+    if plate_sf > 0:
+        need = plate_sf / cap
+        if need > cap:
+            return cap
+        if w < need:
+            w = need
+    return w
 
 
 def _fit_width_under_cap(
@@ -685,6 +753,17 @@ def _resolve_widths(
         widths.setdefault(
             mass_def.id, _width_from_brief(session, mass_def, config)
         )
+    for mass_def in session.masses:
+        cap = _mass_edge_cap_ft(session, mass_def)
+        if not cap:
+            continue
+        plate = _mass_plate_area(session, mass_def, config)
+        widths[mass_def.id] = _clamp_width_to_edge_cap(
+            widths[mass_def.id],
+            plate,
+            float(cap),
+            exact_width=_mass_has_exact_width(session, mass_def),
+        )
     return widths, pairing_of
 
 
@@ -697,6 +776,8 @@ def _width_from_brief(session: StudySession, mass_def: Any, config: dict[str, An
     sets length to that number.
     """
     c = session.constraints
+    if required_width_ft(session, mass_def) is not None:
+        return functional_bar_width(session, mass_def, config)
     stated = c.get(f"{mass_def.id}_width_ft") or c.get("preferred_width_ft")
     if stated:
         return functional_bar_width(session, mass_def, config)
@@ -831,6 +912,7 @@ def _site_limits(session: StudySession, config: dict[str, Any]) -> dict[str, flo
         "max_total_width_ft",
         "max_length_ft",
         "max_width_ft",
+        "max_edge_ft",
     ):
         value = session.constraints.get(key)
         if value is not None:
@@ -839,6 +921,13 @@ def _site_limits(session: StudySession, config: dict[str, Any]) -> dict[str, flo
                 "max_width_ft": "max_building_width_ft",
             }.get(key, key)
             limits[canonical] = float(value)
+
+    edge = session.constraints.get("max_edge_ft")
+    if edge is not None:
+        limits["max_edge_ft"] = float(edge)
+    min_edge = session.constraints.get("min_edge_ft")
+    if min_edge is not None:
+        limits["min_edge_ft"] = float(min_edge)
 
     return limits
 
@@ -855,12 +944,33 @@ def check_site_limits(
         return checks, suggestions
 
     ground = mass.floors[0]
+    edge = limits.get("max_edge_ft")
+    min_edge = limits.get("min_edge_ft")
     max_len = limits.get("max_building_length_ft")
     max_wid = limits.get("max_building_width_ft")
+    if edge is not None:
+        cap = float(edge)
+        max_len = cap if max_len is None else min(float(max_len), cap)
+        max_wid = cap if max_wid is None else min(float(max_wid), cap)
+
+    if min_edge is not None:
+        floor = float(min_edge)
+        shortest = min(
+            min(float(f.length_ft or 0), float(f.width_ft or 0)) for f in mass.floors
+        )
+        under = shortest + 1e-6 < floor
+        checks.append(
+            ValidationCheck(
+                check=f"min_edge:{mass.id}",
+                passed=not under,
+                message=(
+                    f"{mass.name}: shortest edge {shortest:.1f} ft vs min "
+                    f"{floor:g} ft"
+                ),
+            )
+        )
 
     if max_len is not None:
-        # On a stepped mass the ground floor is usually the longest, but a
-        # cantilever can put the worst floor higher up, so check them all.
         longest = max(mass.floors, key=lambda f: f.length_ft)
         over = longest.length_ft > max_len + 1e-6
         where = "" if longest.level == 0 else f" at L{longest.level}"
@@ -877,8 +987,6 @@ def check_site_limits(
         if over:
             stories = len(mass.floors)
             plate_cap = longest.width_ft * max_len
-            # Total footprint the mass needs (includes void area carried in the
-            # plate), not just target GSF, so voided masses get honest advice.
             needed_footprint = sum(f.area_sf for f in mass.floors)
             needed_stories = (
                 max(stories + 1, math.ceil(needed_footprint / plate_cap))
@@ -893,7 +1001,7 @@ def check_site_limits(
                         f"length {longest.length_ft:.1f} ft exceeds max {max_len:g} ft"
                     ),
                     suggestion=(
-                        f"{max_len:g} ft is a maximum, not a length to use. "
+                        f"{max_len:g} ft is a maximum on every edge, not a length to use. "
                         f"Try {needed_stories} stories at {longest.width_ft:.1f} ft wide. "
                         "Do not set the length to the maximum."
                     ),
@@ -903,13 +1011,16 @@ def check_site_limits(
             )
 
     if max_wid is not None:
-        over = ground.width_ft > max_wid + 1e-6
+        widest = max(mass.floors, key=lambda f: f.width_ft)
+        over = widest.width_ft > max_wid + 1e-6
+        where = "" if widest.level == 0 else f" at L{widest.level}"
         checks.append(
             ValidationCheck(
                 check=f"site_width:{mass.id}",
                 passed=not over,
                 message=(
-                    f"{mass.name}: width {ground.width_ft:.1f} ft vs max {max_wid:g} ft"
+                    f"{mass.name}: width {widest.width_ft:.1f} ft{where} vs max "
+                    f"{max_wid:g} ft"
                 ),
             )
         )
@@ -917,10 +1028,10 @@ def check_site_limits(
             suggestions.append(
                 ResizeSuggestion(
                     mass_id=mass.id,
-                    issue=f"width {ground.width_ft:.1f} ft exceeds max {max_wid:g} ft",
+                    issue=f"width {widest.width_ft:.1f} ft exceeds max {max_wid:g} ft",
                     suggestion=(
                         f"Narrow to {max_wid:g} ft; length becomes "
-                        f"{ground.area_sf / max_wid:.1f} ft"
+                        f"{widest.area_sf / max_wid:.1f} ft"
                     ),
                     option_width_ft=max_wid,
                 )
@@ -982,7 +1093,11 @@ def suggest_resizes(
     out: list[ResizeSuggestion] = []
 
     for mass in result.masses:
-        _, raw = check_site_limits(mass, limits, mass.target_gsf)
+        mass_limits = dict(limits)
+        cap = _mass_edge_cap_ft(session, mass)
+        if cap is not None:
+            mass_limits["max_edge_ft"] = cap
+        _, raw = check_site_limits(mass, mass_limits, mass.target_gsf)
         pairing = pairing_of.get(mass.id)
         if pairing is None:
             out.extend(raw)
@@ -1178,8 +1293,26 @@ def solve_massing_study(
         )
         result.masses.append(solved)
 
-        site_checks, _ = check_site_limits(solved, limits, target)
+        mass_limits = dict(limits)
+        cap = _mass_edge_cap_ft(session, mass_def)
+        if cap is not None:
+            mass_limits["max_edge_ft"] = cap
+        site_checks, _ = check_site_limits(solved, mass_limits, target)
         result.validation.extend(site_checks)
+        required_w = required_width_ft(session, mass_def)
+        if required_w is not None and solved.floors:
+            actual_w = float(solved.floors[0].width_ft or 0)
+            ok = abs(actual_w - float(required_w)) <= 0.6
+            result.validation.append(
+                ValidationCheck(
+                    check=f"required_width:{mass_def.id}",
+                    passed=ok,
+                    message=(
+                        f"{mass_def.name}: width {actual_w:.1f} ft vs required "
+                        f"{float(required_w):g} ft"
+                    ),
+                )
+            )
         preferred = session.constraints.get("preferred_length_ft")
         if preferred and solved.floors:
             longest = max(solved.floors, key=lambda f: f.length_ft)

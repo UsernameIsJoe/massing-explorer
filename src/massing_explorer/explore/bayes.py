@@ -14,49 +14,22 @@ from typing import Any
 
 from . import archive as archive_mod
 from .actions import apply_action
-from .mcts import action_key, catalog_actions
+from .axes import PROBE_AXIS_NAMES, encode_named, encode_strategy  # noqa: F401
+from .mcts import action_key, catalog_actions, cover_roots
 from .performance import measure
+from .saturate import BO_CAP, BO_MIN, Saturation, encodings_from_archive, feature_is_novel, read_explore_budget, search_reward
 from .strategy import cell_key, read_strategy
 
-BO_CAP = 4
+# Shared isotropic ℓ for now. ARD can replace with a 9-vector later without
+# renaming PROBE_AXIS_NAMES in axes.py.
 LENGTHSCALE = 0.75
 SIGNAL = 0.6
 NOISE = 0.08
 
 
-def encode_strategy(strategy: dict[str, Any] | None) -> list[float]:
-    """Numeric sketch of S = (P, T, V, G). No widths, no invented feet."""
-    strategy = strategy or {}
-    program = strategy.get("P") or {}
-    topo = strategy.get("T") or {}
-    vertical = strategy.get("V") or {}
-    geom = strategy.get("G") or {}
-    stories = [float(v) for v in (geom.get("stories") or {}).values()]
-    mean_st = sum(stories) / max(len(stories), 1)
-    spread_st = 0.0
-    if len(stories) > 1:
-        spread_st = (sum((s - mean_st) ** 2 for s in stories) / len(stories)) ** 0.5
-    return [
-        float(program.get("mass_count") or 0) / 8.0,
-        1.0 if program.get("locked") else 0.0,
-        1.0 if topo.get("kind") == "paired_bars" else 0.0,
-        1.0 if topo.get("l_leftover") else 0.0,
-        1.0 if (geom.get("loading") or "double") == "double" else 0.0,
-        mean_st / 5.0,
-        min(1.0, spread_st / 3.0),
-        min(1.0, float(len(vertical.get("pins") or {})) / 6.0),
-        min(1.0, float(len(program.get("partition") or {})) / 8.0),
-    ]
-
-
-def evaluation_reward(performance: dict[str, Any]) -> float:
-    """Feasibility first. Not search.py quality."""
-    if not performance.get("fits_limitations"):
-        return 0.0
-    feasible = 1.0 if performance.get("feasible") else 0.4
-    pref = 1.0 - min(1.0, max(0.0, float(performance.get("preference_distance") or 0.0)))
-    novelty = min(1.0, max(0.0, float(performance.get("novelty") or 0.0)))
-    return round(0.55 * feasible + 0.30 * pref + 0.15 * novelty, 4)
+def evaluation_reward(performance: dict[str, Any], weights: dict[str, float] | None = None) -> float:
+    """Feasibility first. LEARN taste steers; it cannot rescue a miss. Not search.py quality."""
+    return search_reward(performance, weights)
 
 
 def expected_improvement(mean: float, std: float, best: float) -> float:
@@ -109,54 +82,81 @@ class GaussianProcess:
         return self.signal * math.exp(-0.5 * dist / (self.lengthscale ** 2))
 
 
-def run_bayes(session: Any, archive: dict[str, Any] | None = None, budget: int = BO_CAP) -> dict[str, Any]:
-    """Spend a small evaluation budget on high-EI legal actions. Restore the origin after."""
+def run_bayes(
+    session: Any,
+    archive: dict[str, Any] | None = None,
+    budget: int | None = None,
+    weights: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    """Sequential EI proposals from COVER-informed candidates. Restore origin after."""
     archive = archive if archive is not None else archive_mod.load_archive(session)
     if not session.masses:
         return _empty("No masses, so Bayesian optimization did not run.")
     origin = archive_mod.capture(session)
-    observed = _observations(archive)
+    cfg = read_explore_budget(session)
+    cap = int(budget) if budget is not None else int(cfg["bo"])
+    cap = max(1, min(cap, BO_CAP))
+    observed = _observations(archive, weights)
     gp = GaussianProcess()
     if len(observed) >= 2:
         gp.fit([row[0] for row in observed], [row[1] for row in observed])
-    candidates = _candidates(session, origin)
+    candidates = _candidates(session, archive, origin, weights=weights)
     picked: list[dict[str, Any]] = []
-    ranked = _rank(gp, observed, candidates)
     spent = 0
-    cap = max(1, min(int(budget), BO_CAP))
     seen_cells = set((archive.get("cells") or {}).keys())
-    for item in ranked:
-        if spent >= cap:
+    known_feat = encodings_from_archive(archive)
+    sat = Saturation(window=3, min_steps=min(BO_MIN, cap))
+    best = max((row[1] for row in observed), default=0.0)
+
+    while spent < cap:
+        ranked = _rank(gp, observed, candidates, used={p.get("key") for p in picked})
+        if not ranked:
             break
+        item = ranked[0]
         action = item["action"]
-        archive_mod.restore_snapshot(session, origin)
+        archive_mod.restore_snapshot(session, item.get("origin") or origin)
         try:
             out = apply_action(session, action)
         except Exception as exc:
-            picked.append({"op": _label(action), "kind": "illegal", "ei": item["ei"], "reason": str(exc)})
+            picked.append({"op": _label(action), "kind": "illegal", "ei": item["ei"], "reason": str(exc), "key": item["key"]})
+            sat.observe(False)
+            if sat.stop():
+                break
             continue
         if not out.get("ok"):
             kind = "unsupported" if "cannot realize" in str(out.get("reason") or "").lower() else "illegal"
-            picked.append({"op": _label(action), "kind": kind, "ei": item["ei"], "reason": out.get("reason")})
+            picked.append({"op": _label(action), "kind": kind, "ei": item["ei"], "reason": out.get("reason"), "key": item["key"]})
+            sat.observe(False)
+            if sat.stop():
+                break
             continue
         if getattr(session, "program", None) is None:
-            picked.append({"op": _label(action), "kind": "applied", "ei": item["ei"], "reward": 0.6})
+            picked.append({"op": _label(action), "kind": "applied", "ei": item["ei"], "reward": 0.6, "key": item["key"]})
             spent += 1
+            sat.observe(True)
             continue
         from ..solver import solve_massing_study
 
         result = solve_massing_study(session)
         performance = measure(result, session, archive=archive)
         key = cell_key(session)
+        feat = encode_strategy(read_strategy(session))
         if key in seen_cells:
-            picked.append({"op": _label(action), "kind": "duplicate", "ei": item["ei"], "reason": "Cell already in the archive."})
+            picked.append({"op": _label(action), "kind": "duplicate", "ei": item["ei"], "reason": "Cell already in the archive.", "key": item["key"]})
+            sat.observe(False)
+            if sat.stop():
+                break
             continue
-        reward = evaluation_reward(performance)
+        reward = evaluation_reward(performance, weights)
         archive_mod.insert(archive, session, result, performance, reason=f"bayes {_label(action)}")
         seen_cells.add(key)
-        observed.append((encode_strategy(read_strategy(session)), reward))
+        observed.append((feat, reward))
         if len(observed) >= 2:
             gp.fit([row[0] for row in observed], [row[1] for row in observed])
+        gained = reward > best + 1e-6 or feature_is_novel(feat, known_feat)
+        if reward > best:
+            best = reward
+        known_feat.append(feat)
         picked.append(
             {
                 "op": _label(action),
@@ -165,16 +165,23 @@ def run_bayes(session: Any, archive: dict[str, Any] | None = None, budget: int =
                 "reward": reward,
                 "mean": round(item["mean"], 4),
                 "std": round(item["std"], 4),
+                "key": item["key"],
             }
         )
         spent += 1
+        sat.observe(gained)
+        if sat.stop():
+            break
+
     archive_mod.restore_snapshot(session, origin)
     next_op = next((p["op"] for p in picked if p.get("kind") == "applied"), None)
+    last_ranked = _rank(gp, observed, candidates, used={p.get("key") for p in picked})
     return {
         "ran": True,
         "budget": cap,
         "spent": spent,
         "observed": len(observed),
+        "saturated": sat.stop(),
         "candidates": [
             {
                 "op": c["label"],
@@ -182,52 +189,86 @@ def run_bayes(session: Any, archive: dict[str, Any] | None = None, budget: int =
                 "mean": round(c["mean"], 4),
                 "std": round(c["std"], 4),
             }
-            for c in ranked[:8]
+            for c in last_ranked[:8]
         ],
         "picked": picked,
         "next": next_op,
         "note": (
-            f"Bayesian optimization spent {spent} of {cap} evaluations "
-            "(GP + expected improvement). It is a budget manager, not a generator. "
-            "It does not sit on feet."
+            f"Bayesian optimization spent {spent} of {cap} sequential evaluations "
+            f"(GP refit after each"
+            f"{'; stopped on saturation' if sat.stop() else ''}). "
+            "It is a budget manager, not a generator. It does not sit on feet."
         ),
     }
 
 
-def _candidates(session: Any, origin: dict[str, Any]) -> list[dict[str, Any]]:
-    actions = [a for a in catalog_actions(session, include_unsupported=False) if a.get("op") != "COURTYARD"]
+def _candidates(
+    session: Any,
+    archive: dict[str, Any],
+    origin: dict[str, Any],
+    *,
+    weights: dict[str, float] | None = None,
+) -> list[dict[str, Any]]:
+    starts = [{"snap": origin, "stories": None, "tag": "origin"}]
+    for meta in cover_roots(session, archive, weights=weights, cap=3):
+        snap = meta.get("snapshot")
+        if snap:
+            starts.append({"snap": snap, "stories": meta.get("stories"), "tag": meta.get("label") or "elite"})
     out = []
     seen: set[str] = set()
-    for action in actions:
-        key = action_key(action)
-        if key in seen:
-            continue
-        seen.add(key)
+    for start in starts:
+        archive_mod.restore_snapshot(session, start["snap"], start.get("stories"))
+        actions = [a for a in catalog_actions(session, include_unsupported=False) if a.get("op") != "COURTYARD"]
+        held = archive_mod.capture(session)
+        for action in actions:
+            key = f"{start['tag']}|{action_key(action)}"
+            if key in seen:
+                continue
+            seen.add(key)
+            archive_mod.restore_snapshot(session, held)
+            try:
+                applied = apply_action(session, action)
+            except Exception:
+                continue
+            if not applied.get("ok"):
+                continue
+            feat = encode_strategy(read_strategy(session))
+            out.append(
+                {
+                    "action": action,
+                    "x": feat,
+                    "label": _label(action),
+                    "key": key,
+                    "origin": start["snap"],
+                }
+            )
         archive_mod.restore_snapshot(session, origin)
-        try:
-            applied = apply_action(session, action)
-        except Exception:
-            continue
-        if not applied.get("ok"):
-            continue
-        feat = encode_strategy(read_strategy(session))
-        out.append({"action": action, "x": feat, "label": _label(action)})
     archive_mod.restore_snapshot(session, origin)
     return out
 
 
-def _observations(archive: dict[str, Any]) -> list[tuple[list[float], float]]:
+def _observations(archive: dict[str, Any], weights: dict[str, float] | None = None) -> list[tuple[list[float], float]]:
     rows = []
     for entry in (archive.get("cells") or {}).values():
-        rows.append((encode_strategy(entry.get("strategy")), evaluation_reward(entry.get("performance") or {})))
+        rows.append(
+            (encode_strategy(entry.get("strategy")), evaluation_reward(entry.get("performance") or {}, weights))
+        )
     return rows
 
 
-def _rank(gp: GaussianProcess, observed: list[tuple[list[float], float]], candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _rank(
+    gp: GaussianProcess,
+    observed: list[tuple[list[float], float]],
+    candidates: list[dict[str, Any]],
+    used: set[Any] | None = None,
+) -> list[dict[str, Any]]:
     best = max((row[1] for row in observed), default=0.0)
     known = [row[0] for row in observed]
+    used = used or set()
     ranked = []
     for item in candidates:
+        if item.get("key") in used:
+            continue
         if any(_close(item["x"], x) for x in known):
             continue
         if gp._L:
@@ -238,6 +279,8 @@ def _rank(gp: GaussianProcess, observed: list[tuple[list[float], float]], candid
             {
                 "action": item["action"],
                 "label": item["label"],
+                "key": item.get("key"),
+                "origin": item.get("origin"),
                 "ei": expected_improvement(mean, std, best),
                 "mean": mean,
                 "std": std,
@@ -253,9 +296,11 @@ def _close(a: list[float], b: list[float], tol: float = 1e-6) -> bool:
 
 def _label(action: dict[str, Any]) -> str:
     op = str(action.get("op") or "ACTION")
-    extra = action.get("mass") or action.get("loading") or ""
+    extra = action.get("mass") or action.get("loading") or action.get("envelope") or ""
     if action.get("stories") is not None:
         extra = f"{action.get('mass')} {action.get('stories')}fl"
+    if action.get("delta_ft") is not None:
+        extra = f"{action.get('mass')} {action.get('delta_ft'):+g}ft"
     if action.get("programs"):
         extra = ",".join(str(x) for x in action["programs"][:2])
     if action.get("masses"):
@@ -311,6 +356,7 @@ def _empty(note: str) -> dict[str, Any]:
         "budget": 0,
         "spent": 0,
         "observed": 0,
+        "saturated": False,
         "candidates": [],
         "picked": [],
         "next": None,

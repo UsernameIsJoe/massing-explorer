@@ -102,6 +102,36 @@ class AdaptiveCoverTests(unittest.TestCase):
         labels = {s.envelope for s in plan.samples}
         self.assertGreaterEqual(len(labels), 2)
 
+    def test_locked_grouping_still_reaches_start_budget(self) -> None:
+        """P locked + no paired T must not starve the joint pool below start=40."""
+        plan = build_cover_plan(self.session, pool_size=COVER_MAX)
+        product = (
+            max(1, len(plan.partitions))
+            * max(1, len(plan.story_patterns))
+            * max(1, len(plan.topologies))
+            * max(1, len(plan.loadings))
+            * max(1, len(plan.envelopes))
+        )
+        self.assertGreaterEqual(len(plan.samples), min(COVER_START, product, COVER_MAX))
+        self.assertGreaterEqual(len(plan.samples), COVER_START)
+
+    def test_thin_axis_product_fills_with_geom_ranks(self) -> None:
+        """When typology product << COVER_MAX, geometry ranks pad the pool."""
+        self.session.constraints["story_lock"] = {
+            m.id: int(m.story_count) for m in self.session.masses
+        }
+        plan = build_cover_plan(self.session, pool_size=COVER_MAX)
+        product = (
+            max(1, len(plan.partitions))
+            * max(1, len(plan.story_patterns))
+            * max(1, len(plan.topologies))
+            * max(1, len(plan.loadings))
+            * max(1, len(plan.envelopes))
+        )
+        self.assertLess(product, COVER_MAX)
+        self.assertEqual(len(plan.samples), COVER_MAX)
+        self.assertTrue(any(int(s.geom_rank) > 0 for s in plan.samples))
+
     def test_adaptive_stops_when_stagnant(self) -> None:
         archive = archive_mod.empty_archive()
         seen_keys: list[str] = []
@@ -133,6 +163,32 @@ class AdaptiveCoverTests(unittest.TestCase):
         # Either stagnated or hit cap — both valid endings.
         self.assertTrue(report["stagnant"] or report["incomplete"] or report["attempts"] >= 6)
         self.assertGreaterEqual(len(set(seen_keys)), 2)
+
+    def test_cover_samples_when_nothing_is_legal(self) -> None:
+        self.session.constraints["max_edge_ft"] = 10.0
+        archive = archive_mod.empty_archive()
+
+        def evaluate(session, store, reason: str) -> None:
+            from massing_explorer.explore.performance import measure
+            from massing_explorer.solver import solve_massing_study
+
+            result = solve_massing_study(session)
+            perf = measure(result, session, archive=store)
+            archive_mod.insert(store, session, result, perf, reason=reason)
+
+        report = run_cover(
+            self.session,
+            archive,
+            evaluate=evaluate,
+            start=6,
+            step_small=6,
+            step_large=6,
+            max_attempts=18,
+        )
+        self.assertTrue(report["ran"])
+        self.assertGreater(report["attempts"], 6)
+        self.assertGreaterEqual(len(archive.get("cells") or {}), 2)
+        self.assertEqual(int(archive.get("legal") or 0), 0)
 
     def test_defaults_match_policy(self) -> None:
         self.assertEqual(COVER_START, 40)

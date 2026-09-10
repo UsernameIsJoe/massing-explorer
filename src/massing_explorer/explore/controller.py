@@ -2,7 +2,11 @@
 Search controller: COVER / LEARN / REFINE over the archive.
 
 Default after a brief: adaptive multi-axis COVER (start ~40, expand while
-new regions appear, cap ~120), then planner / MCTS / BO / REFINE / LEARN pair.
+new regions or feature encodings appear, cap ~120), then planner / MCTS
+from several COVER elites / sequential BO / REFINE local neighbors / LEARN pair.
+
+Zero legal COVER cells → DIAGNOSE (not LEARN). LEARN / REFINE only run once
+a feasible design space exists.
 """
 
 from __future__ import annotations
@@ -13,12 +17,12 @@ from ..solver import solve_massing_study
 from ..tools import solve_dimensions
 from . import archive as archive_mod
 from .cover import run_cover
+from .diagnose import diagnose
 from .partitions import apply_partition, enumerate_partitions
 from .performance import measure
 from .preference import next_pair, schemes_from_archive, taste_weight
+from .saturate import REFINE_CAP, REFINE_MIN, Saturation, encodings_from_archive, feature_is_novel, read_explore_budget
 from .strategy import grouping_is_required, partition_id, read_strategy
-
-REFINE_CAP = 6
 
 def run_search(session: Any, mode: str = "cover", client: Any = None, plan: Any = None) -> dict[str, Any]:
     mode = (mode or "cover").lower()
@@ -31,29 +35,54 @@ def run_search(session: Any, mode: str = "cover", client: Any = None, plan: Any 
     strategy = read_strategy(session)
     refine_report: dict[str, Any] = {"ran": False}
     learning = dict(store.get("learning") or {})
+    weights = dict(learning.get("weights") or {})
     plan_report: dict[str, Any] = {"ran": False}
     mcts_report: dict[str, Any] = {"ran": False}
     bayes_report: dict[str, Any] = {"ran": False}
+    diagnose_report: dict[str, Any] = {"ran": False}
 
     if mode == "cover":
         _cover(session, archive)
-        plan_report = _run_planner(session, archive, client, plan)
-        mcts_report = _run_mcts(session, archive, client, plan)
-        bayes_report = _run_bayes(session, archive)
-        refine_report = _refine(session, archive)
-        learning = _prepare_learn(archive, learning)
+        if not archive_mod.legal_cells(archive):
+            diagnose_report = diagnose(
+                session,
+                archive,
+                evaluate=_evaluate,
+            )
+            # Still none → stop. Do not invent a feasible space via LEARN.
+            if not archive_mod.legal_cells(archive):
+                learning = _prepare_learn(archive, learning)
+            else:
+                plan_report = _run_planner(session, archive, client, plan)
+                mcts_report = _run_mcts(session, archive, client, plan, weights)
+                bayes_report = _run_bayes(session, archive, weights)
+                refine_report = _refine(session, archive)
+                learning = _prepare_learn(archive, learning)
+        else:
+            plan_report = _run_planner(session, archive, client, plan)
+            mcts_report = _run_mcts(session, archive, client, plan, weights)
+            bayes_report = _run_bayes(session, archive, weights)
+            refine_report = _refine(session, archive)
+            learning = _prepare_learn(archive, learning)
     elif mode == "learn":
         if not archive.get("attempts"):
             _cover(session, archive)
+        if not archive_mod.legal_cells(archive):
+            diagnose_report = diagnose(session, archive, evaluate=_evaluate)
         learning = _prepare_learn(archive, learning)
     else:
         if not archive.get("attempts"):
             _cover(session, archive)
-        refine_report = _refine(session, archive)
+        if archive_mod.legal_cells(archive):
+            refine_report = _refine(session, archive)
+        else:
+            diagnose_report = diagnose(session, archive, evaluate=_evaluate)
         learning = _prepare_learn(archive, learning)
 
     locked = grouping_is_required(session)
     note = archive_mod.explain(archive, locked)
+    if diagnose_report.get("ran"):
+        note += " " + str(diagnose_report.get("note") or "")
     if plan_report.get("ran"):
         note += " " + str(plan_report.get("note") or "")
     if mcts_report.get("ran"):
@@ -70,6 +99,8 @@ def run_search(session: Any, mode: str = "cover", client: Any = None, plan: Any 
         )
     elif mode == "learn":
         note += " LEARN: not enough legal cells for a pair."
+    elif diagnose_report.get("ran") and not archive_mod.legal_cells(archive):
+        note += " LEARN/REFINE skipped — no legal COVER cells yet."
 
     from .csp import describe_csp
     from .explain import empty_cells
@@ -93,6 +124,18 @@ def run_search(session: Any, mode: str = "cover", client: Any = None, plan: Any 
         robust_report = probe_strategy(session)
         note += " " + str(robust_report.get("note") or "")
         archive["note"] = note
+        if kept and robust_report.get("ran") and robust_report.get("score") is not None:
+            score = float(robust_report["score"])
+            perf = dict(kept.get("performance") or {})
+            perf["_robustness_probe"] = score
+            from .performance import eval_composites
+
+            perf.update(eval_composites(perf, session))
+            kept["performance"] = perf
+            cells = archive.get("cells") or {}
+            cell_id = kept.get("cell")
+            if cell_id and cell_id in cells:
+                cells[cell_id]["performance"] = perf
     solved = solve_dimensions(session)
 
     store["archive"] = archive
@@ -101,10 +144,23 @@ def run_search(session: Any, mode: str = "cover", client: Any = None, plan: Any 
     store["kept_cell"] = kept.get("cell") if kept else None
     store["learning"] = learning
     store["refine"] = refine_report
+    store["diagnose"] = {
+        "ran": diagnose_report.get("ran"),
+        "class": diagnose_report.get("class"),
+        "note": diagnose_report.get("note"),
+        "patterns": diagnose_report.get("patterns") or {},
+        "targeted": diagnose_report.get("targeted") or {},
+        "conflict": diagnose_report.get("conflict"),
+        "probes": diagnose_report.get("probes") or [],
+        "knowledge": diagnose_report.get("knowledge") or [],
+    }
     store["planner"] = plan_report
     store["mcts"] = {
         "ran": mcts_report.get("ran"),
         "simulations": mcts_report.get("simulations"),
+        "depth": mcts_report.get("depth"),
+        "roots": mcts_report.get("roots") or [],
+        "saturated": mcts_report.get("saturated"),
         "applied": mcts_report.get("applied"),
         "illegal": mcts_report.get("illegal"),
         "unsupported": mcts_report.get("unsupported"),
@@ -118,6 +174,7 @@ def run_search(session: Any, mode: str = "cover", client: Any = None, plan: Any 
         "ran": bayes_report.get("ran"),
         "spent": bayes_report.get("spent"),
         "budget": bayes_report.get("budget"),
+        "saturated": bayes_report.get("saturated"),
         "observed": bayes_report.get("observed"),
         "candidates": bayes_report.get("candidates") or [],
         "picked": bayes_report.get("picked") or [],
@@ -140,6 +197,7 @@ def run_search(session: Any, mode: str = "cover", client: Any = None, plan: Any 
         "ran": robust_report.get("ran"),
         "survived": robust_report.get("survived"),
         "collapsed": robust_report.get("collapsed"),
+        "score": robust_report.get("score"),
         "note": robust_report.get("note"),
         "probes": robust_report.get("probes") or [],
         "departments": robust_report.get("departments") or [],
@@ -192,6 +250,7 @@ def run_search(session: Any, mode: str = "cover", client: Any = None, plan: Any 
             "note": learning.get("note"),
         },
         "refine": refine_report,
+        "diagnose": store.get("diagnose") or diagnose_report,
         "planner": {
             "ran": plan_report.get("ran"),
             "applied": plan_report.get("applied"),
@@ -219,6 +278,7 @@ def run_search(session: Any, mode: str = "cover", client: Any = None, plan: Any 
             "ran": robust_report.get("ran"),
             "survived": robust_report.get("survived"),
             "collapsed": robust_report.get("collapsed"),
+            "score": robust_report.get("score"),
             "note": robust_report.get("note"),
         },
         "csp": {
@@ -252,16 +312,26 @@ def _run_planner(session: Any, archive: dict[str, Any], client: Any, plan: Any) 
     return run_planner(session, client=client, plan=plan, archive=archive, evaluate=evaluate)
 
 
-def _run_mcts(session: Any, archive: dict[str, Any], client: Any, plan: Any) -> dict[str, Any]:
+def _run_mcts(
+    session: Any,
+    archive: dict[str, Any],
+    client: Any,
+    plan: Any,
+    weights: dict[str, float] | None = None,
+) -> dict[str, Any]:
     from .mcts import run_mcts
 
-    return run_mcts(session, archive=archive, client=client, plan=plan)
+    return run_mcts(session, archive=archive, client=client, plan=plan, weights=weights)
 
 
-def _run_bayes(session: Any, archive: dict[str, Any]) -> dict[str, Any]:
+def _run_bayes(
+    session: Any,
+    archive: dict[str, Any],
+    weights: dict[str, float] | None = None,
+) -> dict[str, Any]:
     from .bayes import run_bayes
 
-    return run_bayes(session, archive=archive)
+    return run_bayes(session, archive=archive, weights=weights)
 
 
 def _cover(session: Any, archive: dict[str, Any]) -> None:
@@ -392,26 +462,85 @@ def _prepare_learn(archive: dict[str, Any], learning: dict[str, Any]) -> dict[st
 
 def select_elites(archive: dict[str, Any], weights: dict[str, float] | None = None) -> list[dict[str, Any]]:
     """Keep several legal cells, preferring different P when P was open."""
+    return [row["entry"] for row in select_elites_explained(archive, weights)]
+
+
+def _cell_badness(entry: dict[str, Any]) -> tuple:
+    """Fewer failed limits first, then smaller longest plan edge."""
+    perf = entry.get("performance") or {}
+    max_edge = 0.0
+    for plate in entry.get("plates") or []:
+        try:
+            max_edge = max(
+                max_edge,
+                float(plate.get("width_ft") or 0),
+                float(plate.get("length_ft") or 0),
+            )
+        except (TypeError, ValueError):
+            continue
+    for length in perf.get("lengths") or []:
+        try:
+            max_edge = max(max_edge, float(length or 0))
+        except (TypeError, ValueError):
+            continue
+    return (
+        int(perf.get("limit_fails") or 0) + int(perf.get("failed_checks") or 0),
+        max_edge,
+        float(perf.get("preference_distance") or 0.0),
+    )
+
+
+def select_elites_explained(
+    archive: dict[str, Any], weights: dict[str, float] | None = None
+) -> list[dict[str, Any]]:
+    """Same elites as select_elites, with a why-string for the UI."""
     legal = archive_mod.legal_cells(archive)
     if not legal:
-        return []
+        cells = list((archive.get("cells") or {}).values())
+        if not cells:
+            return []
+        ranked = sorted(cells, key=_cell_badness)
+        return [
+            {
+                "entry": entry,
+                "why": "No cell under limits. Closest COVER sample (fewest failed edges).",
+            }
+            for entry in ranked[:3]
+        ]
+    tasted = bool(weights and any(abs(float(v)) > 1e-9 for v in weights.values()))
     ranked = sorted(legal, key=lambda e: taste_weight(e, weights), reverse=True)
-    kept = [ranked[0]]
+    best_why = (
+        "Highest LEARN taste among legal cells."
+        if tasted
+        else "Best stated-fit among legal cells (no A/B taste yet)."
+    )
+    picked: list[dict[str, Any]] = [{"entry": ranked[0], "why": best_why}]
+
     for entry in ranked[1:]:
-        if entry.get("partition") != kept[0].get("partition"):
-            kept.append(entry)
+        if entry.get("partition") != picked[0]["entry"].get("partition"):
+            picked.append({"entry": entry, "why": "Different program organization (P)."})
             break
         here_t = ((entry.get("strategy") or {}).get("T") or {}).get("kind")
-        kept_t = ((kept[0].get("strategy") or {}).get("T") or {}).get("kind")
+        kept_t = ((picked[0]["entry"].get("strategy") or {}).get("T") or {}).get("kind")
         if here_t and kept_t and here_t != kept_t:
-            kept.append(entry)
+            picked.append({"entry": entry, "why": f"Different topology ({here_t} vs {kept_t})."})
             break
-    if len(kept) < 2 and len(ranked) > 1:
-        kept.append(ranked[1])
+        here_e = ((entry.get("strategy") or {}).get("G") or {}).get("envelope")
+        kept_e = ((picked[0]["entry"].get("strategy") or {}).get("G") or {}).get("envelope")
+        if here_e and kept_e and here_e != kept_e:
+            picked.append({"entry": entry, "why": f"Different envelope ({here_e} vs {kept_e})."})
+            break
+    if len(picked) < 2 and len(ranked) > 1:
+        picked.append({"entry": ranked[1], "why": "Second-best stated-fit; keeps a nearby lineage."})
     light = min(ranked, key=lambda e: taste_weight(e, weights))
-    if light.get("cell") not in {e.get("cell") for e in kept}:
-        kept.append(light)
-    return kept[:3]
+    if light.get("cell") not in {row["entry"].get("cell") for row in picked}:
+        picked.append(
+            {
+                "entry": light,
+                "why": "Contrast lineage — lowest fit still kept so search does not collapse to one basin.",
+            }
+        )
+    return picked[:3]
 
 
 def allocate_local_tries(elites: list[dict[str, Any]], budget: int, weights: dict[str, float] | None, floor: int = 1) -> dict[str, int]:
@@ -447,12 +576,15 @@ def effective_sample_size(weights: list[float]) -> float:
 
 
 def _refine(session: Any, archive: dict[str, Any]) -> dict[str, Any]:
+    from .mcts import catalog_actions
+
     store = session.constraints.get("explore") or {}
     weights = ((store.get("learning") or {}).get("weights") or {})
     elites = select_elites(archive, weights)
     if len(elites) < 1:
         return {"ran": False, "reason": "No legal lineage to refine."}
-    remaining = REFINE_CAP
+    budget = read_explore_budget(session)
+    remaining = max(1, min(int(budget["refine"]), REFINE_CAP))
     raw = [taste_weight(e, weights) for e in elites]
     collapsed = len(elites) > 1 and effective_sample_size(raw) < 1.25
     if collapsed:
@@ -467,54 +599,85 @@ def _refine(session: Any, archive: dict[str, Any]) -> dict[str, Any]:
 
     improved = False
     tuned = 0
-    lock = session.constraints.get("story_lock") or {}
-    cap = max(1, int(session.constraints.get("max_stories") or 4))
+    kinds: set[str] = set()
+    sat = Saturation(window=3, min_steps=min(REFINE_MIN, remaining))
+    known_feat = encodings_from_archive(archive)
+    known_cells = set((archive.get("cells") or {}).keys())
     for elite in elites:
         allowed = int(allocation.get(elite["cell"]) or 0)
         if allowed <= 0:
             continue
         archive_mod.restore_entry(session, elite)
+        actions = catalog_actions(session, include_unsupported=False)
         taken = 0
-        for mass in list(session.masses):
-            if taken >= allowed or tuned >= REFINE_CAP:
+        for action in actions:
+            if taken >= allowed or tuned >= remaining or sat.stop():
                 break
-            if mass.id in lock:
+            held = archive_mod.capture(session)
+            try:
+                out = apply_action_safe(session, action)
+            except Exception:
+                archive_mod.restore_snapshot(session, held)
                 continue
-            current = int(mass.story_count)
-            for nxt in (current - 1, current + 1):
-                if taken >= allowed or tuned >= REFINE_CAP:
-                    break
-                if nxt < 1 or nxt > cap:
-                    continue
-                mass.story_count = nxt
-                _evaluate(session, archive, f"refine {mass.name} to {nxt} stories")
-                tuned += 1
-                taken += 1
-                new_legal = archive_mod.legal_cells(archive)
-                if any(
-                    e.get("cell") == elite.get("cell")
-                    and taste_weight(e, weights) > taste_weight(elite, weights)
-                    for e in new_legal
-                ):
-                    improved = True
-            mass.story_count = current
+            if not out.get("ok"):
+                archive_mod.restore_snapshot(session, held)
+                continue
+            _evaluate(session, archive, f"refine {action.get('op')}")
+            tuned += 1
+            taken += 1
+            kinds.add(str(action.get("op") or ""))
+            from .strategy import cell_key, read_strategy
+            from .bayes import encode_strategy, evaluation_reward
+
+            key = cell_key(session)
+            feat = encode_strategy(read_strategy(session))
+            new_legal = archive_mod.legal_cells(archive)
+            better = any(
+                e.get("cell") == elite.get("cell")
+                and taste_weight(e, weights) > taste_weight(elite, weights)
+                for e in new_legal
+            ) or any(
+                taste_weight(e, weights) > taste_weight(elite, weights)
+                and e.get("partition") == elite.get("partition")
+                for e in new_legal
+            )
+            gained = better or key not in known_cells or feature_is_novel(feat, known_feat)
+            if better:
+                improved = True
+            if key not in known_cells:
+                known_cells.add(key)
+            known_feat.append(feat)
+            sat.observe(gained)
+            archive_mod.restore_snapshot(session, held)
         archive_mod.restore_entry(session, elite)
 
+    extra = ""
+    if kinds:
+        extra = " Moves: " + ", ".join(sorted(kinds)) + "."
+    if sat.stop():
+        extra += " Stopped on saturation."
     if improved:
-        reason = reason_prefix + "REFINE improved a kept lineage with a one-step story move."
+        reason = reason_prefix + "REFINE improved a kept lineage with a local neighbor." + extra
     elif collapsed:
-        reason = reason_prefix + "REFINE stopped concentrating on one basin."
+        reason = reason_prefix + "REFINE stopped concentrating on one basin." + extra
     else:
-        reason = reason_prefix + "REFINE tried one-step neighbors inside kept lineages."
+        reason = reason_prefix + "REFINE tried local neighbors inside kept lineages." + extra
     return {
         "ran": True,
         "improved": improved,
         "tries": tuned,
         "elites": len(elites),
         "allocation": allocation,
+        "saturated": sat.stop(),
         "effective_sample_size": round(effective_sample_size(raw), 3) if raw else 0.0,
         "reason": reason,
     }
+
+
+def apply_action_safe(session: Any, action: dict[str, Any]) -> dict[str, Any]:
+    from .actions import apply_action
+
+    return apply_action(session, action)
 
 
 def _pick_kept(
@@ -522,22 +685,25 @@ def _pick_kept(
     weights: dict[str, float] | None,
     preferred_partition: str | None = None,
 ) -> dict[str, Any]:
+    tasted = bool(weights and any(abs(float(v)) > 1e-9 for v in (weights or {}).values()))
+    if not tasted:
+        stated = [
+            e
+            for e in (archive.get("cells") or {}).values()
+            if str(e.get("reason") or "").startswith("COVER: stated")
+            and e.get("fits_limitations")
+        ]
+        if stated:
+            return stated[0]
     legal = archive_mod.legal_cells(archive)
     if legal:
-        tasted = bool(weights and any(abs(float(v)) > 1e-9 for v in weights.values()))
         if not tasted and preferred_partition:
             same = [e for e in legal if e.get("partition") == preferred_partition]
             if same:
                 return max(same, key=lambda e: taste_weight(e, weights))
         return max(legal, key=lambda e: taste_weight(e, weights))
-    # No legal cell: keep the least-bad attempt so the UI still shows the brief.
+    # No legal cell: keep the least-bad COVER sample, not an illegal stated scheme.
     cells = list((archive.get("cells") or {}).values())
     if not cells:
         return {}
-    def _badness(entry: dict[str, Any]) -> tuple[int, float]:
-        perf = entry.get("performance") or {}
-        return (
-            int(perf.get("limit_fails") or 0) + int(perf.get("failed_checks") or 0),
-            float(perf.get("preference_distance") or 0.0),
-        )
-    return min(cells, key=_badness)
+    return min(cells, key=_cell_badness)

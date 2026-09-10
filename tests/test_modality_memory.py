@@ -80,6 +80,30 @@ class ModalityMemoryTests(unittest.TestCase):
         )
         self.assertGreaterEqual(len(parts), 2)
 
+    def test_answers_remember_corrected_wording_not_the_typo(self) -> None:
+        from massing_explorer.modality import apply_answer_corrections, find_modality_questions
+
+        typo = "lentgh should stay under 400 ft"
+        fixed = "length should stay under 400 ft"
+        text = f"Four masses. {typo}."
+        patched = apply_answer_corrections(
+            text,
+            [{"text": typo, "corrected": fixed, "kind": "limitation"}],
+        )
+        self.assertIn(fixed, patched)
+        self.assertNotIn("lentgh", patched)
+        remember(fixed, "limitation", path=self.tmp)
+        mem = load_memory(self.tmp)
+        norms = [e["normalized"] for e in mem["phrases"]]
+        self.assertTrue(any("length" in n for n in norms))
+        self.assertFalse(any("lentgh" in n for n in norms))
+        qs = find_modality_questions(
+            patched,
+            answers=[{"text": typo, "corrected": fixed, "kind": "limitation", "reason": "modality"}],
+            use_llm=False,
+        )
+        self.assertFalse(any("lentgh" in (q.get("text") or "") for q in qs))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -5,8 +5,9 @@ Job: fill behavior cells across P × story pattern × topology × loading ×
 envelope before BO exploits. Not a one-at-a-time story sweep.
 
 Adaptive budget:
-  start 40 → measure new regions → if still discovering, +10 or +20 → stop
-  when stagnant → hard max ~100–120.
+  start 40 → measure new cells *and* feature-space novelty → if still
+  discovering, +10 or +20 → stop when stagnant → hard max ~100–120.
+  Illegal cells are still samples. Zero legal regions does not skip COVER.
 """
 
 from __future__ import annotations
@@ -22,9 +23,12 @@ COVER_START = 40
 COVER_STEP_SMALL = 10
 COVER_STEP_LARGE = 20
 COVER_MAX = 120
-# Stop when a batch adds fewer than this fraction of new legal regions.
+# Stop when a batch adds no new cells and few novel feature encodings.
 COVER_STAGNANT_FRAC = 0.08
 COVER_PARTITION_CAP = 8
+# When P/T/story locks shrink the axis product below COVER_MAX, keep sampling
+# distinct site-search width schemes (geom ranks) until the budget fills.
+COVER_GEOM_RANKS = 20
 
 ENVELOPES = ("balanced", "compact", "elongated")  # elongated → search low_rise
 LOADINGS = ("double", "single")
@@ -40,6 +44,7 @@ class CoverSample:
     topology: str = "independent"
     loading: str = "double"
     envelope: str = "balanced"
+    geom_rank: int = 0  # 0 = best under envelope preference; 1.. = next widths
     label: str = ""
 
 
@@ -105,6 +110,14 @@ def story_pattern_library(
     if n >= 3:
         add([low, mid, high] + [mid] * (n - 3))
         add([high, mid, low] + [mid] * (n - 3))
+    # Small height × mass counts: enumerate the full joint grid so COVER
+    # is not starved when P/T are locked (product must reach start=40).
+    # Cap at 3 masses — 4×3 already yields 81 patterns and starves other axes.
+    if n <= 3 and cap <= 4:
+        from itertools import product
+
+        for vec in product(range(1, cap + 1), repeat=n):
+            add(list(vec))
     # Deduplicate, preserve order
     out: list[tuple[int, ...]] = []
     seen: set[tuple[int, ...]] = set()
@@ -181,7 +194,9 @@ def _stratified_samples(
     l_n = max(1, len(plan.loadings))
     e_n = max(1, len(plan.envelopes))
 
-    def make(i_p: int, i_s: int, i_t: int, i_l: int, i_e: int) -> CoverSample:
+    def make(
+        i_p: int, i_s: int, i_t: int, i_l: int, i_e: int, geom_rank: int = 0
+    ) -> CoverSample:
         stories = plan.story_patterns[i_s % s_n]
         return CoverSample(
             partition_index=i_p % p_n,
@@ -189,9 +204,11 @@ def _stratified_samples(
             topology=plan.topologies[i_t % t_n],
             loading=plan.loadings[i_l % l_n],
             envelope=plan.envelopes[i_e % e_n],
+            geom_rank=int(geom_rank),
             label=(
                 f"P{i_p % p_n}+S{i_s % s_n}+T{plan.topologies[i_t % t_n]}"
                 f"+L{plan.loadings[i_l % l_n]}+G{plan.envelopes[i_e % e_n]}"
+                + (f"+W{geom_rank}" if geom_rank else "")
             ),
         )
 
@@ -205,6 +222,7 @@ def _stratified_samples(
             sample.topology,
             sample.loading,
             sample.envelope,
+            int(sample.geom_rank),
         )
         if key in seen:
             return
@@ -224,31 +242,60 @@ def _stratified_samples(
         )
     )
 
-    # 2) Cover each axis level at least once against stated others
+    # 2) Cover each axis level at least once against stated others.
+    #    Do small axes before the story library so a large S does not
+    #    consume the whole pool before L/G appear.
     for i_p in range(p_n):
         push(make(i_p, 0, 0, 0, 0))
-    for i_s in range(s_n):
-        push(make(0, i_s, 0, 0, 0))
     for i_t in range(t_n):
         push(make(0, 0, i_t, 0, 0))
     for i_l in range(l_n):
         push(make(0, 0, 0, i_l, 0))
     for i_e in range(e_n):
         push(make(0, 0, 0, 0, i_e))
+    story_axis_cap = min(s_n, max(8, pool_size // max(1, e_n * l_n)))
+    for i_s in range(story_axis_cap):
+        push(make(0, i_s, 0, 0, 0))
 
-    # 3) Diagonal / staggered joints to fill the pool
-    i = 0
-    while len(ordered) < pool_size and i < pool_size * 4:
-        push(
-            make(
-                i % p_n,
-                (i * 3) % s_n,
-                (i * 5) % t_n,
-                (i * 7) % l_n,
-                (i * 11) % e_n,
-            )
+    # 3) Exhaust the Cartesian product up to pool_size. Outer axes = envelope
+    #    / loading so a truncated pool still mixes G and L.
+    if len(ordered) < pool_size:
+        for i_e in range(e_n):
+            for i_l in range(l_n):
+                for i_t in range(t_n):
+                    for i_p in range(p_n):
+                        for i_s in range(s_n):
+                            if len(ordered) >= pool_size:
+                                return iter(ordered[:pool_size])
+                            push(make(i_p, i_s, i_t, i_l, i_e))
+
+    # 4) Locked briefs often exhaust the typology product well below COVER_MAX
+    #    (e.g. 9 stories × 2 L × 3 E = 54). Keep filling with alternate width
+    #    schemes from site search so the pool actually uses the budget.
+    if len(ordered) < pool_size and ordered:
+        base = [s for s in ordered if int(s.geom_rank) == 0] or list(ordered)
+        ranks_needed = max(
+            2,
+            (pool_size + len(base) - 1) // max(len(base), 1),
         )
-        i += 1
+        ranks_needed = min(COVER_GEOM_RANKS, ranks_needed)
+        for rank in range(1, ranks_needed):
+            if len(ordered) >= pool_size:
+                break
+            for sample in base:
+                if len(ordered) >= pool_size:
+                    break
+                push(
+                    CoverSample(
+                        partition_index=sample.partition_index,
+                        stories=sample.stories,
+                        topology=sample.topology,
+                        loading=sample.loading,
+                        envelope=sample.envelope,
+                        geom_rank=rank,
+                        label=(sample.label or "cover") + f"+W{rank}",
+                    )
+                )
 
     return iter(ordered[:pool_size])
 
@@ -292,15 +339,24 @@ def apply_cover_sample(
     if not session.constraints.get("loading_required"):
         session.constraints["loading"] = sample.loading
     session.constraints["cover_envelope"] = sample.envelope
+    session.constraints["cover_geom_rank"] = int(sample.geom_rank)
 
-    clear_pairings(session)
-    if sample.topology == "paired" and paired_bars_drawable(session):
-        frontage = stated_frontage_ft(session)
-        proposals = pairing_proposals(session, cap=1)
-        if frontage and proposals:
-            pair_masses(session, proposals[0], float(frontage), length_is_cap=True)
+    if topology_is_required(session):
+        # Keep the brief's pairing. COVER must not rewrite a required T.
+        pass
+    else:
+        clear_pairings(session)
+        if sample.topology == "paired" and paired_bars_drawable(session):
+            frontage = stated_frontage_ft(session)
+            proposals = pairing_proposals(session, cap=1)
+            if frontage and proposals:
+                pair_masses(session, proposals[0], float(frontage), length_is_cap=True)
 
-    _apply_envelope_geometry(session, sample.envelope, cache=search_cache)
+    applied = _apply_envelope_geometry(
+        session, sample.envelope, geom_rank=int(sample.geom_rank), cache=search_cache
+    )
+    if int(sample.geom_rank) > 0 and not applied:
+        return f"{sample.label or 'cover'} (no alt width)"
     return sample.label or "cover sample"
 
 
@@ -308,11 +364,16 @@ def _apply_envelope_geometry(
     session: Any,
     envelope: str,
     *,
+    geom_rank: int = 0,
     cache: dict[str, Any] | None = None,
-) -> None:
-    """Pull one site-search candidate under the envelope preference, if any."""
+) -> bool:
+    """Pull a site-search candidate under the envelope preference.
+
+    Returns True when a candidate was applied. geom_rank>0 picks the next
+    distinct verified width scheme so locked briefs can fill COVER_MAX.
+    """
     if not session.masses:
-        return
+        return False
     from ..search import SiteEnvelope, apply_scheme as apply_candidate, search_schemes
 
     preference = _search_preference(envelope)
@@ -329,33 +390,66 @@ def _apply_envelope_geometry(
             envelope_obj.max_total_length_ft,
         ]
     ):
-        return
+        return False
 
+    need = max(COVER_GEOM_RANKS, int(geom_rank) + 1)
     cache_key = (
         partition_id(session),
         tuple((m.id, int(m.story_count)) for m in session.masses),
         str(session.constraints.get("loading") or "double"),
         preference,
         bool(session.pairings),
+        tuple(
+            sorted(
+                (str(k), float(v))
+                for k, v in (session.constraints.get("department_widths") or {}).items()
+                if isinstance(v, (int, float)) and not isinstance(v, bool)
+            )
+        ),
+        need,
     )
     store = cache if cache is not None else {}
-    if cache_key in store:
-        candidate = store[cache_key]
-        if candidate is not None:
-            apply_candidate(session, candidate, save=False)
-        return
+    candidates = store.get(cache_key)
+    if candidates is None:
+        # Pin COVER's story pattern so search sizes width for this cell, not a
+        # free story sweep that would overwrite the sample.
+        held_lock = dict(session.constraints.get("story_lock") or {})
+        session.constraints["story_lock"] = {
+            **held_lock,
+            **{m.id: int(m.story_count) for m in session.masses},
+        }
+        try:
+            found, _notes = search_schemes(
+                session, envelope_obj, preference=preference, top_n=need
+            )
+        except Exception:
+            found = []
+        if held_lock:
+            session.constraints["story_lock"] = held_lock
+        else:
+            session.constraints.pop("story_lock", None)
+        # Keep width-distinct schemes only (ranking may repeat near-clones).
+        distinct: list[Any] = []
+        seen_w: set[tuple] = set()
+        for cand in found or []:
+            sig = tuple(
+                (o.mass_id, round(float(o.width_ft), 1), int(o.stories))
+                for o in (cand.options or [])
+            )
+            if sig in seen_w:
+                continue
+            seen_w.add(sig)
+            distinct.append(cand)
+        store[cache_key] = distinct
+        candidates = distinct
 
-    try:
-        candidates, _notes = search_schemes(
-            session, envelope_obj, preference=preference, top_n=1
-        )
-    except Exception:
-        store[cache_key] = None
-        return
-    candidate = candidates[0] if candidates else None
-    store[cache_key] = candidate
-    if candidate is not None:
-        apply_candidate(session, candidate, save=False)
+    if not candidates:
+        return False
+    rank = max(0, int(geom_rank))
+    if rank >= len(candidates):
+        return False
+    apply_candidate(session, candidates[rank], save=False)
+    return True
 
 
 def run_cover(
@@ -371,11 +465,14 @@ def run_cover(
     """
     Adaptive COVER loop.
 
-    Generate `start` samples, then while new legal regions appear add
-    `step_small` or `step_large`, until stagnant or `max_attempts`.
+    Generate `start` samples, then while new cells or novel feature
+    encodings appear add `step_small` or `step_large`, until stagnant
+    or `max_attempts`. Zero legal regions is not a stop condition.
     """
     from . import archive as archive_mod
-    from .strategy import cell_key
+    from .bayes import encode_strategy
+    from .saturate import encodings_from_archive, feature_is_novel
+    from .strategy import cell_key, read_strategy
 
     origin = archive_mod.capture(session)
     archive["stated_partition"] = partition_id(session)
@@ -386,6 +483,7 @@ def run_cover(
         "topologies": list(plan.topologies),
         "loadings": list(plan.loadings),
         "envelopes": list(plan.envelopes),
+        "geom_ranks": COVER_GEOM_RANKS,
         "pool": len(plan.samples),
     }
 
@@ -396,11 +494,22 @@ def run_cover(
     search_cache: dict[str, Any] = {}
     stagnant = False
 
+    evaluate(session, archive, "COVER: stated scheme")
+    origin_sig = region_signature(session)
+    all_regions.add(origin_sig)
+    origin_key = cell_key(session)
+    origin_entry = (archive.get("cells") or {}).get(origin_key)
+    if origin_entry and origin_entry.get("fits_limitations"):
+        legal_regions.add(origin_sig)
+    known_feat = encodings_from_archive(archive)
+
     def run_batch(n: int, tag: str) -> dict[str, Any]:
-        nonlocal cursor
+        nonlocal cursor, known_feat
         before_legal = len(legal_regions)
+        before_regions = len(all_regions)
         before_attempts = int(archive.get("attempts") or 0)
         took = 0
+        new_feat = 0
         while (
             took < n
             and cursor < len(plan.samples)
@@ -415,21 +524,31 @@ def run_cover(
                 origin=origin,
                 search_cache=search_cache,
             )
+            if int(sample.geom_rank) > 0 and "no alt width" in reason:
+                # Do not burn budget or insert a duplicate drawing.
+                continue
             evaluate(session, archive, f"COVER {tag}: {reason}")
             sig = region_signature(session)
             all_regions.add(sig)
             key = cell_key(session)
             entry = (archive.get("cells") or {}).get(key)
+            feat = encode_strategy(read_strategy(session))
+            if feature_is_novel(feat, known_feat):
+                new_feat += 1
+            known_feat.append(feat)
             if entry and entry.get("fits_limitations"):
                 legal_regions.add(sig)
             took += 1
         new_legal = len(legal_regions) - before_legal
+        new_regions = len(all_regions) - before_regions
         attempts = int(archive.get("attempts") or 0) - before_attempts
         return {
             "tag": tag,
             "requested": n,
             "ran": took,
             "new_legal_regions": new_legal,
+            "new_regions": new_regions,
+            "new_feature": new_feat,
             "legal_regions": len(legal_regions),
             "attempts_delta": attempts,
         }
@@ -440,19 +559,34 @@ def run_cover(
     while int(archive.get("attempts") or 0) < max_attempts and cursor < len(plan.samples):
         last = batches[-1]
         new_r = int(last.get("new_legal_regions") or 0)
+        new_cells = int(last.get("new_regions") or 0)
+        new_f = int(last.get("new_feature") or 0)
         ran = max(1, int(last.get("ran") or 1))
         frac = new_r / ran
-        if new_r == 0 or frac < COVER_STAGNANT_FRAC:
+        cell_frac = new_cells / ran
+        feat_frac = new_f / ran
+        # Illegal cells still count as samples. Stop only when the map is
+        # no longer adding cells or encodings.
+        if new_cells == 0 and feat_frac < COVER_STAGNANT_FRAC:
             stagnant = True
             break
-        step = step_large if frac >= 0.25 else step_small
+        step = (
+            step_large
+            if frac >= 0.25 or feat_frac >= 0.25 or cell_frac >= 0.25
+            else step_small
+        )
         remaining = max_attempts - int(archive.get("attempts") or 0)
         if remaining <= 0:
             break
         batches.append(run_batch(min(step, remaining), f"expand+{step}"))
 
     archive_mod.restore_snapshot(session, origin)
-    incomplete = (not stagnant) and int(archive.get("attempts") or 0) >= max_attempts
+    pool_exhausted = cursor >= len(plan.samples) and len(plan.samples) < max_attempts
+    incomplete = ((not stagnant) and int(archive.get("attempts") or 0) >= max_attempts) or (
+        pool_exhausted and not stagnant and int(batches[-1].get("new_regions") or 0) > 0
+        if batches
+        else pool_exhausted
+    )
     report = {
         "ran": True,
         "start": start,
@@ -463,6 +597,7 @@ def run_cover(
         "batches": batches,
         "stagnant": stagnant,
         "incomplete": incomplete,
+        "pool_exhausted": pool_exhausted,
         "samples_planned": len(plan.samples),
         "samples_used": cursor,
     }

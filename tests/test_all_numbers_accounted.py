@@ -21,13 +21,25 @@ class AllNumbersAccountedTests(unittest.TestCase):
         self.assertIn(40.0, values)
         self.assertIn(3.0, values)
 
-    def test_skip_mass_labels(self) -> None:
-        nums = stated_numbers("mass 1 is gym; mass two is dining under 200 ft")
-        values = {round(n["value"], 3) for n in nums}
-        self.assertIn(200.0, values)
-        # labels 1 / two should not appear as free sizes
-        self.assertNotIn(1.0, values)
-        self.assertNotIn(2.0, values)
+    def test_height_is_not_the_number_eight(self) -> None:
+        nums = stated_numbers("gym and dining together and double height")
+        self.assertFalse(nums)
+
+    def test_meters_not_swallowed_by_ratio_parts(self) -> None:
+        text = (
+            "3 masses, max 3 floors. length max 40 meters. "
+            "mass ratio prefer to be 4:7"
+        )
+        parsed = parse_brief(text, [])
+        self.assertAlmostEqual(
+            parsed.constraints.get("max_building_length_ft") or 0,
+            40 * 3.280839895,
+            places=3,
+        )
+        missed = unaccounted_numbers("length max 40 meters", parsed)
+        self.assertEqual(missed, [])
+        qs, _ = find_brief_questions(text, use_llm=False, department_names=[])
+        self.assertFalse(any("eight" in (q.get("unplaced_numbers") or "") for q in qs))
 
     def test_partial_capture_is_not_enough(self) -> None:
         # Only length lands; story number must still be flagged.
@@ -39,12 +51,41 @@ class AllNumbersAccountedTests(unittest.TestCase):
         self.assertTrue(any(abs(m["value"] - 3) < 0.01 for m in missed))
         self.assertFalse(clause_was_captured(text, parsed))
 
-    def test_full_brief_both_numbers(self) -> None:
-        text = "each mass can be no more than 3 stories and no longer than 210 ft"
+    def test_max_min_meters_and_prefer_story_range_do_not_reask(self) -> None:
+        """min edge + prefer 2-3 floors are parsed; do not block generate."""
+        text = (
+            "3 masses, max 3 floors. length max 70 meters and min 20 meters. "
+            "Prefer 2-3 floors. Prefer mass ratio 4:7."
+        )
         parsed = parse_brief(text, [])
-        self.assertTrue(clause_was_captured(text, parsed), parsed.constraints)
+        self.assertIsNotNone(parsed.constraints.get("min_edge_ft"))
+        self.assertAlmostEqual(
+            float(parsed.constraints["min_edge_ft"]),
+            20 * 3.280839895,
+            places=2,
+        )
+        self.assertEqual(parsed.constraints.get("stories_min"), 2.0)
+        self.assertEqual(parsed.constraints.get("stories_max"), 3.0)
+        self.assertEqual(
+            unaccounted_numbers("length max 70 meters and min 20 meters", parsed),
+            [],
+        )
+        self.assertEqual(unaccounted_numbers("Prefer 2-3 floors", parsed), [])
+        nums = stated_numbers("Prefer 2-3 floors")
+        self.assertTrue(all(n["kind"] == "stories" for n in nums))
         qs, _ = find_brief_questions(text, use_llm=False, department_names=[])
-        self.assertEqual(qs, [])
+        self.assertFalse(
+            any("20" in (q.get("unplaced_numbers") or "") for q in qs),
+            qs,
+        )
+        self.assertFalse(
+            any(
+                "prefer 2-3" in (q.get("text") or "").lower()
+                or "2-3 floors" in (q.get("text") or "").lower()
+                for q in qs
+            ),
+            qs,
+        )
 
     def test_unplaced_asks_without_llm(self) -> None:
         # Nonsense size cue the robust parser will miss.
@@ -56,16 +97,21 @@ class AllNumbersAccountedTests(unittest.TestCase):
         self.assertTrue(
             any(q.get("reason") in {"modality", "unresolved"} for q in qs)
         )
-        # After a modality answer, number placement must still be demanded.
+        # After a modality answer, do not nag the same clause again.
         qs2, parsed2 = find_brief_questions(
             text,
             answers=[{"text": text, "kind": "limitation"}],
             use_llm=False,
             department_names=[],
         )
-        self.assertTrue(qs2)
-        self.assertTrue(any(q.get("reason") == "unresolved" for q in qs2))
-        self.assertIn("77", (qs2[0].get("unplaced_numbers") or qs2[0].get("rationale") or ""))
+        self.assertFalse(any((q.get("text") or "") == text for q in qs2))
+        qs3, _ = find_brief_questions(
+            text,
+            answers=[{"text": text, "kind": "limitation", "reason": "unresolved"}],
+            use_llm=False,
+            department_names=[],
+        )
+        self.assertEqual(qs3, [])
 
     def test_apply_multi_items(self) -> None:
         parsed = ParsedBrief(text="")

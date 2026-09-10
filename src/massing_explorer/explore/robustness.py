@@ -76,6 +76,8 @@ def probe_strategy(
     finally:
         _restore_gsf(session, stored)
 
+    total = survived + collapsed
+    score = (survived / total) if total else (1.0 if base_perf.get("fits_limitations") else 0.0)
     note = (
         f"Robustness: {survived} survive, {collapsed} collapse on the same strategy. "
         "Program area moved; grouping did not."
@@ -85,6 +87,7 @@ def probe_strategy(
         "baseline_fits": bool(base_perf.get("fits_limitations")),
         "survived": survived,
         "collapsed": collapsed,
+        "score": round(score, 4),
         "probes": probes,
         "departments": names,
         "note": note,

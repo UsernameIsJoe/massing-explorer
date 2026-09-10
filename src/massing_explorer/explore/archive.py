@@ -7,10 +7,34 @@ labeled unsupported, not 'we failed to sample'.
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 from .strategy import cell_key, partition_id, read_strategy
 
+# Hard brief constraints COVER / DIAGNOSE / REFINE may temporarily change.
+# Snapshots must round-trip these or a probe permanently erases the brief.
+_CONSTRAINT_SNAPSHOT_KEYS = (
+    "max_total_length_ft",
+    "max_building_length_ft",
+    "max_building_width_ft",
+    "max_edge_ft",
+    "min_edge_ft",
+    "min_building_length_ft",
+    "length_limit_is_cap",
+    "department_widths",
+    "department_max_edge_ft",
+    "academic_width_ft",
+    "fixed_width_ft",
+    "preferred_width_ft",
+    "preferred_stories",
+    "max_stories",
+    "story_lock",
+    "loading",
+    "cover_envelope",
+    "cover_geom_rank",
+    "loading_required",
+)
 
 def empty_archive() -> dict[str, Any]:
     return {
@@ -49,9 +73,17 @@ def insert(
         "reason": reason,
         "stories": {m.id: m.story_count for m in session.masses},
         "snapshot": _snapshot(session),
+        "plates": _plates_from_result(result),
     }
     cells = archive.setdefault("cells", {})
     current = cells.get(key)
+    if current and str(current.get("reason") or "").startswith("COVER: stated"):
+        # Keep the brief's drawing as the elite for this cell.
+        if legal and not current.get("fits_limitations"):
+            archive["legal"] = int(archive.get("legal") or 0) + 1
+            current["fits_limitations"] = True
+            current["performance"] = performance
+        return current
     if legal:
         archive["legal"] = int(archive.get("legal") or 0) + (0 if current and current.get("fits_limitations") else 1)
         if current is None or not current.get("fits_limitations"):
@@ -122,6 +154,20 @@ def restore_snapshot(session: Any, snap: dict[str, Any], stories: dict[str, Any]
         session.pairings = [MassPairing.from_dict(p) for p in snap["pairings"]]
     stories = stories or snap.get("stories") or {}
     ids = {m.id for m in session.masses}
+    # Restore hard constraints before story_lock is read.
+    saved = snap.get("constraints")
+    if isinstance(saved, dict):
+        for key, value in saved.items():
+            if value is None:
+                session.constraints.pop(key, None)
+            else:
+                session.constraints[key] = copy.deepcopy(value)
+        # Drop mass-scoped keys that belonged to masses no longer present.
+        for key in list(session.constraints):
+            if str(key).endswith("_max_edge_ft"):
+                owner = str(key)[: -len("_max_edge_ft")]
+                if owner not in ids and key not in saved:
+                    session.constraints.pop(key, None)
     lock = session.constraints.get("story_lock") or {}
     lock_applies = bool(lock) and set(lock).issubset(ids)
     for mass in session.masses:
@@ -137,6 +183,11 @@ def restore_snapshot(session: Any, snap: dict[str, Any], stories: dict[str, Any]
             session.constraints["cover_envelope"] = snap["cover_envelope"]
         else:
             session.constraints.pop("cover_envelope", None)
+    if "cover_geom_rank" in snap:
+        if snap.get("cover_geom_rank") is not None:
+            session.constraints["cover_geom_rank"] = snap["cover_geom_rank"]
+        else:
+            session.constraints.pop("cover_geom_rank", None)
     if "pins" in snap:
         session.floor_pins = dict(snap.get("pins") or {})
     for mid, width in (snap.get("widths") or {}).items():
@@ -157,9 +208,18 @@ def restore_snapshot(session: Any, snap: dict[str, Any], stories: dict[str, Any]
         session.floor_steps = {k: v for k, v in session.floor_steps.items() if k in ids}
     if getattr(session, "floor_tapers", None):
         session.floor_tapers = {k: v for k, v in session.floor_tapers.items() if k in ids}
+    if "brief_locked" in snap:
+        session.brief_locked = bool(snap.get("brief_locked"))
 
 
 def _snapshot(session: Any) -> dict[str, Any]:
+    constraints: dict[str, Any] = {}
+    for key in _CONSTRAINT_SNAPSHOT_KEYS:
+        if key in session.constraints:
+            constraints[key] = copy.deepcopy(session.constraints.get(key))
+    for key, value in list(session.constraints.items()):
+        if str(key).endswith("_max_edge_ft") or str(key).endswith("_width_ft"):
+            constraints[key] = copy.deepcopy(value)
     return {
         "stories": {m.id: m.story_count for m in session.masses},
         "departments": {m.id: list(m.departments) for m in session.masses},
@@ -167,8 +227,38 @@ def _snapshot(session: Any) -> dict[str, Any]:
         "pairings": [p.to_dict() for p in (session.pairings or [])],
         "loading": session.constraints.get("loading"),
         "cover_envelope": session.constraints.get("cover_envelope"),
+        "cover_geom_rank": session.constraints.get("cover_geom_rank"),
         "pins": dict(session.floor_pins or {}),
         "widths": {
             m.id: session.constraints.get(f"{m.id}_width_ft") for m in session.masses
         },
+        "constraints": constraints,
+        "brief_locked": bool(getattr(session, "brief_locked", False)),
     }
+
+
+def _plates_from_result(result: Any) -> list[dict[str, Any]]:
+    """Footprints from a solved drawing, for UI envelope thumbs."""
+    out: list[dict[str, Any]] = []
+    for mass in getattr(result, "masses", None) or []:
+        floors = list(getattr(mass, "floors", None) or [])
+        if not floors:
+            continue
+        ground = floors[0]
+        try:
+            width = float(getattr(ground, "width_ft", 0) or 0)
+            length = float(getattr(ground, "length_ft", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if width <= 0 or length <= 0:
+            continue
+        out.append(
+            {
+                "mass_id": getattr(mass, "id", "") or "",
+                "mass_name": getattr(mass, "name", "") or getattr(mass, "id", "") or "",
+                "stories": len(floors),
+                "width_ft": round(width, 3),
+                "length_ft": round(length, 3),
+            }
+        )
+    return out

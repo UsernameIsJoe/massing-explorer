@@ -87,8 +87,26 @@ which brief clauses collapsed the feasible set. It is not merely "Option 17."
             next search actions
 ```
 
-MCTS, when it exists, sits around the **planner + engine** loop. It does not
-sit on feet.
+MCTS sits around the **planner + engine** loop. It starts from several diverse
+COVER elites, not one current scheme, and searches typed action sequences.
+Nearby width is a local `delta_ft` step from the current plate, not a width
+enumerator. Bayesian optimization spends a sequential evaluation budget on
+high-EI legal actions and refits after each result. Neither sits on an
+invented foot target.
+
+When COVER returns **zero legal cells**, the controller runs **DIAGNOSE**
+instead of LEARN / REFINE / MCTS / BO:
+
+```
+COVER → legal?
+  YES → planner / MCTS / BO / REFINE / LEARN
+  NO  → DIAGNOSE (search | conflict | model)
+          search → one targeted COVER batch, then re-check
+          still none / conflict / model → minimal relaxation probes → USER
+```
+
+Probes are never applied automatically. Failure patterns are stored as
+knowledge about why regions are empty.
 
 ---
 
@@ -104,11 +122,13 @@ sit on feet.
 | Performance vector | `explore/performance.py` |
 | Design archive | `explore/archive.py` |
 | COVER / LEARN / REFINE | `explore/controller.py`, `explore/cover.py` |
+| DIAGNOSE (zero legal) | `explore/diagnose.py` |
 | LEARN (pairwise) | `explore/preference.py` |
 | Open P | `explore/csp.py`, `explore/partitions.py` |
 | Drawable T and stated D | `explore/topology.py` |
 | MCTS around planner + engine | `explore/mcts.py` |
 | Bayesian budget manager | `explore/bayes.py` |
+| Caps and saturation stop | `explore/saturate.py` |
 | Width/story enumeration baseline | `search.py` |
 
 Chat entry: `brief.apply_parsed_brief` → `explore.controller.run_search`. Product
@@ -191,8 +211,9 @@ Sample **joint** points across open axes — program organization (P), story
 envelope family (balanced / compact / elongated) — rather than a product of
 story margins around the baseline.
 
-**Adaptive budget:** start ~40 evaluations → measure new legal regions → if
-still discovering, add +10 or +20 → stop when stagnant → hard cap ~100–120.
+**Adaptive budget:** start ~40 evaluations → measure new legal regions *and*
+feature-space novelty → if still discovering, add +10 or +20 → stop when
+stagnant (no meaningful new cells or encodings) → hard cap ~100–120.
 If the cap hits while regions are still opening, mark the map incomplete.
 Do not call a truncated story product a joint sample.
 
@@ -200,10 +221,13 @@ Do not call a truncated story product a joint sample.
 
 What comparison would teach us the most about what the designer values?
 
-Pairwise A/B among feasible schemes only. A written brief is not a sample.
-Bradley–Terry on **measured** traits. Pick ambiguous pairs; keep connecting
-comparisons so ratings stay on one scale. "Why B?" may propose the next pair
-or explain; it does not invent an unmeasured coordinate.
+Pairwise A/B among feasible schemes only. Prefer pairs that differ in P, T,
+envelope, or loading so the preference engine sees distinct legal schemes. A
+written brief is not a sample. Bradley–Terry on **measured** traits. Taste
+steers where MCTS / BO / REFINE spend effort; it does not override a must.
+Pick ambiguous pairs; keep connecting comparisons so ratings stay on one
+scale. "Why B?" may propose the next pair or explain; it does not invent an
+unmeasured coordinate.
 
 ### REFINE
 
@@ -211,8 +235,10 @@ Given what we currently know, which lineages deserve deeper exploration?
 
 Keep several architecturally distinct elites (different P or T, not three
 widths of the same bar). Allocate local tries by weight, with a floor so a
-light lineage is not deleted. After a choice, reweight; do not open a new
-sample by inventing feet.
+light lineage is not deleted. Local neighbors include story ±1, nearby width
+(`delta_ft` from the current plate), envelope / loading, small grouping, and
+drawable topology — not invented feet. After a choice, reweight. Stop when
+further neighbors stop improving or adding cells.
 
 Default schedule for a fresh brief:
 
@@ -222,6 +248,9 @@ Intent extraction → COVER → LLM planner → MCTS → Bayesian optimization
 ```
 
 COVER fills the archive first so planner / MCTS / BO see a real multi-axis map.
+MCTS then exploits several COVER elites (~40–80 sims, depth 3–4) until reward
+or cell novelty saturates. BO spends ~10–15 sequential proposals, refitting
+the GP after each evaluation, and also stops on saturation.
 A later turn can switch mode (`cover` / `learn` / `refine`). The three jobs
 from the earlier plan remain; they are no longer the identity of the algorithm.
 
@@ -229,19 +258,27 @@ from the earlier plan remain; they are no longer the identity of the algorithm.
 
 ## Evaluation
 
-Hard feasibility first. Then a **performance vector**, not one quality score:
+Hard feasibility first (requirements + limitations). Soft ranking among legal
+schemes uses four evaluation composites — not one quality score:
 
-- feasibility (requirements and caps)
-- measured traits (spread, height variance, likeness, street edge if a
-  frontage exists)
-- stated-preference distance until the user compares
-- novelty versus the archive
-- later: anchor-room fit, leftover area, public-on-grade, fragmentation,
-  robustness under program perturbation
+1. **Program coherence** — grouping / distribution sense; penalize awkward
+   floor splits and fragmentation
+2. **Preference alignment** — stated soft prefs (pins, ratio, low-rise,
+   preferred stories)
+3. **Performance efficiency** — leftover, footprint likeness, frontage use,
+   anchor fit
+4. **Robustness / flexibility** — survive vs collapse under same-strategy
+   program area probes (proxy when no probe yet)
 
-The weighted sum in `search.py` (`balanced` / `low_rise` / `compact`) is an
-experimental baseline, not "quality." Courtyard enclosure and daylight
-simulation are omitted until the drawing or site can report them.
+**Probe / novelty encoding** (COVER feature space, BO distance) is a separate
+nine-axis vector: program organization, mass count, distribution balance,
+topology (drawable only), loading, mean height, height articulation, vertical
+organization, geometric character. Courtyard / podium stay `unsupported` —
+named, not COVER targets. GP distance is isotropic RBF for now (ARD later).
+
+Raw geometry signals (spread, leftover, …) remain diagnostic inputs.
+`search.py`'s weighted sum is an experimental baseline only. Daylight /
+EnergyPlus / courtyard enclosure stay omitted until the drawing can report them.
 
 Robustness: grow or shrink a department, re-solve **the same strategy**,
 record survive or collapse. That is not a license to regroup a must.
@@ -257,8 +294,10 @@ No Architect / Engineer / Client / Critic role-play. A Critic is added only if
 experiments show the planner repeats the same illegal move.
 
 Bayesian optimization is an evaluation-budget manager for expensive
-simulations. It is not an architectural generator. It is not on the critical
-path until a run costs minutes.
+simulations. After COVER, it ranks unevaluated typed actions by expected
+improvement, evaluates one, refits, and repeats (~10–15, or until saturation).
+It is not an architectural generator. It is not on the critical path until a
+run costs minutes.
 
 ---
 
@@ -296,8 +335,9 @@ repository. Do not rewrite the solver to "start over."
    `search.py` remains the enumeration baseline for experiments.
 
 Phases 0–8 are in. Bayesian optimization sits beside COVER as an
-evaluation-budget manager; it is not a generator and is not on feet.
-MCTS still does not sit on feet. Do not put either on widths.
+evaluation-budget manager; it is not a generator and is not on invented feet.
+MCTS exploits COVER elites over typed actions. Nearby width is a local step,
+not a width product. Do not put either on an invented foot target.
 
 ---
 

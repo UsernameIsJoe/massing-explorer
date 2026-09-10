@@ -182,6 +182,36 @@ def classify_with_llm(text: str, client: Any | None = None) -> dict[str, Any]:
     }
 
 
+def apply_answer_corrections(text: str, answers: list[dict[str, Any]] | None) -> str:
+    """Replace typo'd clauses with the wording the user confirmed."""
+    out = text or ""
+    for ans in answers or []:
+        orig = str(ans.get("text") or "").strip()
+        corr = str(ans.get("corrected") or "").strip()
+        if orig and corr and orig != corr and orig in out:
+            out = out.replace(orig, corr, 1)
+    return out
+
+
+def _remember_answers(answers: list[dict[str, Any]] | None) -> None:
+    """Store the corrected wording, never the typo the user just fixed."""
+    for ans in answers or []:
+        kind = str(ans.get("kind") or "")
+        stored = str(ans.get("corrected") or ans.get("text") or "").strip()
+        if stored and kind in KINDS:
+            remember(stored, kind, cue=str(ans.get("cue") or "") or None)
+
+
+def _answers_by_key(answers: list[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for ans in answers or []:
+        for field in ("corrected", "text"):
+            key = normalize_phrase(str(ans.get(field) or ""))
+            if key:
+                out[key] = ans
+    return out
+
+
 def find_modality_questions(
     text: str,
     *,
@@ -192,13 +222,11 @@ def find_modality_questions(
     """
     Return clauses that still need a human modality pick.
 
-    `answers` from a prior UI turn are applied into memory and skipped.
+    `answers` from a prior UI turn are applied into memory (corrected wording)
+    and skipped so the same clause is not asked again.
     """
-    for ans in answers or []:
-        clause = str(ans.get("text") or "")
-        kind = str(ans.get("kind") or "")
-        if clause and kind in KINDS:
-            remember(clause, kind, cue=str(ans.get("cue") or "") or None)
+    _remember_answers(answers)
+    answered = _answers_by_key(answers)
 
     questions: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -209,6 +237,8 @@ def find_modality_questions(
         if not key or key in seen:
             continue
         seen.add(key)
+        if key in answered:
+            continue
         result = classify_local(clause)
         if result["needs_ask"] and use_llm:
             result = classify_with_llm(clause, client=client)
@@ -237,11 +267,11 @@ def find_modality_questions(
 
 _VALUE_TOKEN = re.compile(
     r"(?P<num>\d[\d,]*(?:\.\d+)?|"
-    r"fourteen|fifteen|sixteen|eighteen|twenty(?:-five|-two)?|"
+    r"\b(?:fourteen|fifteen|sixteen|eighteen|twenty(?:-five|-two)?|"
     r"thirty(?:-five)?|forty(?:-five)?|fifty(?:-five)?|sixty(?:-five)?|"
     r"seventy|eighty|ninety|hundred|"
-    r"one|two|three|four|five|six|seven|eight|nine|ten|twelve)"
-    r"(?:\s*(?P<unit>ft|feet|foot|'|′|m|meters?|metres?|"
+    r"one|two|three|four|five|six|seven|eight|nine|ten|twelve)\b)"
+    r"(?:\s*(?P<unit>ft|feet|foot|'|′|meters?|metres?|m(?![a-z])|"
     r"stor(?:y|ies|eys)|floors?|levels?|"
     r"sq\.?\s*ft|sqft|sf|sq\.?\s*m|sqm))?",
     flags=re.I,
@@ -249,6 +279,7 @@ _VALUE_TOKEN = re.compile(
 
 _LEVERS = {
     "max_length",
+    "max_edge",
     "preferred_length",
     "exact_length",
     "max_width",
@@ -276,6 +307,18 @@ def stated_numbers(text: str) -> list[dict[str, Any]]:
 
     raw = text or ""
     labels = _label_spans(raw)
+    # "2-3 floors" / "2 to 3 stories": both ends are story counts, not lengths.
+    story_range_spans: list[tuple[int, int]] = []
+    for m in re.finditer(
+        r"(?P<a>\d+|one|two|three|four|five|six|seven|eight|nine|ten|twelve)"
+        r"\s*(?:[–\-—/]|\sto\s+)\s*"
+        r"(?P<b>\d+|one|two|three|four|five|six|seven|eight|nine|ten|twelve)"
+        r"\s*(?:stor(?:y|ies|eys)|floors?|levels?)\b",
+        raw,
+        flags=re.I,
+    ):
+        story_range_spans.append((m.start(), m.end()))
+
     out: list[dict[str, Any]] = []
     seen: set[tuple[float, str]] = set()
     for m in _VALUE_TOKEN.finditer(raw):
@@ -290,10 +333,14 @@ def stated_numbers(text: str) -> list[dict[str, Any]]:
         except (TypeError, ValueError):
             continue
         unit = (m.group("unit") or "").strip().lower() or None
+        in_story_range = _inside_spans(m.start(), story_range_spans)
         if unit and unit.startswith("stor"):
             kind = "stories"
             as_ft = float(num)
         elif unit and (unit.startswith("floor") or unit.startswith("level")):
+            kind = "stories"
+            as_ft = float(num)
+        elif in_story_range:
             kind = "stories"
             as_ft = float(num)
         elif unit and ("sq" in unit or unit in {"sf", "sqft", "sqm"}):
@@ -326,9 +373,16 @@ _SIZE_CONSTRAINT_KEYS = {
     "exact_building_length_ft",
     "max_total_length_ft",
     "max_building_width_ft",
+    "max_edge_ft",
+    "min_edge_ft",
+    "min_building_length_ft",
     "max_height_ft",
     "max_gfa_sf",
     "preferred_stories",
+    "stories_min",
+    "stories_max",
+    "hard_max_stories",
+    "max_stories_exception",
     "site_width_ft",
     "site_depth_ft",
     "academic_width_ft",
@@ -344,9 +398,10 @@ def accounted_magnitudes(parsed: Any) -> list[float]:
     for key, v in constraints.items():
         if key not in _SIZE_CONSTRAINT_KEYS and key not in {
             "department_widths",
+            "department_max_edge_ft",
         }:
             # Skip flags like length_limit_is_cap=1 — they are not sizes.
-            if key != "department_widths":
+            if key not in {"department_widths", "department_max_edge_ft"}:
                 continue
         if isinstance(v, (int, float)) and not isinstance(v, bool):
             known.append(float(v))
@@ -365,11 +420,12 @@ def accounted_magnitudes(parsed: Any) -> list[float]:
         val = getattr(parsed, attr, None)
         if isinstance(val, (int, float)) and not isinstance(val, bool):
             known.append(float(val))
-            if attr == "length_over_width" and val:
-                for a in range(1, 13):
-                    for b in range(1, 13):
-                        if b and abs(a / b - float(val)) < 0.02:
-                            known.extend([float(a), float(b)])
+            if attr == "length_over_width":
+                parts = constraints.get("preferred_ratio")
+                if isinstance(parts, (list, tuple)):
+                    for part in parts[:2]:
+                        if isinstance(part, (int, float)) and not isinstance(part, bool):
+                            known.append(float(part))
     for d in getattr(parsed, "dimensions", None) or []:
         if isinstance(d.get("value"), (int, float)):
             known.append(float(d["value"]))
@@ -404,9 +460,15 @@ def unaccounted_numbers(text: str, parsed: Any) -> list[dict[str, Any]]:
         elif item["kind"] == "area":
             ok = _near_any(item["value"], known, tol=1.0, allow_m_ft=False)
         else:
-            ok = _near_any(item["as_ft"], known, tol=0.75, allow_m_ft=True) or _near_any(
-                item["value"], known, tol=0.75, allow_m_ft=True
-            )
+            unit = str(item.get("unit") or "").lower()
+            if unit.startswith("m") and "sq" not in unit:
+                # Stated meters: compare converted feet only. Do not treat
+                # 40 m as "accounted" because 12 (from a ratio) × 3.28 ≈ 40.
+                ok = _near_any(item["as_ft"], known, tol=0.75, allow_m_ft=False)
+            else:
+                ok = _near_any(item["as_ft"], known, tol=0.75, allow_m_ft=False) or (
+                    _near_any(item["value"], known, tol=0.75, allow_m_ft=False)
+                )
         if not ok:
             missed.append(item)
     return missed
@@ -599,7 +661,7 @@ def _coerce_llm_number(value: Any) -> float | None:
 
 def apply_content_interpretation(parsed: Any, data: dict[str, Any]) -> bool:
     """Write LLM/content interpretation(s) onto ParsedBrief. True if any applied."""
-    from .brief import _to_feet, _to_sf
+    from .brief import _append_dimension, _stamp_all_edge_cap, _to_feet, _to_sf
 
     items = list(data.get("items") or [])
     if not items and data.get("lever"):
@@ -623,12 +685,31 @@ def apply_content_interpretation(parsed: Any, data: dict[str, Any]) -> bool:
         unit = it.get("unit")
         kind = str(it.get("kind") or data.get("kind") or "limitation").lower()
 
-        if lever == "max_length":
-            constraints["max_building_length_ft"] = round(_to_feet(value, unit), 4)
-            constraints["length_limit_is_cap"] = 1
-            parsed.notes.append(
-                f"max building length {constraints['max_building_length_ft']:g} ft (from clause)"
-            )
+        if lever in {"max_length", "max_edge"}:
+            depts = [str(d) for d in (it.get("departments") or []) if d]
+            feet = _to_feet(value, unit)
+            if depts:
+                _append_dimension(
+                    parsed,
+                    lever="length",
+                    mode="max",
+                    value_ft=feet,
+                    departments=depts,
+                    scope="department",
+                    text=str(it.get("text") or ""),
+                )
+                edges = dict(constraints.get("department_max_edge_ft") or {})
+                for dept in depts:
+                    edges[dept] = float(feet)
+                constraints["department_max_edge_ft"] = edges
+                parsed.notes.append(
+                    f"max mass edge {feet:g} ft on {', '.join(depts)} (every edge)"
+                )
+            else:
+                _stamp_all_edge_cap(parsed, feet, note=False)
+                parsed.notes.append(
+                    f"max mass edge {constraints['max_edge_ft']:g} ft (from clause)"
+                )
             applied = True
         elif lever == "preferred_length":
             constraints["preferred_length_ft"] = round(_to_feet(value, unit), 4)
@@ -677,10 +758,11 @@ def resolve_unresolved_clauses(
 
     Answers may include a modality kind; we re-try interpretation with that kind.
     """
+    answered = _answers_by_key(answers)
     answer_kinds = {
-        normalize_phrase(str(a.get("text") or "")): str(a.get("kind") or "")
-        for a in (answers or [])
-        if str(a.get("text") or "") and str(a.get("kind") or "") in KINDS
+        key: str(a.get("kind") or "")
+        for key, a in answered.items()
+        if str(a.get("kind") or "") in KINDS
     }
 
     questions: list[dict[str, Any]] = []
@@ -693,6 +775,17 @@ def resolve_unresolved_clauses(
         if not key or key in seen:
             continue
         seen.add(key)
+        prior = answered.get(key)
+        # Already classified this clause this session — do not ask it again.
+        if prior:
+            forced = str(prior.get("kind") or "")
+            if forced in KINDS and use_llm:
+                interp = interpret_clause_content(
+                    clause, client=client, forced_kind=forced
+                )
+                if not interp.get("needs_ask"):
+                    apply_content_interpretation(parsed, interp)
+            continue
         if clause_was_captured(clause, parsed):
             continue
         missed = unaccounted_numbers(clause, parsed)
@@ -752,6 +845,34 @@ def resolve_unresolved_clauses(
     return questions
 
 
+def _modality_still_needed(clause: str, parsed: Any) -> bool:
+    """
+    Skip modality prompts when the parser already grounded the clause and
+    there are no unplaced sizes. Otherwise 'gym and dining together' blocks
+    generate forever even though keep_together / DH already landed.
+    """
+    text = clause or ""
+    if unaccounted_numbers(text, parsed):
+        return True
+    if stated_numbers(text):
+        # Sizes present and accounted — role may still matter for soft prefs,
+        # but do not block when the engine already has the magnitudes.
+        return False
+    cl = text.lower()
+    if re.search(
+        r"\b(?:together|same\s+mass|colo(?:cate|cation)|joined|paired|attached)\b",
+        cl,
+    ):
+        return not bool(getattr(parsed, "keep_together", None))
+    if re.search(r"double[\s-]?height", cl):
+        return not bool(getattr(parsed, "double_height_departments", None))
+    if re.search(r"\b(?:ground|grade|first\s+floor)\b", cl):
+        pins = getattr(parsed, "floor_pins", None) or {}
+        return not bool(pins)
+    # No sizes and no known structural act — keep asking for a role.
+    return True
+
+
 def find_brief_questions(
     text: str,
     *,
@@ -769,23 +890,12 @@ def find_brief_questions(
     """
     from .brief import parse_brief
 
+    text = apply_answer_corrections(text, answers)
     modality_qs = find_modality_questions(
         text, client=client, answers=answers, use_llm=use_llm
     )
     if parsed is None:
         parsed = parse_brief(text, list(department_names or []))
-    if modality_qs:
-        # Still surface unplaced numbers on modality asks so nothing is silent.
-        for q in modality_qs:
-            missed = unaccounted_numbers(q.get("text") or "", parsed)
-            if missed:
-                q["unplaced_numbers"] = ", ".join(m["raw"] for m in missed)
-                if not q.get("rationale"):
-                    q["rationale"] = (
-                        "Also need to place number(s): " + q["unplaced_numbers"]
-                    )
-        return modality_qs, parsed
-
     unresolved = resolve_unresolved_clauses(
         text,
         parsed,
@@ -793,4 +903,29 @@ def find_brief_questions(
         answers=answers,
         use_llm=use_llm,
     )
-    return unresolved, parsed
+    merged: dict[str, dict[str, Any]] = {}
+    for q in modality_qs + unresolved:
+        key = normalize_phrase(q.get("text") or "")
+        if not key:
+            continue
+        clause = q.get("text") or ""
+        # Do not re-prompt grounded grouping / already-placed sizes.
+        if q.get("reason") == "modality" and not _modality_still_needed(clause, parsed):
+            continue
+        if key in merged:
+            prev = merged[key]
+            if q.get("unplaced_numbers") and not prev.get("unplaced_numbers"):
+                prev["unplaced_numbers"] = q["unplaced_numbers"]
+                if q.get("rationale"):
+                    prev["rationale"] = q["rationale"]
+            continue
+        missed = unaccounted_numbers(clause, parsed)
+        if missed and not q.get("unplaced_numbers"):
+            q["unplaced_numbers"] = ", ".join(m["raw"] for m in missed)
+            if not q.get("rationale"):
+                q["rationale"] = "Also need to place number(s): " + q["unplaced_numbers"]
+        # Resolved sizes with no remaining miss — do not block generate.
+        if q.get("reason") == "unresolved" and not missed:
+            continue
+        merged[key] = q
+    return list(merged.values()), parsed

@@ -5,6 +5,36 @@ Update this file at the end of every work session.
 
 ---
 
+## 2026-09-10 — Exploit COVER: multi-root MCTS, sequential BO, broader REFINE
+
+### Done
+
+The later stages now *use* the COVER map instead of polishing one current scheme.
+
+- **MCTS** — several diverse legal COVER elites as roots (~4); ~64 simulations
+  at depth 4 (session `explore_budget` can lower this). Each root gets its own
+  search. Reward can include LEARN taste among *legal* schemes only.
+- **BO** — ~12 sequential EI proposals from origin + COVER elites, GP refit
+  after each result, saturation stop.
+- **REFINE** — local neighbors beyond story ±1: nearby width (`delta_ft`),
+  envelope/proportion, loading, small grouping, topology. LEARN weights still
+  allocate effort with a floor.
+- **LEARN** — A/B pairs prefer architecturally different legal cells (P / T /
+  envelope / loading). Taste steers search; it cannot rescue a cap miss.
+- **Saturation** — COVER also tracks feature-space novelty. MCTS / BO / REFINE
+  stop when extra evals stop adding cells, encodings, or better reward.
+  Production caps live in `explore/saturate.py`; tests set `explore_budget`.
+
+Nearby width is a typed local step from the current plate, not `search.py`
+enumeration and not `resize_mass`.
+
+### Next steps
+
+- “Why B?” explain turn.
+- Courtyard and other unsupported T remain named, not sampled.
+
+---
+
 ## 2026-09-09 — Adaptive multi-axis COVER + brief number guarantee
 
 ### Done

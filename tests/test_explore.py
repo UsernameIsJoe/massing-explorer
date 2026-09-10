@@ -123,6 +123,20 @@ class TestActions(unittest.TestCase):
         self.assertIn("cannot realize", out["reason"])
 
 
+    def test_width_step_is_nearby_delta_not_resize_mass(self) -> None:
+        import inspect
+
+        from massing_explorer.explore import actions as actions_mod
+
+        session = _tiny_session()
+        session.constraints["academic_width_ft"] = 60.0
+        out = apply_action(session, {"op": "SET_WIDTH", "mass": "academic", "delta_ft": 10})
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(session.constraints["academic_width_ft"], 70.0)
+        source = inspect.getsource(actions_mod._set_width)
+        self.assertNotIn("resize_mass", source)
+
+
 class TestArchive(unittest.TestCase):
     def test_an_illegal_evaluation_is_not_coverage(self) -> None:
         session = _tiny_session()
@@ -157,12 +171,20 @@ class TestController(unittest.TestCase):
         self.session = StudySession(
             study_id="explore_phase1", program=program, config_path=str(CONFIG)
         )
-        # Keep suite fast; production COVER uses start=40 / max=120.
+        # Keep suite fast; production COVER uses start=40 / max=120 and
+        # MCTS ~64 / depth 4 from several COVER roots.
         self.session.constraints["cover_budget"] = {
             "start": 8,
             "step_small": 4,
             "step_large": 6,
             "max": 20,
+        }
+        self.session.constraints["explore_budget"] = {
+            "mcts_sims": 6,
+            "mcts_depth": 2,
+            "mcts_roots": 2,
+            "bo": 2,
+            "refine": 4,
         }
         self.session.save()
 
@@ -436,19 +458,19 @@ class TestPreference(unittest.TestCase):
             "wide": {
                 "fits": True,
                 "traits": {
-                    "spread": 0.8,
-                    "height_variance": 0.1,
-                    "footprint_likeness": 0.5,
-                    "street_edge": 0.2,
+                    "program_coherence": 0.8,
+                    "preference_alignment": 0.1,
+                    "performance_efficiency": 0.5,
+                    "robustness": 0.2,
                 },
             },
             "tall": {
                 "fits": True,
                 "traits": {
-                    "spread": 0.1,
-                    "height_variance": 0.9,
-                    "footprint_likeness": 0.5,
-                    "street_edge": 0.2,
+                    "program_coherence": 0.1,
+                    "preference_alignment": 0.9,
+                    "performance_efficiency": 0.5,
+                    "robustness": 0.2,
                 },
             },
         }
@@ -456,7 +478,7 @@ class TestPreference(unittest.TestCase):
             [{"a": "wide", "b": "tall", "winner": "a"}],
             schemes,
         )
-        self.assertGreater(weights["spread"], weights["height_variance"])
+        self.assertGreater(weights["program_coherence"], weights["preference_alignment"])
 
     def test_next_pair_skips_cells_that_broke_a_cap(self) -> None:
         archive = {
@@ -467,9 +489,10 @@ class TestPreference(unittest.TestCase):
                     "performance": {
                         "feasible": True,
                         "failed_checks": 0,
-                        "spread": 0.5,
-                        "height_variance": 0.1,
-                        "footprint_likeness": 0.8,
+                        "program_coherence": 0.5,
+                        "preference_alignment": 0.1,
+                        "performance_efficiency": 0.8,
+                        "robustness": 0.5,
                     },
                 },
                 "legal-2": {
@@ -478,9 +501,10 @@ class TestPreference(unittest.TestCase):
                     "performance": {
                         "feasible": True,
                         "failed_checks": 0,
-                        "spread": 0.2,
-                        "height_variance": 0.4,
-                        "footprint_likeness": 0.6,
+                        "program_coherence": 0.2,
+                        "preference_alignment": 0.4,
+                        "performance_efficiency": 0.6,
+                        "robustness": 0.5,
                     },
                 },
                 "over": {
@@ -489,7 +513,7 @@ class TestPreference(unittest.TestCase):
                     "performance": {
                         "feasible": False,
                         "failed_checks": 1,
-                        "spread": 0.9,
+                        "program_coherence": 0.9,
                     },
                 },
             }
@@ -500,6 +524,46 @@ class TestPreference(unittest.TestCase):
         self.assertIsNotNone(pair)
         self.assertEqual(set(pair[k] for k in ("a", "b")), {"legal-1", "legal-2"})
 
+    def test_next_pair_prefers_architecturally_different_legal_schemes(self) -> None:
+        traits = {
+            "program_coherence": 0.5,
+            "preference_alignment": 0.2,
+            "performance_efficiency": 0.5,
+            "robustness": 0.2,
+        }
+        schemes = [
+            {
+                "id": "same-a",
+                "fits": True,
+                "traits": dict(traits),
+                "entry": {
+                    "partition": "p-core",
+                    "strategy": {"T": {"kind": "independent"}, "G": {"envelope": "balanced", "loading": "double"}},
+                },
+            },
+            {
+                "id": "same-b",
+                "fits": True,
+                "traits": dict(traits),
+                "entry": {
+                    "partition": "p-core",
+                    "strategy": {"T": {"kind": "independent"}, "G": {"envelope": "compact", "loading": "double"}},
+                },
+            },
+            {
+                "id": "other-p",
+                "fits": True,
+                "traits": dict(traits),
+                "entry": {
+                    "partition": "p-split",
+                    "strategy": {"T": {"kind": "paired_bars"}, "G": {"envelope": "elongated", "loading": "single"}},
+                },
+            },
+        ]
+        pair = next_pair(schemes, {}, [])
+        self.assertIsNotNone(pair)
+        self.assertIn("other-p", {pair["a"], pair["b"]})
+
 
 class TestRefineAllocation(unittest.TestCase):
     def test_local_tries_keep_a_floor(self) -> None:
@@ -507,36 +571,36 @@ class TestRefineAllocation(unittest.TestCase):
             {
                 "cell": "p1",
                 "performance": {
-                    "spread": 1.0,
-                    "height_variance": 0.0,
-                    "footprint_likeness": 0.0,
-                    "street_edge": 0.0,
+                    "program_coherence": 1.0,
+                    "preference_alignment": 0.0,
+                    "performance_efficiency": 0.0,
+                    "robustness": 0.0,
                 },
             },
             {
                 "cell": "p2",
                 "performance": {
-                    "spread": 0.4,
-                    "height_variance": 0.0,
-                    "footprint_likeness": 0.0,
-                    "street_edge": 0.0,
+                    "program_coherence": 0.4,
+                    "preference_alignment": 0.0,
+                    "performance_efficiency": 0.0,
+                    "robustness": 0.0,
                 },
             },
             {
                 "cell": "p3",
                 "performance": {
-                    "spread": 0.0,
-                    "height_variance": 0.0,
-                    "footprint_likeness": 0.0,
-                    "street_edge": 0.0,
+                    "program_coherence": 0.0,
+                    "preference_alignment": 0.0,
+                    "performance_efficiency": 0.0,
+                    "robustness": 0.0,
                 },
             },
         ]
         weights = {
-            "spread": 5.0,
-            "height_variance": 0.0,
-            "footprint_likeness": 0.0,
-            "street_edge": 0.0,
+            "program_coherence": 5.0,
+            "preference_alignment": 0.0,
+            "performance_efficiency": 0.0,
+            "robustness": 0.0,
         }
         counts = allocate_local_tries(elites, 6, weights, floor=1)
         self.assertEqual(sum(counts.values()), 6)
@@ -548,27 +612,27 @@ class TestRefineAllocation(unittest.TestCase):
             {
                 "cell": "heavy",
                 "performance": {
-                    "spread": 1.0,
-                    "height_variance": 0.0,
-                    "footprint_likeness": 0.0,
-                    "street_edge": 0.0,
+                    "program_coherence": 1.0,
+                    "preference_alignment": 0.0,
+                    "performance_efficiency": 0.0,
+                    "robustness": 0.0,
                 },
             },
             {
                 "cell": "light",
                 "performance": {
-                    "spread": 0.0,
-                    "height_variance": 0.0,
-                    "footprint_likeness": 0.0,
-                    "street_edge": 0.0,
+                    "program_coherence": 0.0,
+                    "preference_alignment": 0.0,
+                    "performance_efficiency": 0.0,
+                    "robustness": 0.0,
                 },
             },
         ]
         weights = {
-            "spread": 80.0,
-            "height_variance": 0.0,
-            "footprint_likeness": 0.0,
-            "street_edge": 0.0,
+            "program_coherence": 80.0,
+            "preference_alignment": 0.0,
+            "performance_efficiency": 0.0,
+            "robustness": 0.0,
         }
         raw = [taste_weight(e, weights) for e in elites]
         self.assertLess(effective_sample_size(raw), 1.25)
@@ -587,10 +651,10 @@ class TestRefineAllocation(unittest.TestCase):
                     "cell": "heavy",
                     "fits_limitations": True,
                     "performance": {
-                        "spread": 1.0,
-                        "height_variance": 0.0,
-                        "footprint_likeness": 0.0,
-                        "street_edge": 0.0,
+                        "program_coherence": 1.0,
+                        "preference_alignment": 0.0,
+                        "performance_efficiency": 0.0,
+                        "robustness": 0.0,
                         "failed_checks": 0,
                     },
                 },
@@ -598,10 +662,10 @@ class TestRefineAllocation(unittest.TestCase):
                     "cell": "mid",
                     "fits_limitations": True,
                     "performance": {
-                        "spread": 0.6,
-                        "height_variance": 0.0,
-                        "footprint_likeness": 0.0,
-                        "street_edge": 0.0,
+                        "program_coherence": 0.6,
+                        "preference_alignment": 0.0,
+                        "performance_efficiency": 0.0,
+                        "robustness": 0.0,
                         "failed_checks": 0,
                     },
                 },
@@ -609,10 +673,10 @@ class TestRefineAllocation(unittest.TestCase):
                     "cell": "light",
                     "fits_limitations": True,
                     "performance": {
-                        "spread": 0.0,
-                        "height_variance": 0.0,
-                        "footprint_likeness": 0.0,
-                        "street_edge": 0.0,
+                        "program_coherence": 0.0,
+                        "preference_alignment": 0.0,
+                        "performance_efficiency": 0.0,
+                        "robustness": 0.0,
                         "failed_checks": 0,
                     },
                 },
@@ -620,17 +684,17 @@ class TestRefineAllocation(unittest.TestCase):
                     "cell": "over",
                     "fits_limitations": False,
                     "performance": {
-                        "spread": 0.9,
+                        "program_coherence": 0.9,
                         "failed_checks": 1,
                     },
                 },
             }
         }
         weights = {
-            "spread": 10.0,
-            "height_variance": 0.0,
-            "footprint_likeness": 0.0,
-            "street_edge": 0.0,
+            "program_coherence": 10.0,
+            "preference_alignment": 0.0,
+            "performance_efficiency": 0.0,
+            "robustness": 0.0,
         }
         kept = select_elites(archive, weights)
         ids = {e["cell"] for e in kept}
@@ -800,6 +864,13 @@ class TestTopology(unittest.TestCase):
             session = StudySession(
                 study_id="explore_phase7", program=program, config_path=str(CONFIG)
             )
+            session.constraints["explore_budget"] = {
+                "mcts_sims": 6,
+                "mcts_depth": 2,
+                "mcts_roots": 2,
+                "bo": 2,
+                "refine": 4,
+            }
             session.save()
             out = apply_brief(
                 session,
@@ -867,6 +938,9 @@ class TestMcts(unittest.TestCase):
         catalog = catalog_actions(session)
         self.assertTrue(any(a.get("op") == "COURTYARD" for a in catalog))
         self.assertFalse(any("width_ft" in a for a in catalog))
+        self.assertTrue(any(a.get("op") == "SET_WIDTH" and a.get("delta_ft") for a in catalog))
+        self.assertTrue(any(a.get("op") == "SET_ENVELOPE" for a in catalog))
+        self.assertTrue(any(a.get("op") == "SET_LOADING" for a in catalog))
         report = run_mcts(
             session,
             plan=[
@@ -917,6 +991,19 @@ class TestMcts(unittest.TestCase):
             session = StudySession(
                 study_id="explore_phase8", program=program, config_path=str(CONFIG)
             )
+            session.constraints["cover_budget"] = {
+                "start": 8,
+                "step_small": 4,
+                "step_large": 6,
+                "max": 20,
+            }
+            session.constraints["explore_budget"] = {
+                "mcts_sims": 6,
+                "mcts_depth": 2,
+                "mcts_roots": 2,
+                "bo": 2,
+                "refine": 4,
+            }
             session.save()
             out = apply_brief(
                 session,
@@ -1022,6 +1109,19 @@ class TestPlanner(unittest.TestCase):
             session = StudySession(
                 study_id="explore_phase4", program=program, config_path=str(CONFIG)
             )
+            session.constraints["cover_budget"] = {
+                "start": 8,
+                "step_small": 4,
+                "step_large": 6,
+                "max": 20,
+            }
+            session.constraints["explore_budget"] = {
+                "mcts_sims": 6,
+                "mcts_depth": 2,
+                "mcts_roots": 2,
+                "bo": 2,
+                "refine": 4,
+            }
             session.save()
             out = apply_brief(
                 session,
@@ -1076,7 +1176,12 @@ class TestExplainRobustness(unittest.TestCase):
         self.assertGreater(preference_distance(result, session), 0.0)
 
     def test_novelty_is_one_on_an_empty_archive(self) -> None:
-        vector = {"spread": 0.4, "height_variance": 0.1, "footprint_likeness": 0.8, "street_edge": 0.5}
+        vector = {
+            "program_coherence": 0.4,
+            "preference_alignment": 0.1,
+            "performance_efficiency": 0.8,
+            "robustness": 0.5,
+        }
         self.assertEqual(novelty_versus_archive(vector, None), 1.0)
         self.assertEqual(novelty_versus_archive(vector, {"cells": {}}), 1.0)
         clone_archive = {
@@ -1110,6 +1215,19 @@ class TestExplainRobustness(unittest.TestCase):
             session = StudySession(
                 study_id="explore_phase5", program=program, config_path=str(CONFIG)
             )
+            session.constraints["cover_budget"] = {
+                "start": 8,
+                "step_small": 4,
+                "step_large": 6,
+                "max": 20,
+            }
+            session.constraints["explore_budget"] = {
+                "mcts_sims": 6,
+                "mcts_depth": 2,
+                "mcts_roots": 2,
+                "bo": 2,
+                "refine": 4,
+            }
             session.save()
             apply_brief(
                 session,

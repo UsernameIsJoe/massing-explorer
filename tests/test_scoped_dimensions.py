@@ -52,10 +52,20 @@ class ScopedDimensionTests(unittest.TestCase):
             places=3,
         )
         self.assertEqual(parsed.constraints.get("length_limit_is_cap"), 1)
+        self.assertAlmostEqual(
+            parsed.constraints.get("max_edge_ft") or 0,
+            75 * 3.280839895,
+            places=3,
+        )
+        self.assertAlmostEqual(
+            parsed.constraints.get("max_building_width_ft") or 0,
+            75 * 3.280839895,
+            places=3,
+        )
         briefing = briefing_from_parsed(parsed)
         self.assertTrue(
             any(
-                c.get("lever") == "max_length"
+                c.get("lever") in {"max_length", "max_edge"}
                 and abs(float(c.get("value") or 0) - 75 * 3.280839895) < 0.5
                 for c in briefing["limitations"]
             )
@@ -124,6 +134,74 @@ class ScopedDimensionTests(unittest.TestCase):
         self.assertEqual(parsed.constraints["department_widths"]["CORE ACADEMIC"], 80.0)
         levers = {c["lever"] for c in briefing_from_parsed(parsed)["requirements"]}
         self.assertIn("exact_width", levers)
+
+    def test_length_max_meters_and_special_ed_width(self) -> None:
+        brief = (
+            "3 masses, max 3 floors. length max 40 meters. "
+            "gym and dining together and double height. "
+            "media prefer on ground floor. admin have to be on ground floor. "
+            "core academic and special ed width has to be 80 feet. "
+            "mass ratio prefer to be 4:7"
+        )
+        parsed = parse_brief(brief, self.names)
+        self.assertAlmostEqual(
+            parsed.constraints.get("max_edge_ft") or 0,
+            40 * 3.280839895,
+            places=3,
+        )
+        self.assertAlmostEqual(
+            parsed.constraints.get("max_building_width_ft") or 0,
+            40 * 3.280839895,
+            places=3,
+        )
+        widths = parsed.constraints.get("department_widths") or {}
+        self.assertEqual(widths.get("CORE ACADEMIC"), 80.0)
+        self.assertEqual(widths.get("SPECIAL EDUCATION"), 80.0)
+        briefing = briefing_from_parsed(parsed)
+        self.assertTrue(
+            any(c.get("lever") == "max_edge" for c in briefing["limitations"])
+        )
+        from massing_explorer.modality import find_brief_questions, stated_numbers
+
+        self.assertFalse(stated_numbers("gym and dining together and double height"))
+        qs, _ = find_brief_questions(brief, use_llm=False, department_names=self.names)
+        self.assertEqual(qs, [])
+
+    def test_targeted_length_max_is_all_edge_for_that_mass_only(self) -> None:
+        parsed = parse_brief(
+            "core academic should not be longer than 50 meters",
+            self.names,
+        )
+        edges = parsed.constraints.get("department_max_edge_ft") or {}
+        self.assertAlmostEqual(
+            float(edges.get("CORE ACADEMIC") or 0),
+            50 * 3.280839895,
+            places=3,
+        )
+        self.assertIsNone(parsed.constraints.get("max_edge_ft"))
+        self.assertIsNone(parsed.constraints.get("max_building_length_ft"))
+        briefing = briefing_from_parsed(parsed)
+        self.assertTrue(
+            any(
+                c.get("lever") == "max_edge"
+                and "CORE ACADEMIC" in (c.get("departments") or [])
+                for c in briefing["limitations"]
+            )
+        )
+
+    def test_academic_length_max_phrase(self) -> None:
+        parsed = parse_brief("academic length max 80 ft", self.names)
+        edges = parsed.constraints.get("department_max_edge_ft") or {}
+        self.assertAlmostEqual(float(edges.get("CORE ACADEMIC") or 0), 80.0, places=1)
+        self.assertIsNone(parsed.constraints.get("max_edge_ft"))
+
+    def test_global_length_max_is_not_hardcoded(self) -> None:
+        parsed = parse_brief("length max 55 meters", self.names)
+        self.assertAlmostEqual(
+            parsed.constraints.get("max_edge_ft") or 0,
+            55 * 3.280839895,
+            places=3,
+        )
 
 
 if __name__ == "__main__":

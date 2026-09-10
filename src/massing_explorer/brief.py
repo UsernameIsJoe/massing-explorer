@@ -203,11 +203,22 @@ def _to_sf(value: float, unit: str | None) -> float:
     return value
 
 
-def _first_length(patterns: list[str], text: str) -> float | None:
+def _first_length(
+    patterns: list[str],
+    text: str,
+    *,
+    skip_spans: list[tuple[int, int]] | None = None,
+) -> float | None:
     """Read a length. Meters are converted to feet. A bare number stays feet."""
+    spans = skip_spans or []
+
+    def _overlaps(start: int, end: int) -> bool:
+        return any(a <= start < b or a < end <= b or start <= a < end for a, b in spans)
+
     for pattern in patterns:
-        match = re.search(pattern, text, flags=re.I)
-        if match:
+        for match in re.finditer(pattern, text, flags=re.I):
+            if _overlaps(match.start(), match.end()):
+                continue
             after = text[match.end() : match.end() + 8].lstrip().lower()
             if after.startswith("%") or after.startswith("percent"):
                 continue
@@ -216,6 +227,22 @@ def _first_length(patterns: list[str], text: str) -> float | None:
             unit = match.group(2) if match.lastindex and match.lastindex >= 2 else None
             return _to_feet(_parse_num(match.group(1)), unit)
     return None
+
+
+def _scoped_length_max_spans(parsed: ParsedBrief, text: str) -> list[tuple[int, int]]:
+    """Spans already captured as a department-targeted length cap."""
+    spans: list[tuple[int, int]] = []
+    lowered = (text or "").lower()
+    for clause in parsed.dimensions:
+        if clause.get("lever") != "length" or not clause.get("departments"):
+            continue
+        snippet = str(clause.get("text") or "").strip()
+        if not snippet:
+            continue
+        start = lowered.find(snippet.lower())
+        if start >= 0:
+            spans.append((start, start + len(snippet)))
+    return spans
 
 
 def _first_area(patterns: list[str], text: str) -> float | None:
@@ -892,7 +919,7 @@ def _subject_departments(subject: str, names: list[str]) -> list[str]:
     subject = re.sub(r"\s+(?:the|its|their)$", "", subject, flags=re.I)
     if _BAR_NOUN.fullmatch(subject.strip()):
         return []
-    hits = _departments_mentioned(subject, names)
+    hits = _clause_departments(subject, names)
     if hits:
         return hits
     one = match_department(subject, names)
@@ -960,6 +987,21 @@ def _extract_scoped_dimensions(
             r"(?:at\s+|to\s+|of\s+)?"
             + _NUM + _LEN_UNIT + r"\s+"
             r"(wide|deep|long|tall)\b",
+        ),
+        # core academic should not be longer than 50 m / gym no longer than 80 ft
+        (
+            "dept_longer",
+            r"(?!each\b|every\b|any\b|all\b)"
+            r"([A-Za-z][A-Za-z0-9&/' \-]{0,32}?)"
+            r"(?=\s+(?:bar\s+|wing\s+|mass\s+)?"
+            r"(?:should\b|must\b|can\b|may\b|no\s+longer|not\s+be\s+longer|longer\s+than))"
+            r"\s+"
+            r"(?:bar\s+|wing\s+|mass\s+)?"
+            r"(?:should\s+|must\s+|can\s+|may\s+)?"
+            r"(?:not\s+be\s+|no\s+|not\s+)?"
+            r"(?:be\s+)?"
+            r"(?:longer\s+than|no\s+longer\s+than)\s*"
+            + _NUM + _LEN_UNIT,
         ),
         # bars / wings no wider than 60 ft; each mass should not be longer than 75 m
         (
@@ -1129,6 +1171,27 @@ def _extract_scoped_dimensions(
                     parsed,
                     lever=lever,
                     mode="exact",
+                    value_ft=_to_feet(_parse_num(num), unit),
+                    departments=depts,
+                    scope="department",
+                    text=match.group(0),
+                )
+            elif kind == "dept_longer":
+                subj = g[0]
+                if re.search(
+                    r"\b(?:each|every|any|all)\s+(?:mass|wing|bar|building)",
+                    subj,
+                    flags=re.I,
+                ) or re.search(r"\b(?:stories?|floors?|than|more)\b", subj, flags=re.I):
+                    continue
+                depts = _subject_departments(subj, names)
+                if not depts:
+                    continue
+                num, unit = g[1], g[2]
+                _append_dimension(
+                    parsed,
+                    lever="length",
+                    mode="max",
                     value_ft=_to_feet(_parse_num(num), unit),
                     departments=depts,
                     scope="department",
@@ -1333,19 +1396,98 @@ def _extract_scoped_dimensions(
             parsed.constraints["max_building_width_ft"] = float(clause["value"])
     if dept_widths:
         parsed.constraints["department_widths"] = dept_widths  # type: ignore[assignment]
+    dept_edges: dict[str, float] = {}
     for clause in parsed.dimensions:
-        if (
-            clause.get("lever") == "length"
-            and clause.get("mode") == "max"
-            and clause.get("scope") == "building"
+        if clause.get("lever") != "length" or clause.get("mode") != "max":
+            continue
+        value = float(clause["value"])
+        depts = clause.get("departments") or []
+        if depts:
+            for dept in depts:
+                dept_edges[str(dept)] = value
+        elif (
+            clause.get("scope") == "building"
             and "max_building_length_ft" not in parsed.constraints
         ):
-            parsed.constraints["max_building_length_ft"] = float(clause["value"])
-            parsed.constraints["length_limit_is_cap"] = 1
-            parsed.notes.append(
-                f"max building length {float(clause['value']):g} ft (cap, not a target)"
-            )
-            break
+            _stamp_all_edge_cap(parsed, value)
+    if dept_edges:
+        parsed.constraints["department_max_edge_ft"] = dept_edges  # type: ignore[assignment]
+
+
+def _stamp_all_edge_cap(parsed: ParsedBrief, value_ft: float, *, note: bool = True) -> None:
+    """All-masses length limitation: every plan edge ≤ value, not only the short side."""
+    cap = round(float(value_ft), 4)
+    existing_l = parsed.constraints.get("max_building_length_ft")
+    existing_w = parsed.constraints.get("max_building_width_ft")
+    if existing_l is not None:
+        cap = min(cap, float(existing_l))
+    parsed.constraints["max_building_length_ft"] = cap
+    parsed.constraints["max_edge_ft"] = cap
+    parsed.constraints["length_limit_is_cap"] = 1
+    if existing_w is None:
+        parsed.constraints["max_building_width_ft"] = cap
+    else:
+        parsed.constraints["max_building_width_ft"] = min(float(existing_w), cap)
+    if note:
+        parsed.notes.append(
+            f"max mass edge {cap:g} ft (every side of every mass)"
+        )
+
+
+def _stamp_all_edge_floor(parsed: ParsedBrief, value_ft: float, *, note: bool = True) -> None:
+    """All-masses length floor: every plan edge ≥ value (pairs with max_edge)."""
+    floor = round(float(value_ft), 4)
+    existing = parsed.constraints.get("min_edge_ft")
+    if existing is not None:
+        floor = max(floor, float(existing))
+    parsed.constraints["min_edge_ft"] = floor
+    parsed.constraints["min_building_length_ft"] = floor
+    if note:
+        parsed.notes.append(
+            f"min mass edge {floor:g} ft (every side of every mass)"
+        )
+
+
+def _extract_min_edge_length(parsed: ParsedBrief, raw: str) -> None:
+    """length min / max-and-min / between — same all-edge sense as max length."""
+    if parsed.constraints.get("min_edge_ft") is not None:
+        return
+    compound = re.search(
+        rf"lengths?\s+max(?:imum)?(?:\s+of|\s+is|=|:)?\s*{_NUM_OR_WORD}{_LEN_UNIT}"
+        rf"\s+and\s+min(?:imum)?(?:\s+of|\s+is|=|:)?\s*{_NUM_OR_WORD}{_LEN_UNIT}",
+        raw,
+        flags=re.I,
+    )
+    if compound:
+        _stamp_all_edge_floor(
+            parsed, _to_feet(_parse_num(compound.group(3)), compound.group(4))
+        )
+        return
+    between = re.search(
+        rf"lengths?\s+between\s*{_NUM_OR_WORD}{_LEN_UNIT}\s+and\s*{_NUM_OR_WORD}{_LEN_UNIT}",
+        raw,
+        flags=re.I,
+    )
+    if between:
+        a = _to_feet(_parse_num(between.group(1)), between.group(2) or between.group(4))
+        b = _to_feet(_parse_num(between.group(3)), between.group(4))
+        lo, hi = (a, b) if a <= b else (b, a)
+        _stamp_all_edge_floor(parsed, lo)
+        if parsed.constraints.get("max_edge_ft") is None:
+            _stamp_all_edge_cap(parsed, hi)
+        return
+    min_only = _first_length(
+        [
+            rf"lengths?\s+min(?:imum)?(?:\s+of|\s+is|=|:)?\s*{_NUM_OR_WORD}{_LEN_UNIT}",
+            rf"min(?:imum)?\s+(?:building\s+)?lengths?(?:\s+of|\s+is|=|:)?\s*{_NUM_OR_WORD}{_LEN_UNIT}",
+            rf"(?:each|every|any)\s+(?:mass|wing|building)\s+(?:at\s+least|no\s+shorter\s+than)\s*{_NUM_OR_WORD}{_LEN_UNIT}",
+            rf"(?:at\s+least|no\s+shorter\s+than|no\s+less\s+than)\s*{_NUM_OR_WORD}{_LEN_UNIT}\s*(?:long|in\s+length)",
+            rf"(?:each|every|any)\s+(?:mass|wing|building)\s+(?:should\s+be\s+)?at\s+least\s*{_NUM_OR_WORD}{_LEN_UNIT}\s+long",
+        ],
+        raw,
+    )
+    if min_only is not None:
+        _stamp_all_edge_floor(parsed, min_only)
 
 
 def parse_brief(text: str, department_names: list[str]) -> ParsedBrief:
@@ -1425,6 +1567,9 @@ def parse_brief(text: str, department_names: list[str]) -> ParsedBrief:
             rf"no\s+(?:wing|building|mass)\s+(?:over|longer than)\s*{_NUM_OR_WORD}{_LEN_UNIT}",
             rf"(?:max(?:imum)?|length)\s+limit\s*(?:is|of|=|:)?\s*{_NUM_OR_WORD}{_LEN_UNIT}",
             rf"max(?:imum)?\s+(?:building\s+)?length\s*(?:is|of|=|:)?\s*{_NUM_OR_WORD}{_LEN_UNIT}",
+            # "length max 40 meters" / "length maximum of 40 m"
+            rf"lengths?\s+max(?:imum)?(?:\s+of|\s+is|=|:)?\s*{_NUM_OR_WORD}{_LEN_UNIT}",
+            rf"(?:building\s+)?lengths?\s+(?:at\s+most|under|below|no\s+more\s+than)\s*{_NUM_OR_WORD}{_LEN_UNIT}",
             # "each mass should not be longer than 75 meters"
             rf"(?:each|every|any)\s+(?:mass|wing|building|bar|volume|block|piece)\s+"
             rf"(?:should|must)\s+not\s+be\s+longer\s+than\s*{_NUM_OR_WORD}{_LEN_UNIT}",
@@ -1476,6 +1621,7 @@ def parse_brief(text: str, department_names: list[str]) -> ParsedBrief:
             rf"(?:may|can)\s+be\s+longer\s+than\s*{_NUM_OR_WORD}{_LEN_UNIT}",
         ],
         raw,
+        skip_spans=_scoped_length_max_spans(parsed, raw),
     )
     # "N stories or M ft in length" — if we captured the story count as length, fix it.
     story_or_len = re.search(
@@ -1492,10 +1638,9 @@ def parse_brief(text: str, department_names: list[str]) -> ParsedBrief:
 
     if per_len is not None:
         already = "max_building_length_ft" in parsed.constraints
-        parsed.constraints["max_building_length_ft"] = round(per_len, 4)
-        parsed.constraints["length_limit_is_cap"] = 1
-        if not already:
-            parsed.notes.append(f"max building length {per_len:g} ft (cap, not a target)")
+        _stamp_all_edge_cap(parsed, per_len, note=not already)
+
+    _extract_min_edge_length(parsed, raw)
 
     width = _first_length(
         [
@@ -1530,7 +1675,7 @@ def parse_brief(text: str, department_names: list[str]) -> ParsedBrief:
                 continue
             width = _to_feet(_parse_num(match.group(1)), match.group(2))
             break
-    if width is not None and "max_building_width_ft" not in parsed.constraints:
+    if width is not None:
         # Do not treat a department exact width as a global building max.
         if not any(
             c.get("lever") == "width"
@@ -1538,16 +1683,21 @@ def parse_brief(text: str, department_names: list[str]) -> ParsedBrief:
             and abs(float(c["value"]) - width) < 0.01
             for c in parsed.dimensions
         ):
-            parsed.constraints["max_building_width_ft"] = round(width, 4)
-            parsed.notes.append(f"max width {width:g} ft")
-            _append_dimension(
-                parsed,
-                lever="width",
-                mode="max",
-                value_ft=width,
-                scope="building",
-                text=f"max width {width:g} ft",
-            )
+            rounded = round(width, 4)
+            existing = parsed.constraints.get("max_building_width_ft")
+            if existing is None:
+                parsed.constraints["max_building_width_ft"] = rounded
+                parsed.notes.append(f"max width {width:g} ft")
+                _append_dimension(
+                    parsed,
+                    lever="width",
+                    mode="max",
+                    value_ft=width,
+                    scope="building",
+                    text=f"max width {width:g} ft",
+                )
+            else:
+                parsed.constraints["max_building_width_ft"] = min(float(existing), rounded)
 
     height = _first_length(
         [
@@ -1584,7 +1734,7 @@ def parse_brief(text: str, department_names: list[str]) -> ParsedBrief:
             window = raw[max(0, word_h.start() - 48) : word_h.end() + 24].lower()
             cue = word_h.group(0).lower()
             lengthish = bool(re.search(r"\blength|\blonger|\blong\b|\bwidth|\bwider\b", window))
-            heightish = bool(re.search(r"\bheight|\btall(?:er)?\b|\btower\b", window))
+            heightish = bool(re.search(r"\bheight|\btall(?:er|est)?\b|\btower\b", window))
             under_bare = cue.startswith("under") or cue.startswith("below")
             # "each length … under forty meters" is length, not height.
             if lengthish and not heightish:
@@ -1624,9 +1774,7 @@ def parse_brief(text: str, department_names: list[str]) -> ParsedBrief:
         raw,
     )
     if shorter is not None and "max_building_length_ft" not in parsed.constraints:
-        parsed.constraints["max_building_length_ft"] = round(shorter, 4)
-        parsed.constraints["length_limit_is_cap"] = 1
-        parsed.notes.append(f"length shorter than {shorter:g} ft (cap, not a target)")
+        _stamp_all_edge_cap(parsed, shorter)
 
     preferred = _first_length(
         [
@@ -2078,7 +2226,29 @@ _STOP = {
     "should", "shall", "must", "need", "have", "to", "stay", "remain", "go",
     "be", "sit", "keep", "put", "place", "together", "with", "each", "other",
     "in", "the", "same", "one", "a", "an", "and", "nd", "or", "of", "hsould",
+    "min", "max", "minimum", "maximum", "length", "lengths", "width", "widths",
+    "height", "heights", "depth", "meter", "meters", "metre", "metres",
+    "foot", "feet", "ft", "stories", "floors", "levels", "mass", "masses",
+    "double", "prefer", "preferred", "ratio", "long", "wide", "tall",
 }
+
+
+def _phrase_fits_department(phrase: str, hit: str) -> bool:
+    """True when every token in phrase is justified by the matched department."""
+    from .group import _norm
+
+    name_tokens = _norm(hit).split()
+    for tok in _norm(phrase).split():
+        if tok in name_tokens:
+            continue
+        if any(nt.startswith(tok) and len(tok) >= 2 for nt in name_tokens):
+            continue
+        if any(tok.startswith(nt) and len(nt) >= 3 for nt in name_tokens):
+            continue
+        if match_department(tok, [hit]) == hit:
+            continue
+        return False
+    return True
 
 
 def _departments_mentioned(text: str, names: list[str]) -> list[str]:
@@ -2097,7 +2267,7 @@ def _departments_mentioned(text: str, names: list[str]) -> list[str]:
                 continue
             phrase = " ".join(words[i : i + span])
             hit = match_department(phrase, names)
-            if hit and hit not in used:
+            if hit and hit not in used and _phrase_fits_department(phrase, hit):
                 matched = hit
                 span_used = span
                 break
@@ -2162,24 +2332,6 @@ def _extract_pairs(
                     seen.add(key)
                     pairs.append((a, b))
     return pairs
-
-
-def _extract_double_height_with_together(
-    parsed: ParsedBrief, text: str, names: list[str]
-) -> None:
-    """Gym and dining together and double height(s) → both volumes are 2-storey."""
-    for match in re.finditer(r"double[\s-]?heights?", text, flags=re.I):
-        window = text[max(0, match.start() - 100) : match.end()]
-        hits = _departments_mentioned(window, names)
-        if len(hits) < 2 and re.search(r"together|same\s+(?:mass|building|wing)", window, flags=re.I):
-            for a, b in parsed.keep_together:
-                hits = [a, b]
-                break
-        if len(hits) < 1:
-            continue
-        for dept in hits:
-            if dept not in parsed.double_height_departments:
-                parsed.double_height_departments.append(dept)
 
 
 def _extract_cluster_and_plaza_rules(
@@ -2340,24 +2492,20 @@ def _extract_double_height_with_together(
     parsed: ParsedBrief, text: str, names: list[str]
 ) -> None:
     """Gym and dining together and double height(s) → both volumes are 2-storey."""
-    for match in re.finditer(
-        r"together(?:\s+and)?\s+double[\s-]?heights?"
-        r"|double[\s-]?heights?(?:\s+and)?\s+together"
-        r"|(?:and\s+)?double[\s-]?heights?",
-        text,
-        flags=re.I,
-    ):
-        window = text[max(0, match.start() - 100) : match.end()]
-        if not re.search(r"together|same\s+(?:mass|building|wing)", window, flags=re.I):
-            # Bare "double heights" with no together cue: still try local depts.
-            if not re.search(r"double[\s-]?heights?", match.group(0), flags=re.I):
-                continue
-        hits = _departments_mentioned(window, names)
-        if len(hits) < 2 and parsed.keep_together:
-            # Prefer the keep-together pair nearest this cue.
+    for match in re.finditer(r"double[\s-]?heights?", text, flags=re.I):
+        # Sentence-local only — a 100-char window before "double height" can
+        # pull unrelated tokens from a prior length clause.
+        clause = _sentence_at(text, match.start(), match.end())
+        together = bool(
+            re.search(r"together|same\s+(?:mass|building|wing)", clause, flags=re.I)
+        )
+        hits = _clause_departments(clause, names)
+        if len(hits) < 2 and together and parsed.keep_together:
             for a, b in parsed.keep_together:
                 hits = [a, b]
                 break
+        if not hits:
+            continue
         for dept in hits:
             if dept not in parsed.double_height_departments:
                 parsed.double_height_departments.append(dept)
@@ -2595,11 +2743,18 @@ def _apply_counted_masses(
                 phrase,
                 flags=re.I,
             ):
+                local = f"{phrase} {match.group(0)}"
                 for dept in _clause_departments(phrase, names):
-                    _pin(dept, clause)
-        # Also try full clause departments for "Art and Music must be on…"
-        for dept in _clause_departments(clause, names):
-            _pin(dept, clause)
+                    _pin(dept, local)
+        # Compound sentences like "Media prefer ground, admin must ground"
+        # must score each comma segment on its own wording — do not let
+        # "must" on admin overwrite media's prefer.
+        for segment in re.split(r"\s*,\s*", clause):
+            seg = segment.strip()
+            if not seg:
+                continue
+            for dept in _clause_departments(seg, names):
+                _pin(dept, seg)
     # "art should stay at grade" / "art should stay on the first floor"
     for match in re.finditer(
         r"([A-Za-z][A-Za-z0-9&/' \-]{0,40}?)\s+"
@@ -3157,13 +3312,33 @@ def briefing_from_parsed(parsed: ParsedBrief) -> dict[str, list[dict[str, Any]]]
                 "value": parsed.constraints["preferred_mass_count"],
             }
         )
-    if parsed.constraints.get("length_limit_is_cap") and parsed.constraints.get("max_building_length_ft"):
+    if parsed.constraints.get("max_edge_ft"):
+        limitations.append(
+            {
+                "kind": "limitation",
+                "lever": "max_edge",
+                "text": "every mass edge",
+                "value": parsed.constraints["max_edge_ft"],
+                "unit": "ft",
+            }
+        )
+    elif parsed.constraints.get("length_limit_is_cap") and parsed.constraints.get("max_building_length_ft"):
         limitations.append(
             {
                 "kind": "limitation",
                 "lever": "max_length",
                 "text": "",
                 "value": parsed.constraints["max_building_length_ft"],
+                "unit": "ft",
+            }
+        )
+    if parsed.constraints.get("min_edge_ft"):
+        limitations.append(
+            {
+                "kind": "limitation",
+                "lever": "min_edge",
+                "text": "every mass edge",
+                "value": parsed.constraints["min_edge_ft"],
                 "unit": "ft",
             }
         )
@@ -3178,15 +3353,18 @@ def briefing_from_parsed(parsed: ParsedBrief) -> dict[str, list[dict[str, Any]]]
             }
         )
     if parsed.constraints.get("max_building_width_ft"):
-        limitations.append(
-            {
-                "kind": "limitation",
-                "lever": "max_width",
-                "text": "",
-                "value": parsed.constraints["max_building_width_ft"],
-                "unit": "ft",
-            }
-        )
+        edge = parsed.constraints.get("max_edge_ft")
+        width_cap = float(parsed.constraints["max_building_width_ft"])
+        if edge is None or abs(width_cap - float(edge)) > 0.05:
+            limitations.append(
+                {
+                    "kind": "limitation",
+                    "lever": "max_width",
+                    "text": "",
+                    "value": width_cap,
+                    "unit": "ft",
+                }
+            )
     if parsed.constraints.get("max_height_ft"):
         limitations.append(
             {
@@ -3460,12 +3638,26 @@ def briefing_from_parsed(parsed: ParsedBrief) -> dict[str, list[dict[str, Any]]]
             entry["lever"] = f"min_{lever}"
         else:
             entry["lever"] = f"preferred_{lever}"
+        if lever == "length" and mode == "max":
+            entry["lever"] = "max_edge"
+            entry["text"] = (
+                "every edge of this mass"
+                if entry.get("departments")
+                else "every mass edge"
+            )
         # Global max_width already emitted from constraints — skip duplicate.
         if (
             entry["lever"] == "max_width"
             and not entry["departments"]
             and parsed.constraints.get("max_building_width_ft") is not None
             and abs(float(entry["value"]) - float(parsed.constraints["max_building_width_ft"])) < 0.01
+        ):
+            continue
+        if (
+            entry["lever"] == "max_edge"
+            and not entry["departments"]
+            and parsed.constraints.get("max_edge_ft") is not None
+            and abs(float(entry["value"] or 0) - float(parsed.constraints["max_edge_ft"])) < 0.05
         ):
             continue
         bucket = {
@@ -3482,23 +3674,40 @@ def briefing_from_parsed(parsed: ParsedBrief) -> dict[str, list[dict[str, Any]]]
 
 
 def _apply_dimension_clauses(session: StudySession, parsed: ParsedBrief) -> None:
-    """Map scoped width/depth clauses onto mass constraints after grouping."""
+    """Map scoped width/depth/length clauses onto mass constraints after grouping."""
     from .tools import set_constraint
 
     dept_widths: dict[str, float] = {}
     raw = parsed.constraints.get("department_widths")
     if isinstance(raw, dict):
         dept_widths.update({str(k): float(v) for k, v in raw.items()})
+    dept_edges: dict[str, float] = {}
+    raw_edges = parsed.constraints.get("department_max_edge_ft")
+    if isinstance(raw_edges, dict):
+        dept_edges.update({str(k): float(v) for k, v in raw_edges.items()})
 
     for clause in parsed.dimensions:
         lever = str(clause.get("lever") or "")
         mode = str(clause.get("mode") or "exact")
         depts = [str(d) for d in (clause.get("departments") or [])]
-        if lever != "width" or not depts:
+        if lever not in {"width", "length"} or not depts:
             continue
         try:
             value = float(clause["value"])
         except (TypeError, ValueError, KeyError):
+            continue
+        if lever == "length" and mode == "max":
+            for dept in depts:
+                dept_edges[dept] = value
+            for mass in session.masses:
+                if not any(d in mass.departments for d in depts):
+                    continue
+                key = f"{mass.id}_max_edge_ft"
+                existing = session.constraints.get(key)
+                cap = value if existing is None else min(float(existing), value)
+                set_constraint(session, key, cap)
+            continue
+        if lever != "width":
             continue
         for dept in depts:
             dept_widths[dept] = value
@@ -3518,8 +3727,10 @@ def _apply_dimension_clauses(session: StudySession, parsed: ParsedBrief) -> None
 
     if dept_widths:
         session.constraints["department_widths"] = dept_widths
-        if hasattr(session, "save"):
-            session.save()
+    if dept_edges:
+        session.constraints["department_max_edge_ft"] = dept_edges
+    if (dept_widths or dept_edges) and hasattr(session, "save"):
+        session.save()
 
 
 def apply_classified_clauses(parsed: ParsedBrief, reading: Any) -> dict[str, list[dict[str, Any]]]:
@@ -3576,10 +3787,25 @@ def apply_classified_clauses(parsed: ParsedBrief, reading: Any) -> dict[str, lis
                     widths[dept] = float(value)
                 parsed.constraints["department_widths"] = widths
         elif kind == "limitation":
-            if lever == "max_length" and value and "max_building_length_ft" not in parsed.constraints:
-                parsed.constraints["max_building_length_ft"] = float(value)
-                parsed.constraints["length_limit_is_cap"] = 1
-                parsed.pair_length_ft = None
+            if lever in {"max_length", "max_edge"} and value:
+                if depts:
+                    _append_dimension(
+                        parsed,
+                        lever="length",
+                        mode="max",
+                        value_ft=float(value),
+                        departments=depts,
+                        scope="department",
+                        text=str(clause.get("text") or ""),
+                    )
+                    edges = dict(parsed.constraints.get("department_max_edge_ft") or {})
+                    for dept in depts:
+                        edges[dept] = float(value)
+                    parsed.constraints["department_max_edge_ft"] = edges
+                    parsed.pair_length_ft = None
+                elif "max_building_length_ft" not in parsed.constraints:
+                    _stamp_all_edge_cap(parsed, float(value), note=False)
+                    parsed.pair_length_ft = None
             elif lever == "max_height" and value and parsed.max_stories is None:
                 parsed.max_stories = max(1, int(value))
             elif lever in {"site_length", "max_total_length"} and value:

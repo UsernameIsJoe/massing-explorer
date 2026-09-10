@@ -107,6 +107,22 @@ HTML = r"""<!DOCTYPE html>
     color: var(--faint);
     margin-bottom: 8px;
   }
+  .drop-wrap { position: relative; }
+  .file-clear {
+    margin-top: 8px;
+    width: 100%;
+    border: 1px solid var(--line-strong);
+    background: transparent;
+    color: var(--muted);
+    padding: 8px 12px;
+    font-family: inherit;
+    font-size: 10px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+  .file-clear:hover { color: var(--bad); border-color: var(--bad); }
+  .file-clear[hidden] { display: none; }
   .drop {
     border: 1px dashed var(--line-strong);
     padding: 22px 16px;
@@ -382,15 +398,41 @@ HTML = r"""<!DOCTYPE html>
   }
   .hud {
     position: absolute;
-    left: 24px;
-    bottom: 24px;
-    right: 24px;
+    left: 0; right: 0; bottom: 0;
     display: flex;
     justify-content: space-between;
     align-items: flex-end;
-    gap: 16px;
+    gap: 24px;
+    padding: 18px 22px;
+    background: linear-gradient(transparent, rgba(7,7,7,0.85));
     pointer-events: none;
-    z-index: 2;
+    z-index: 6;
+  }
+  .unit-toggle {
+    pointer-events: auto;
+    display: flex;
+    gap: 0;
+    border: 1px solid var(--line-strong);
+    width: max-content;
+    margin-top: 4px;
+  }
+  .hud .unit-toggle {
+    margin-bottom: 8px;
+  }
+  .unit-toggle button {
+    background: transparent;
+    border: none;
+    color: var(--faint);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    padding: 7px 14px;
+    cursor: pointer;
+  }
+  .unit-toggle button.active {
+    color: #0a0a0a;
+    background: var(--accent);
   }
   .hud .meta {
     font-family: "JetBrains Mono", monospace;
@@ -593,12 +635,18 @@ HTML = r"""<!DOCTYPE html>
     border-top: 1px solid var(--line);
     padding: 14px 0 10px;
   }
-  .modal-q .clause {
-    color: var(--text);
+  .modal-q textarea.clause-edit {
+    width: 100%;
+    min-height: 64px;
+    margin: 0 0 10px;
     font-family: "JetBrains Mono", monospace;
     font-size: 12px;
     line-height: 1.45;
-    margin-bottom: 10px;
+    color: var(--text);
+    background: #0c0c0c;
+    border: 1px solid var(--line-strong);
+    padding: 8px 10px;
+    resize: vertical;
   }
   .modal-q .hint {
     color: var(--faint);
@@ -665,9 +713,12 @@ HTML = r"""<!DOCTYPE html>
 
     <div>
       <label>Program</label>
-      <div class="drop" id="drop">
-        <div class="name" id="fileName">Drop Excel / CSV</div>
-        <div class="hint">.xlsx · .xls · .csv</div>
+      <div class="drop-wrap">
+        <div class="drop" id="drop">
+          <div class="name" id="fileName">Drop Excel / CSV</div>
+          <div class="hint">.xlsx · .xls · .csv</div>
+        </div>
+        <button type="button" class="file-clear" id="fileClear" hidden>Remove file</button>
       </div>
       <input type="file" id="file" accept=".xlsx,.xls,.csv" hidden />
     </div>
@@ -695,7 +746,13 @@ HTML = r"""<!DOCTYPE html>
       <div class="legend" id="legend"></div>
       <div class="inspect" id="inspect"></div>
       <div class="hud">
-        <div class="meta" id="meta"></div>
+        <div>
+          <div class="unit-toggle" data-unit-toggle>
+            <button type="button" data-unit="ft" class="active">ft</button>
+            <button type="button" data-unit="m">m</button>
+          </div>
+          <div class="meta" id="meta"></div>
+        </div>
         <div class="mass-list" id="massList"></div>
       </div>
     </div>
@@ -716,9 +773,9 @@ HTML = r"""<!DOCTYPE html>
     <div class="modal" role="dialog" aria-labelledby="modalityTitle">
       <h2 id="modalityTitle">Classify wording</h2>
       <p class="lead">
-        These clauses use wording we have not learned yet. Pick requirement,
-        limitation, or preference — numbers are values only. Your choice is
-        remembered across projects.
+        These clauses use wording we have not learned yet. Fix any typos
+        in the box — we remember the corrected line, not the misspelling.
+        Then pick requirement, limitation, or preference.
       </p>
       <div id="modalityQuestions"></div>
       <div class="modal-actions">
@@ -743,6 +800,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 const drop = document.getElementById("drop");
 const fileInput = document.getElementById("file");
 const fileName = document.getElementById("fileName");
+const fileClear = document.getElementById("fileClear");
 const brief = document.getElementById("brief");
 const explore = document.getElementById("explore");
 const go = document.getElementById("go");
@@ -757,6 +815,8 @@ const processTabs = document.getElementById("processTabs");
 const processBody = document.getElementById("processBody");
 
 let hasFile = false;
+let displayUnit = (localStorage.getItem("massing_unit") === "m") ? "m" : "ft";
+const FT_TO_M = 0.3048;
 let lastTransparency = null;
 let lastMesh = null;
 let activeTab = "interpreted";
@@ -778,8 +838,8 @@ function openModalityModal(questions) {
   if (title) title.textContent = unresolved ? "Need a reading" : "Classify wording";
   if (lead) {
     lead.textContent = unresolved
-      ? "Every number in these clauses (digits or spelled) must land on a lever. Confirm requirement / limitation / preference so we can interpret and remember — nothing should be ignored."
-      : "These clauses use wording we have not learned yet. Pick requirement, limitation, or preference — numbers are values only. Your choice is remembered across projects.";
+      ? "Every number in these clauses must land on a lever. Fix typos in the box, then confirm requirement / limitation / preference. We remember the corrected wording."
+      : "Fix any typos in the box, then pick requirement, limitation, or preference. We remember the corrected line, not the misspelling.";
   }
   modalityQuestions.innerHTML = pendingModality.map((q, i) => {
     const sug = q.suggested ? ` · model lean: ${q.suggested} (${Math.round((q.confidence||0)*100)}%)` : "";
@@ -787,7 +847,7 @@ function openModalityModal(questions) {
     const why = q.rationale ? ` — ${q.rationale}` : "";
     const pre = q.suggested || "";
     return `<div class="modal-q" data-idx="${i}">
-      <div class="clause">${esc(q.text)}</div>
+      <textarea class="clause-edit" aria-label="Corrected clause">${esc(q.text)}</textarea>
       <div class="hint">${esc((q.source || "unknown") + sug + unp + why)}</div>
       <div class="choices">
         <label><input type="radio" name="mod${i}" value="requirement" ${pre==="requirement"?"checked":""}/> Requirement</label>
@@ -809,16 +869,30 @@ function collectModalityAnswers() {
   if (!pendingModality) return [];
   return pendingModality.map((q, i) => {
     const picked = modalityQuestions.querySelector(`input[name="mod${i}"]:checked`);
+    const edited = (modalityQuestions.querySelector(`.modal-q[data-idx="${i}"] textarea.clause-edit`)?.value || q.text || "").trim();
     return {
       text: q.text,
+      corrected: edited,
       kind: picked ? picked.value : (q.suggested || null),
       cue: q.cue || "",
+      reason: q.reason || "modality",
     };
   }).filter(a => a.kind);
 }
 
+function patchBriefFromAnswers(answers) {
+  let text = brief.value;
+  for (const a of answers || []) {
+    if (a.text && a.corrected && a.text !== a.corrected && text.includes(a.text)) {
+      text = text.replace(a.text, a.corrected);
+    }
+  }
+  brief.value = text;
+}
+
 modalityApply.addEventListener("click", async () => {
   const answers = collectModalityAnswers();
+  patchBriefFromAnswers(answers);
   closeModalityModal();
   await runGenerate(answers, false);
 });
@@ -859,9 +933,7 @@ async function upload(file) {
     setStatus(data.error || "Upload failed", "bad");
     return;
   }
-  hasFile = true;
-  fileName.textContent = data.name;
-  setStatus(data.departments + " departments · " + data.rooms + " rooms", "ok");
+  setFileLoaded(true, data.name, data.departments + " departments · " + data.rooms + " rooms");
 }
 
 go.addEventListener("click", async () => {
@@ -874,7 +946,7 @@ go.addEventListener("click", async () => {
 async function runGenerate(modalityAnswers, skipModalityAsk) {
   const text = brief.value.trim();
   go.disabled = true;
-  setStatus(skipModalityAsk ? "Exploring archive…" : "Reading brief…");
+  setStatus(skipModalityAsk ? "COVER sampling…" : (modalityAnswers?.length ? "Applying your reading, then COVER sampling…" : "Reading brief, then COVER sampling…"));
   try {
     const res = await fetch("/api/generate", {
       method: "POST",
@@ -894,6 +966,7 @@ async function runGenerate(modalityAnswers, skipModalityAsk) {
     }
     if (!data.ok) {
       setStatus(data.error || "Generate failed", "bad");
+      if (/upload a program/i.test(data.error || "")) setFileLoaded(false);
       return;
     }
     renderMesh(data.mesh);
@@ -917,6 +990,61 @@ async function runGenerate(modalityAnswers, skipModalityAsk) {
   }
 }
 
+function fmtLen(ft, digits) {
+  if (ft == null || Number.isNaN(Number(ft))) return "—";
+  const n = Number(ft);
+  if (displayUnit === "m") return (n * FT_TO_M).toFixed(digits == null ? 1 : digits) + " m";
+  return n.toFixed(digits == null ? 0 : digits) + " ft";
+}
+function fmtArea(sf, digits) {
+  if (sf == null || Number.isNaN(Number(sf))) return "—";
+  const n = Number(sf);
+  if (displayUnit === "m") return (n * FT_TO_M * FT_TO_M).toFixed(digits == null ? 0 : digits) + " m²";
+  return n.toFixed(digits == null ? 0 : digits) + " sf";
+}
+function syncUnitToggle() {
+  document.querySelectorAll("[data-unit-toggle] button").forEach(btn => {
+    btn.classList.toggle("active", btn.dataset.unit === displayUnit);
+  });
+}
+function applyDisplayUnit(unit) {
+  displayUnit = unit === "m" ? "m" : "ft";
+  localStorage.setItem("massing_unit", displayUnit);
+  syncUnitToggle();
+  if (lastMesh) updateHud(lastMesh);
+  if (selectedBoxId && lastMesh) {
+    const box = (lastMesh.boxes || []).find(b => b.id === selectedBoxId);
+    if (box) showInspect(box);
+  }
+  renderProcess(lastTransparency);
+}
+
+document.querySelectorAll("[data-unit-toggle]").forEach(el => {
+  el.addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-unit]");
+    if (btn) applyDisplayUnit(btn.dataset.unit);
+  });
+});
+syncUnitToggle();
+
+function setFileLoaded(on, name, detail) {
+  hasFile = !!on;
+  fileName.textContent = on ? (name || "Program loaded") : "Drop Excel / CSV";
+  if (fileClear) fileClear.hidden = !on;
+  if (fileInput && !on) fileInput.value = "";
+  if (detail) setStatus(detail, "ok");
+}
+
+fileClear?.addEventListener("click", async (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  try {
+    await fetch("/api/clear_program", { method: "POST" });
+  } catch (_) {}
+  setFileLoaded(false);
+  setStatus("Program file removed.", "ok");
+});
+
 function setStatus(text, kind) {
   status.textContent = text;
   status.className = "status" + (kind ? " " + kind : "");
@@ -929,15 +1057,18 @@ function updateHud(mesh) {
   meta.innerHTML = `<strong>${(mesh.masses || []).length}</strong> masses · ` +
     `<strong>${nBoxes}</strong> program boxes · ` +
     `<strong>${nDept}</strong> depts · ` +
-    `story <strong>${mesh.story_height_ft} ft</strong>` +
+    `story <strong>${fmtLen(mesh.story_height_ft, 1)}</strong>` +
     (mesh.envelope ? ` · <span style="color:#c9a27a">envelope</span>` : "") +
     (mesh.failed_checks?.length
       ? ` · <span style="color:#c48888">${mesh.failed_checks.length} failed check(s)</span>`
       : ` · <span style="color:#8faf9a">checks ok</span>`);
   const totalLen = (mesh.masses || []).reduce((s, m) => s + (m.length_ft || 0), 0);
+  const gsf = (mesh.boxes || []).reduce((s, b) => s + (Number(b.gsf) || 0), 0)
+    || (mesh.masses || []).reduce((s, m) => s + (Number(m.length_ft) || 0) * (Number(m.width_ft) || 0) * (Number(m.stories) || 1), 0);
   massList.innerHTML = (mesh.masses || []).map(m =>
-    `${m.name} · ${m.length_ft}×${m.width_ft} · ${m.stories} fl`
-  ).join("<br/>") + `<br/><br/>frontage ~ ${totalLen.toFixed(0)} ft`;
+    `${m.name} · ${fmtLen(m.length_ft, 1)}×${fmtLen(m.width_ft, 1)} · ${m.stories} fl`
+  ).join("<br/>") + `<br/><br/>frontage ~ ${fmtLen(totalLen, 0)}` +
+    (gsf ? `<br/>area ~ ${fmtArea(gsf, 0)}` : "");
 }
 
 async function selectScheme(rank) {
@@ -949,7 +1080,6 @@ async function selectScheme(rank) {
   if (lastTransparency?.sample_pool) {
     lastTransparency.sample_pool.selected_rank = rank;
   }
-  // Immediate envelope in the main stage while the full solve loads.
   if (scheme.preview) {
     renderMesh(scheme.preview);
     renderLegend(scheme.preview);
@@ -958,12 +1088,16 @@ async function selectScheme(rank) {
   }
   renderProcess(lastTransparency);
   if (studyId == null) return;
+  if (scheme.source === "archive" && scheme.cell_id) {
+    await applyArchiveCell(scheme.cell_id);
+    return;
+  }
   setStatus(`Loading scheme #${rank}…`);
   try {
     const res = await fetch("/api/apply_scheme", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ study_id: studyId, index: rank }),
+      body: JSON.stringify({ study_id: studyId, index: scheme.index ?? rank }),
     });
     const data = await res.json();
     if (!data.ok) {
@@ -983,6 +1117,53 @@ async function selectScheme(rank) {
   } catch (err) {
     setStatus(String(err), "bad");
   }
+}
+
+async function applyArchiveCell(cellId) {
+  setStatus("Loading COVER candidate…");
+  try {
+    const res = await fetch("/api/apply_cell", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ study_id: studyId, cell_id: cellId }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      setStatus(data.error || "Could not open that cell", "warn");
+      return;
+    }
+    renderMesh(data.mesh);
+    renderLegend(data.mesh);
+    lastMesh = data.mesh;
+    clearInspect();
+    updateHud(data.mesh);
+    const pass = data.mesh.all_checks_passed;
+    setStatus(
+      (pass ? "Candidate applied. " : "Candidate applied with failed checks. ") + (data.note || ""),
+      pass ? "ok" : "warn"
+    );
+  } catch (err) {
+    setStatus(String(err), "bad");
+  }
+}
+
+async function selectCandidate(cellId) {
+  const cands = lastTransparency?.top_candidates || [];
+  const cand = cands.find(c => c.cell_id === cellId);
+  if (cand?.preview) {
+    renderMesh(cand.preview);
+    renderLegend(cand.preview);
+    lastMesh = cand.preview;
+    updateHud(cand.preview);
+  }
+  if (lastTransparency) {
+    for (const c of lastTransparency.top_candidates || []) {
+      c.selected = c.cell_id === cellId;
+    }
+  }
+  renderProcess(lastTransparency);
+  if (studyId == null || !cellId) return;
+  await applyArchiveCell(cellId);
 }
 
 const thumbScenes = new WeakMap();
@@ -1066,14 +1247,21 @@ function paintSchemeThumb(canvas, mesh) {
 }
 
 function mountPoolThumbs() {
-  const cards = processBody.querySelectorAll(".pool-card[data-rank]");
+  const cards = processBody.querySelectorAll(".pool-card");
   for (const card of cards) {
-    const rank = Number(card.dataset.rank);
     const canvas = card.querySelector("canvas");
-    const scheme = (lastTransparency?.sample_pool?.schemes || [])
-      .find(s => s.rank === rank);
-    if (canvas && scheme?.preview) paintSchemeThumb(canvas, scheme.preview);
-    card.addEventListener("click", () => selectScheme(rank));
+    let mesh = null;
+    if (card.dataset.rank != null && card.dataset.rank !== "") {
+      const rank = Number(card.dataset.rank);
+      const scheme = (lastTransparency?.sample_pool?.schemes || []).find(s => s.rank === rank);
+      mesh = scheme?.preview;
+      card.addEventListener("click", () => selectScheme(rank));
+    } else if (card.dataset.cell) {
+      const cand = (lastTransparency?.top_candidates || []).find(c => c.cell_id === card.dataset.cell);
+      mesh = cand?.preview;
+      card.addEventListener("click", () => selectCandidate(card.dataset.cell));
+    }
+    if (canvas && mesh) paintSchemeThumb(canvas, mesh);
   }
 }
 
@@ -1141,11 +1329,11 @@ function showInspect(box) {
     <h3><span class="swatch" style="background:${esc(box.color)}"></span>${esc(box.department)}</h3>
     <div class="sub">
       Mass: ${esc(box.mass || "—")}<br/>
-      Box: ${Number(box.dx).toFixed(1)} × ${Number(box.dy).toFixed(1)} × ${Number(box.dz).toFixed(1)} ft
+      Box: ${fmtLen(box.dx, 1)} × ${fmtLen(box.dy, 1)} × ${fmtLen(box.dz, 1)}
       (L×W×H)${box.double_height ? " · double-height" : ""}<br/>
-      Level ${box.level ?? "—"} · GSF ${box.gsf != null ? Number(box.gsf).toFixed(0) : "—"} sf<br/>
-      Mass envelope: ${mass.length_ft != null ? Number(mass.length_ft).toFixed(1) : "—"} ×
-      ${mass.width_ft != null ? Number(mass.width_ft).toFixed(1) : "—"} ft ·
+      Level ${box.level ?? "—"} · GSF ${fmtArea(box.gsf, 0)}<br/>
+      Mass envelope: ${mass.length_ft != null ? fmtLen(mass.length_ft, 1) : "—"} ×
+      ${mass.width_ft != null ? fmtLen(mass.width_ft, 1) : "—"} ·
       ${mass.stories != null ? mass.stories : "—"} fl
     </div>
     <div class="section req"><h4>Requirements</h4>${list(related.requirements)}</div>
@@ -1204,21 +1392,36 @@ function renderProcess(t) {
     }
     if (schemes.length) {
       const selected = pool.selected_rank ?? selectedSchemeRank;
+      const fromArchive = schemes.some(s => s.source === "archive");
+      const legalN = schemes.filter(s => s.verified || s.fits).length;
+      const coverBits = [];
+      if (pool.cover_attempts != null && pool.cover_max != null) {
+        coverBits.push(`COVER ${pool.cover_attempts}/${pool.cover_max} (start ${pool.cover_start ?? 40})`);
+      }
+      if (pool.cover_pool) coverBits.push(`joint pool ${pool.cover_pool}`);
+      if (pool.typology_cells && pool.typology_cells !== pool.count) {
+        coverBits.push(`${pool.typology_cells} typology cells`);
+      }
+      if (pool.drawings_collapsed) coverBits.push(`hid ${pool.drawings_collapsed} duplicate drawings`);
+      if (pool.cover_incomplete) coverBits.push("map incomplete");
+      const coverLine = coverBits.length ? `${coverBits.join(" · ")} · ` : "";
       processBody.innerHTML = `
-        <div class="notes-line" style="margin-top:0">${pool.count} scheme(s) in pool · click a card to show it in the main 3D view</div>
+        <div class="notes-line" style="margin-top:0">${coverLine}${pool.count} unique drawing(s) · ${legalN} under limits · click a card to show it in the main 3D view</div>
         <div class="pool-grid">
           ${schemes.map(s => {
             const masses = (s.masses || []).map(m =>
               `${esc(m.mass_name || m.mass_id)} ${m.stories || "?"}fl`
             ).join(" · ");
+            const kind = [s.topology, s.envelope, s.loading].filter(Boolean).join(" · ");
             const sel = s.rank === selected ? "selected" : "";
-            return `<button type="button" class="pool-card ${sel}" data-rank="${s.rank}">
+            const cellAttr = s.cell_id ? ` data-cell="${esc(s.cell_id)}"` : "";
+            return `<button type="button" class="pool-card ${sel}" data-rank="${s.rank}"${cellAttr}>
               <canvas></canvas>
               <div class="cap">
-                <div class="title">#${s.rank} · ${s.total_length_ft != null ? Number(s.total_length_ft).toFixed(0)+" ft" : "—"}
+                <div class="title">#${s.rank} · ${s.total_length_ft != null ? fmtLen(s.total_length_ft, 0) : "—"}
                   <span class="pill ${s.verified ? "ok" : "bad"}">${s.verified ? "ok" : "fail"}</span>
                 </div>
-                <div class="sub">${masses || "—"}</div>
+                <div class="sub">${kind ? esc(kind) + (masses ? " · " : "") : ""}${masses || "—"}</div>
               </div>
             </button>`;
           }).join("")}
@@ -1251,20 +1454,25 @@ function renderProcess(t) {
       return;
     }
     processBody.innerHTML = `
-      <table class="cand-table">
-        <thead><tr><th>Candidate</th><th>Fit</th><th>Stories</th><th>Why</th></tr></thead>
-        <tbody>
-          ${cands.map(c => {
-            const stories = Object.entries(c.stories || {}).map(([k,v]) => `${esc(k)}:${v}`).join(" ");
-            return `<tr>
-              <td>${c.kept ? `<span class="pill kept">kept</span>` : ""} ${esc(c.label)}</td>
-              <td><span class="pill ${c.fits ? "ok" : "bad"}">${c.fits ? "legal" : "over"}</span></td>
-              <td>${esc(stories || "—")}</td>
-              <td>${esc(c.reason || "")}</td>
-            </tr>`;
-          }).join("")}
-        </tbody>
-      </table>`;
+      <div class="notes-line" style="margin-top:0">${cands.length} top candidate(s) · not a ranking of the whole pool. Search keeps at most three: best stated-fit (or LEARN taste after A/B), one different organization / topology / envelope, and a contrast lineage.</div>
+      <div class="pool-grid">
+        ${cands.map(c => {
+          const masses = (c.masses || []).map(m =>
+            `${esc(m.mass_name || m.mass_id)} ${m.stories || "?"}fl`
+          ).join(" · ");
+          const sel = c.selected || c.kept ? "selected" : "";
+          return `<button type="button" class="pool-card ${sel}" data-cell="${esc(c.cell_id || "")}">
+            <canvas></canvas>
+            <div class="cap">
+              <div class="title">${c.kept ? `<span class="pill kept">kept</span> ` : ""}${esc(c.label)}
+                <span class="pill ${c.fits ? "ok" : "bad"}">${c.fits ? "legal" : "over"}</span>
+              </div>
+              <div class="sub">${masses || esc(c.reason || "—")}${c.why ? `<br/>${esc(c.why)}` : ""}</div>
+            </div>
+          </button>`;
+        }).join("")}
+      </div>`;
+    requestAnimationFrame(() => mountPoolThumbs());
     return;
   }
   // process / BO
@@ -1284,6 +1492,12 @@ function renderProcess(t) {
         `${esc(c.op)} ei=${c.ei != null ? Number(c.ei).toFixed(3) : "—"}`
       ).join("<br/>");
       const items = (s.items || []).map(it => `· ${esc(it.sentence || "")}`).join("<br/>");
+      const probes = (s.probes || []).map(p =>
+        `· ${esc(p.label || "")}${p.unlocks ? " — " + esc(p.unlocks) : ""} <span class="pill">ask architect</span>`
+      ).join("<br/>");
+      const knowledge = (s.knowledge || []).map(k =>
+        `· ${esc(k.region || "")}: ${esc(k.impossible_because || "")}`
+      ).join("<br/>");
       return `<div class="step">
         <div class="phase">${esc(s.phase)}</div>
         <div>${esc(s.summary || "")}</div>
@@ -1291,6 +1505,8 @@ function renderProcess(t) {
         ${ops ? `<div class="ops">${ops}</div>` : ""}
         ${cands ? `<div class="ops">EI pool:<br/>${cands}</div>` : ""}
         ${items ? `<div class="ops">${items}</div>` : ""}
+        ${probes ? `<div class="ops">Relaxation probes (not applied):<br/>${probes}</div>` : ""}
+        ${knowledge ? `<div class="ops">Why empty:<br/>${knowledge}</div>` : ""}
       </div>`;
     }).join("")}
     ${p.note ? `<div class="notes-line">${esc(p.note)}</div>` : ""}
@@ -1472,8 +1688,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._generate()
             elif path == "/api/apply_scheme":
                 self._apply_scheme()
+            elif path == "/api/apply_cell":
+                self._apply_cell()
             elif path == "/api/modality_resolve":
                 self._modality_resolve()
+            elif path == "/api/clear_program":
+                self._clear_program()
             else:
                 self.send_error(404)
         except Exception as exc:
@@ -1530,6 +1750,11 @@ class Handler(BaseHTTPRequestHandler):
             }
         )
 
+    def _clear_program(self) -> None:
+        _STATE["program_path"] = None
+        _STATE["program_name"] = None
+        self._json({"ok": True})
+
     def _generate(self) -> None:
         length = int(self.headers.get("Content-Length", "0"))
         raw = self.rfile.read(length)
@@ -1548,13 +1773,14 @@ class Handler(BaseHTTPRequestHandler):
         from .config import load_project_config
         from .explore.ui_payload import transparency_payload
         from .load import load_program_file
-        from .modality import find_brief_questions
+        from .modality import apply_answer_corrections, find_brief_questions
         from .preview3d import preview_mesh
         from .session import StudySession, slugify_study_id
         from .solver import solve_massing_study
 
         modality_answers = list(payload.get("modality_answers") or [])
         skip_ask = bool(payload.get("skip_modality_ask"))
+        brief = apply_answer_corrections(brief, modality_answers)
 
         config_path = _STATE.get("config_path") or (
             str(DEFAULT_CONFIG) if DEFAULT_CONFIG.exists() else None
@@ -1565,7 +1791,9 @@ class Handler(BaseHTTPRequestHandler):
         questions, parsed = find_brief_questions(
             brief,
             answers=modality_answers,
-            use_llm=True,
+            # First pause: ask immediately. After they classify, use the LLM
+            # only to place remaining numbers — do not re-guess modality.
+            use_llm=bool(modality_answers),
             department_names=dept_names,
         )
         if questions and not skip_ask:
@@ -1608,9 +1836,10 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         note = (session.constraints.get("explore") or {}).get("note") or "COVER complete."
-        # Scheme search also runs inside COVER; if the pool is still empty
-        # (e.g. search pruned everything), try once more for the UI thumbs.
-        if not (session.last_search or []):
+        # Scheme search also runs inside COVER; retry only if COVER stored no cells.
+        archive_now = (session.constraints.get("explore") or {}).get("archive") or {}
+        has_cells = bool(archive_now.get("cells"))
+        if not (session.last_search or []) and not has_cells:
             from .tools import search_site_schemes
 
             searched = search_site_schemes(
@@ -1714,12 +1943,12 @@ class Handler(BaseHTTPRequestHandler):
 
         saved = []
         for ans in answers:
-            text = str(ans.get("text") or "").strip()
+            stored = str(ans.get("corrected") or ans.get("text") or "").strip()
             kind = str(ans.get("kind") or "").strip().lower()
-            if not text or kind not in KINDS:
+            if not stored or kind not in KINDS:
                 continue
-            remember(text, kind, cue=str(ans.get("cue") or "") or None)
-            saved.append({"text": text, "kind": kind})
+            remember(stored, kind, cue=str(ans.get("cue") or "") or None)
+            saved.append({"text": stored, "kind": kind})
         self._json({"ok": True, "saved": saved, "count": len(saved)})
 
     def _apply_scheme(self) -> None:
@@ -1784,6 +2013,60 @@ class Handler(BaseHTTPRequestHandler):
                 "note": note,
                 "study_id": session.study_id,
                 "index": index,
+                "mesh": mesh,
+            }
+        )
+
+    def _apply_cell(self) -> None:
+        length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(length)
+        payload = json.loads(raw.decode("utf-8") or "{}")
+        study_id = payload.get("study_id") or _STATE.get("study_id")
+        cell_id = str(payload.get("cell_id") or "").strip()
+        if not study_id:
+            self._json({"ok": False, "error": "No study loaded. Generate first."}, 400)
+            return
+        if not cell_id:
+            self._json({"ok": False, "error": "Need a cell_id."}, 400)
+            return
+
+        from .config import load_project_config
+        from .explore.archive import restore_entry
+        from .preview3d import preview_mesh
+        from .session import StudySession
+        from .solver import solve_massing_study
+
+        try:
+            session = StudySession.load(str(study_id))
+        except FileNotFoundError:
+            self._json({"ok": False, "error": f"Study '{study_id}' not found."}, 404)
+            return
+        archive = (session.constraints.get("explore") or {}).get("archive") or {}
+        entry = (archive.get("cells") or {}).get(cell_id)
+        if not entry:
+            self._json({"ok": False, "error": f"Cell '{cell_id}' is not in the archive."}, 404)
+            return
+        restore_entry(session, entry)
+        store = dict(session.constraints.get("explore") or {})
+        store["kept_cell"] = cell_id
+        session.constraints["explore"] = store
+        config_path = session.config_path or _STATE.get("config_path") or (
+            str(DEFAULT_CONFIG) if DEFAULT_CONFIG.exists() else None
+        )
+        result = solve_massing_study(session, config_path=config_path or None)
+        try:
+            config = load_project_config(config_path) if config_path else {}
+        except FileNotFoundError:
+            config = {}
+        mesh = preview_mesh(result, config=config)
+        session.save()
+        _STATE["study_id"] = session.study_id
+        self._json(
+            {
+                "ok": True,
+                "note": f"Showing COVER cell {entry.get('reason') or cell_id}.",
+                "study_id": session.study_id,
+                "cell_id": cell_id,
                 "mesh": mesh,
             }
         )

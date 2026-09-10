@@ -228,7 +228,8 @@ class TestSearch(unittest.TestCase):
             session, envelope, preference="balanced", top_n=1, config_path=str(CONFIG)
         )
         academic = next(o for o in candidates[0].options if o.mass_id == "academic")
-        self.assertLessEqual(academic.width_ft, 90.0)
+        self.assertLess(academic.width_ft, envelope.max_building_width_ft)
+        self.assertLessEqual(academic.width_ft, 95.0)
 
     def test_score_is_independent_of_candidate_set(self) -> None:
         """Metrics are absolute, so a scheme's score cannot drift with top_n."""

@@ -130,11 +130,25 @@ def read_strategy(session: Any) -> dict[str, Any]:
 
 
 def cell_key(session: Any) -> str:
-    """Behavior cell: organization, story band, loading, topology, envelope."""
+    """Behavior cell: organization, story band, loading, topology, envelope, width."""
     loading = session.constraints.get("loading") or "double"
     topo = topology_of(session)
     env = session.constraints.get("cover_envelope") or "balanced"
     parts = [f"loading:{loading}", f"topo:{topo}", f"env:{env}"]
+    geom_rank = session.constraints.get("cover_geom_rank")
+    if geom_rank is not None and int(geom_rank) > 0:
+        parts.append(f"geom:{int(geom_rank)}")
+    width_bits = []
+    for mass in session.masses:
+        raw = session.constraints.get(f"{mass.id}_width_ft")
+        if raw is None:
+            continue
+        try:
+            width_bits.append(f"{mass.id}:{round(float(raw))}")
+        except (TypeError, ValueError):
+            continue
+    if width_bits:
+        parts.append("W:" + ",".join(width_bits))
     for mass in session.masses:
         depts = ",".join(mass.departments)
         parts.append(f"{mass.id}:{story_band(mass.story_count)}:{depts}")

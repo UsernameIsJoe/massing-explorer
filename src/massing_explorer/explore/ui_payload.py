@@ -65,8 +65,10 @@ def _slim_performance(perf: dict[str, Any] | None) -> dict[str, Any]:
     keep = (
         "feasible",
         "fits_limitations",
-        "spread",
-        "height_variance",
+        "program_coherence",
+        "preference_alignment",
+        "performance_efficiency",
+        "robustness",
         "preference_distance",
         "novelty",
         "failed_kinds",
@@ -95,6 +97,8 @@ def _slim_scheme(
         )
     out: dict[str, Any] = {
         "rank": rank,
+        "index": int(scheme.get("_pool_index", rank) or rank),
+        "source": "search",
         "total_length_ft": scheme.get("total_length_ft"),
         "score": scheme.get("score"),
         "verified": bool(scheme.get("verified")),
@@ -113,8 +117,11 @@ def _slim_scheme(
     return out
 
 
-def _slim_candidate(entry: dict[str, Any], *, kept: bool = False) -> dict[str, Any]:
-    return {
+def _slim_candidate(entry: dict[str, Any], *, kept: bool = False, story_height_ft: float = 14.0) -> dict[str, Any]:
+    strategy = entry.get("strategy") or {}
+    geom = strategy.get("G") or {}
+    topo = strategy.get("T") or {}
+    out: dict[str, Any] = {
         "cell_id": entry.get("cell"),
         "label": _cell_label(entry),
         "partition": entry.get("partition"),
@@ -123,13 +130,111 @@ def _slim_candidate(entry: dict[str, Any], *, kept: bool = False) -> dict[str, A
         "stories": entry.get("stories") or {},
         "traits": _slim_performance(entry.get("performance")),
         "kept": kept,
+        "topology": topo.get("kind") or "",
+        "envelope": geom.get("envelope") or "",
+        "loading": geom.get("loading") or "",
     }
+    masses = _masses_from_entry(entry)
+    if masses:
+        from massing_explorer.preview3d import scheme_envelope_mesh
+
+        out["masses"] = masses
+        out["preview"] = scheme_envelope_mesh(
+            {"masses": masses, "verified": out["fits"]},
+            story_height_ft=story_height_ft,
+        )
+        total = sum(float(m.get("length_ft") or 0) for m in masses)
+        out["total_length_ft"] = round(total, 1)
+    return out
+
+
+def _masses_from_entry(entry: dict[str, Any]) -> list[dict[str, Any]]:
+    plates = list(entry.get("plates") or [])
+    if plates:
+        return [
+            {
+                "mass_id": p.get("mass_id"),
+                "mass_name": p.get("mass_name") or p.get("mass_id"),
+                "stories": p.get("stories"),
+                "width_ft": p.get("width_ft"),
+                "length_ft": p.get("length_ft"),
+            }
+            for p in plates
+            if float(p.get("width_ft") or 0) > 0 and float(p.get("length_ft") or 0) > 0
+        ]
+    snap = entry.get("snapshot") or {}
+    stories = entry.get("stories") or snap.get("stories") or {}
+    widths = snap.get("widths") or {}
+    lengths = list((entry.get("performance") or {}).get("lengths") or [])
+    out: list[dict[str, Any]] = []
+    for i, mass in enumerate(snap.get("masses") or []):
+        if not isinstance(mass, dict):
+            continue
+        mid = str(mass.get("id") or "")
+        try:
+            width = float(widths.get(mid) or 0)
+        except (TypeError, ValueError):
+            width = 0.0
+        length = float(lengths[i]) if i < len(lengths) else 0.0
+        if width <= 0 or length <= 0:
+            continue
+        out.append(
+            {
+                "mass_id": mid,
+                "mass_name": mass.get("name") or mid,
+                "stories": int(stories.get(mid) or mass.get("story_count") or 2),
+                "width_ft": width,
+                "length_ft": length,
+            }
+        )
+    return out
+
+
+def _scheme_signature(scheme: dict[str, Any]) -> tuple:
+    masses = scheme.get("masses") or []
+    stories = tuple(int(m.get("stories") or m.get("story_count") or 0) for m in masses)
+    widths = tuple(int(round(float(m.get("width_ft") or 0) / 10.0) * 10) for m in masses)
+    return (stories, widths, bool(scheme.get("verified")))
+
+
+def _dedupe_schemes(schemes: list[dict[str, Any]], cap: int | None = None) -> list[dict[str, Any]]:
+    seen: set[tuple] = set()
+    out: list[dict[str, Any]] = []
+    for scheme in schemes:
+        sig = _scheme_signature(scheme)
+        if sig in seen:
+            continue
+        seen.add(sig)
+        out.append(scheme)
+        if cap is not None and len(out) >= cap:
+            break
+    return out
+
+
+def _all_archive_entries(archive: dict[str, Any]) -> list[dict[str, Any]]:
+    cells = list((archive.get("cells") or {}).values())
+    cells.sort(key=lambda e: (not bool(e.get("fits_limitations")), str(e.get("reason") or "")))
+    return cells
 
 
 def _process_steps(store: dict[str, Any]) -> list[dict[str, Any]]:
     steps: list[dict[str, Any]] = []
     archive = store.get("archive") or {}
     if archive:
+        cover = archive.get("cover") if isinstance(archive.get("cover"), dict) else {}
+        plan = archive.get("cover_plan") if isinstance(archive.get("cover_plan"), dict) else {}
+        cover_bits = []
+        if cover:
+            cover_bits.append(
+                f"budget {cover.get('attempts', 0)}/{cover.get('max', 120)} "
+                f"(start {cover.get('start', 40)})"
+            )
+            if cover.get("samples_planned") is not None:
+                cover_bits.append(f"pool {cover.get('samples_planned')}")
+            if cover.get("incomplete"):
+                cover_bits.append("incomplete")
+        elif plan.get("pool"):
+            cover_bits.append(f"pool {plan.get('pool')}")
         steps.append(
             {
                 "phase": "COVER",
@@ -137,8 +242,38 @@ def _process_steps(store: dict[str, Any]) -> list[dict[str, Any]]:
                     f"{archive.get('legal', 0)} legal · "
                     f"{archive.get('attempts', 0)} attempts · "
                     f"{len(archive.get('cells') or {})} cells"
+                    + (f" · {'; '.join(cover_bits)}" if cover_bits else "")
                 ),
                 "detail": archive.get("note") or store.get("note") or "",
+            }
+        )
+    diagnose = store.get("diagnose") or {}
+    if diagnose.get("ran"):
+        probes = diagnose.get("probes") or []
+        conflict = diagnose.get("conflict") or {}
+        steps.append(
+            {
+                "phase": "DIAGNOSE",
+                "summary": (
+                    f"{diagnose.get('class') or 'unknown'}"
+                    + (
+                        f" · {len(probes)} probe(s)"
+                        if probes
+                        else ""
+                    )
+                ),
+                "detail": diagnose.get("note") or conflict.get("note") or "",
+                "probes": [
+                    {
+                        "label": p.get("label"),
+                        "kind": p.get("kind"),
+                        "lever": p.get("lever"),
+                        "unlocks": p.get("unlocks"),
+                        "apply": False,
+                    }
+                    for p in probes[:8]
+                ],
+                "knowledge": list(diagnose.get("knowledge") or [])[:8],
             }
         )
     csp = store.get("csp") or {}
@@ -252,6 +387,48 @@ def _process_steps(store: dict[str, Any]) -> list[dict[str, Any]]:
     return steps
 
 
+def _drawing_signature(card: dict[str, Any]) -> tuple:
+    """Rounded footprint fingerprint for UI dedupe."""
+    masses = card.get("masses") or []
+    if not masses:
+        return ("empty", card.get("cell_id") or card.get("label") or "")
+    return tuple(
+        (
+            str(m.get("mass_id") or m.get("id") or ""),
+            int(m.get("stories") or 0),
+            round(float(m.get("width_ft") or 0)),
+            round(float(m.get("length_ft") or 0)),
+        )
+        for m in masses
+    )
+
+
+def _dedupe_drawings(cards: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """Keep one card per drawn plate; prefer legal / kept."""
+    ranked = sorted(
+        cards,
+        key=lambda c: (
+            not bool(c.get("fits") or c.get("kept")),
+            not bool(c.get("kept")),
+            int(c.get("rank") or 0),
+        ),
+    )
+    seen: set[tuple] = set()
+    out: list[dict[str, Any]] = []
+    collapsed = 0
+    for card in ranked:
+        sig = _drawing_signature(card)
+        if sig in seen:
+            collapsed += 1
+            continue
+        seen.add(sig)
+        out.append(card)
+    out.sort(key=lambda c: int(c.get("rank") or 0))
+    for i, card in enumerate(out):
+        card["rank"] = i
+    return out, collapsed
+
+
 def transparency_payload(
     session: Any,
     *,
@@ -305,41 +482,68 @@ def transparency_payload(
         story_h = 14.0
 
     selected_rank = 0 if schemes else None
-    sample_pool: dict[str, Any] = {
-        "count": len(schemes),
-        "selected_rank": selected_rank,
-        "schemes": [
-            _slim_scheme(s, i, story_height_ft=story_h) for i, s in enumerate(schemes[:12])
-        ],
-        "archive_preview": [],
-    }
-    if archive and not schemes:
-        try:
-            from massing_explorer.explore import archive as archive_mod
+    search_pool = _dedupe_schemes(
+        [{**s, "_pool_index": i} if isinstance(s, dict) else s for i, s in enumerate(schemes)],
+    )
+    archive_cards: list[dict[str, Any]] = []
+    if archive:
+        for i, entry in enumerate(_all_archive_entries(archive)):
+            try:
+                card = _slim_candidate(entry, kept=(entry.get("cell") == kept_id), story_height_ft=story_h)
+                card["rank"] = i
+                card["source"] = "archive"
+                card["verified"] = bool(card.get("fits"))
+                archive_cards.append(card)
+            except Exception:
+                continue
 
-            legal = archive_mod.legal_cells(archive)
-            sample_pool["count"] = len(legal)
-            sample_pool["archive_preview"] = [
-                _slim_candidate(e, kept=(e.get("cell") == kept_id)) for e in legal[:12]
-            ]
-        except Exception:
-            sample_pool["archive_preview"] = []
+    pool_schemes: list[dict[str, Any]] = []
+    drawings_collapsed = 0
+    if archive_cards:
+        pool_schemes, drawings_collapsed = _dedupe_drawings(archive_cards)
+        selected_rank = 0
+    elif search_pool:
+        pool_schemes = [
+            _slim_scheme(s, i, story_height_ft=story_h) for i, s in enumerate(search_pool)
+        ]
+        selected_rank = 0
+
+    cover = archive.get("cover") if isinstance(archive.get("cover"), dict) else {}
+    sample_pool: dict[str, Any] = {
+        "count": len(pool_schemes) or len(schemes),
+        "selected_rank": selected_rank,
+        "schemes": pool_schemes,
+        "archive_preview": archive_cards,
+        "typology_cells": len(archive_cards),
+        "drawings_collapsed": drawings_collapsed,
+        "cover_attempts": int(cover.get("attempts") or archive.get("attempts") or 0),
+        "cover_start": int(cover.get("start") or 40),
+        "cover_max": int(cover.get("max") or 120),
+        "cover_pool": int(
+            (cover.get("samples_planned") if cover else None)
+            or ((archive.get("cover_plan") or {}).get("pool") if isinstance(archive.get("cover_plan"), dict) else 0)
+            or 0
+        ),
+        "cover_incomplete": bool(cover.get("incomplete") or archive.get("cover_incomplete")),
+    }
 
     top_candidates: list[dict[str, Any]] = []
     if archive:
         try:
-            from massing_explorer.explore.controller import select_elites
+            from massing_explorer.explore.controller import select_elites_explained
             from massing_explorer.explore.preference import taste_weight
 
             weights = ((store.get("learning") or {}).get("weights") or {})
-            elites = select_elites(archive, weights)
-            for entry in elites:
-                top_candidates.append(
-                    _slim_candidate(entry, kept=(entry.get("cell") == kept_id))
+            elites = select_elites_explained(archive, weights)
+            for row in elites:
+                card = _slim_candidate(
+                    row["entry"], kept=(row["entry"].get("cell") == kept_id), story_height_ft=story_h
                 )
+                card["why"] = row.get("why") or ""
+                top_candidates.append(card)
             if kept_id and kept_id not in {c["cell_id"] for c in top_candidates}:
                 if kept_entry and kept_entry.get("cell"):
-                    top_candidates.insert(0, _slim_candidate(kept_entry, kept=True))
+                    top_candidates.insert(0, _slim_candidate(kept_entry, kept=True, story_height_ft=story_h))
             # If elites empty, still show a few legal cells by taste
             if not top_candidates:
                 from massing_explorer.explore import archive as archive_mod
@@ -347,7 +551,7 @@ def transparency_payload(
                 legal = archive_mod.legal_cells(archive)
                 ranked = sorted(legal, key=lambda e: taste_weight(e, weights), reverse=True)
                 top_candidates = [
-                    _slim_candidate(e, kept=(e.get("cell") == kept_id)) for e in ranked[:5]
+                    _slim_candidate(e, kept=(e.get("cell") == kept_id), story_height_ft=story_h) for e in ranked[:5]
                 ]
         except Exception:
             top_candidates = []

@@ -230,8 +230,15 @@ class ModalityTrainingSets(unittest.TestCase):
                 if not (
                     parsed.constraints.get("max_building_length_ft")
                     or parsed.constraints.get("max_total_length_ft")
+                    or parsed.constraints.get("max_edge_ft")
+                    or parsed.constraints.get("department_max_edge_ft")
                     or _has_lever(briefing, "max_length")
                     or _has_lever(briefing, "site_length")
+                    or _has_lever(briefing, "max_edge")
+                    or any(
+                        d.get("lever") == "length" and d.get("mode") == "max"
+                        for d in (parsed.dimensions or [])
+                    )
                 ):
                     failures.append(f"SET {sid}: length cap missing")
 

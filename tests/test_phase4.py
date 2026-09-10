@@ -135,6 +135,37 @@ class TestSiteLimits(unittest.TestCase):
         self.assertFalse(checks[0].passed)
         self.assertAlmostEqual(suggestions[0].option_width_ft, 100.0)
 
+    def test_max_edge_rejects_long_or_wide(self) -> None:
+        wide = _ground(200, 80)
+        checks, _ = check_site_limits(wide, {"max_edge_ft": 131.23}, target_gsf=16000)
+        self.assertTrue(any(not c.passed and "width" in c.check for c in checks))
+        long = _ground(80, 200)
+        checks, _ = check_site_limits(long, {"max_edge_ft": 131.23}, target_gsf=16000)
+        self.assertTrue(any(not c.passed and "length" in c.check for c in checks))
+
+    def test_clamp_width_keeps_both_edges_under_cap(self) -> None:
+        from massing_explorer.solver import _clamp_width_to_edge_cap
+
+        cap = 131.23
+        w = _clamp_width_to_edge_cap(200, 10000, cap, exact_width=False)
+        self.assertLessEqual(w, cap + 1e-6)
+        self.assertLessEqual(10000 / w, cap + 1e-6)
+
+    def test_clamp_does_not_override_exact_width(self) -> None:
+        from massing_explorer.solver import _clamp_width_to_edge_cap, _mass_edge_cap_ft
+        from types import SimpleNamespace
+
+        cap = 131.23
+        exact = _clamp_width_to_edge_cap(80, 30000, cap, exact_width=True)
+        self.assertEqual(exact, 80)
+        mass = SimpleNamespace(id="academic", departments=["CORE ACADEMIC"])
+        session = SimpleNamespace(
+            constraints={"department_max_edge_ft": {"CORE ACADEMIC": 90.0}}
+        )
+        self.assertAlmostEqual(_mass_edge_cap_ft(session, mass), 90.0)
+        other = SimpleNamespace(id="gym", departments=["HEALTH & PHYSICAL EDUCATION"])
+        self.assertIsNone(_mass_edge_cap_ft(session, other))
+
     def test_no_limits_no_checks(self) -> None:
         checks, suggestions = check_site_limits(_ground(80, 150), {}, 12000)
         self.assertEqual(checks, [])

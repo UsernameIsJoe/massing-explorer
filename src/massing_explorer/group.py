@@ -48,6 +48,52 @@ def match_department(query: str, names: list[str]) -> str | None:
     if not q or not names:
         return None
 
+    # Dimension / grammar words are never department names — "min" must not
+    # substring-hit "administration".
+    if q in {
+        "min",
+        "max",
+        "minimum",
+        "maximum",
+        "length",
+        "lengths",
+        "width",
+        "widths",
+        "height",
+        "heights",
+        "depth",
+        "depths",
+        "meter",
+        "meters",
+        "metre",
+        "metres",
+        "foot",
+        "feet",
+        "ft",
+        "story",
+        "stories",
+        "floor",
+        "floors",
+        "level",
+        "levels",
+        "mass",
+        "masses",
+        "wing",
+        "wings",
+        "ratio",
+        "prefer",
+        "preferred",
+        "double",
+        "single",
+        "edge",
+        "edges",
+        "long",
+        "wide",
+        "tall",
+        "deep",
+    }:
+        return None
+
     by_norm = {_norm(n): n for n in names}
     if q in by_norm:
         return by_norm[q]
@@ -68,6 +114,9 @@ def match_department(query: str, names: list[str]) -> str | None:
         "classrooms": ("academic",),
         "admin": ("administration", "guidance"),
         "administration": ("administration", "guidance"),
+        "special ed": ("special",),
+        "sped": ("special",),
+        "special education": ("special",),
         "pe": ("health", "physical", "gym"),
         "athletics": ("health", "physical", "gym"),
         "art": ("art", "music"),
@@ -114,7 +163,18 @@ def match_department(query: str, names: list[str]) -> str | None:
     if len(q) < 3:
         return None
 
-    contained = [n for n in names if q in _norm(n) or _norm(n) in q]
+    # Whole-token hit first. Short stems ("min" in "administration") only
+    # count when the query is itself a schedule token, not a substring.
+    token_hits = [n for n in names if q in _norm(n).split()]
+    if len(token_hits) == 1:
+        return token_hits[0]
+    if len(token_hits) > 1:
+        token_hits.sort(key=lambda n: abs(len(_norm(n)) - len(q)))
+        return token_hits[0]
+
+    contained = []
+    if len(q) >= 4:
+        contained = [n for n in names if q in _norm(n) or _norm(n) in q]
     if len(contained) == 1:
         return contained[0]
     if len(contained) > 1:

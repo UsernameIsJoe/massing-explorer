@@ -185,6 +185,49 @@ class TestParseBrief(unittest.TestCase):
             home["HEALTH & PHYSICAL EDUCATION"], home["DINING & FOOD SERVICE"]
         )
 
+    def test_min_does_not_become_admin_and_length_bounds_apply(self) -> None:
+        """Regression: 'min 20 meters' must not map to administration."""
+        from massing_explorer.brief import briefing_from_parsed
+        from massing_explorer.group import match_department
+
+        self.assertIsNone(match_department("min", self.names))
+        text = (
+            "3 masses, max 3 floors. length max 70 meters and min 20 meters. "
+            "gym and dining together and double height. media prefer on ground floor. "
+            "admin have to be on ground floor. core academic and special ed width "
+            "has to be 80 feet. mass ratio prefer to be 4:7. floor height prefer 2 stories."
+        )
+        parsed = parse_brief(text, self.names)
+        self.assertNotIn(ADMIN, parsed.double_height_departments)
+        self.assertEqual(
+            set(parsed.double_height_departments),
+            {HPE, DINING},
+        )
+        self.assertAlmostEqual(
+            parsed.constraints["max_edge_ft"], 70 * 3.280839895, places=3
+        )
+        self.assertAlmostEqual(
+            parsed.constraints["min_edge_ft"], 20 * 3.280839895, places=3
+        )
+        self.assertEqual(parsed.constraints.get("preferred_stories"), 2.0)
+        self.assertEqual(parsed.max_stories, 3)
+        self.assertEqual(
+            parsed.constraints.get("department_widths", {}).get(CORE), 80.0
+        )
+        pin_kinds = parsed.constraints.get("pin_ground_kind") or {}
+        self.assertEqual(pin_kinds.get(ADMIN), "requirement")
+        self.assertEqual(pin_kinds.get(MEDIA), "preference")
+        briefing = briefing_from_parsed(parsed)
+        dh_depts = [
+            c["departments"][0]
+            for c in briefing["requirements"]
+            if c.get("lever") == "double_height" and c.get("departments")
+        ]
+        self.assertNotIn(ADMIN, dh_depts)
+        self.assertTrue(
+            any(c.get("lever") == "min_edge" for c in briefing["limitations"])
+        )
+
 
 class TestGrouping(unittest.TestCase):
     def setUp(self) -> None:
@@ -226,6 +269,13 @@ class TestApplyBrief(unittest.TestCase):
         self.session = StudySession(
             study_id="brief_run", program=program, config_path=str(CONFIG)
         )
+        self.session.constraints["explore_budget"] = {
+            "mcts_sims": 6,
+            "mcts_depth": 2,
+            "mcts_roots": 2,
+            "bo": 2,
+            "refine": 4,
+        }
         self.session.save()
 
     def tearDown(self) -> None:
@@ -328,6 +378,7 @@ class TestApplyBrief(unittest.TestCase):
         self.assertEqual(self.session.floor_pins.get(ART), 0)
         self.assertAlmostEqual(self.session.constraints["length_over_width"], 3 / 5)
         self.assertEqual(self.session.constraints["max_building_length_ft"], 50)
+        self.assertEqual(self.session.constraints["max_edge_ft"], 50)
         self.assertEqual(self.session.constraints["length_limit_is_cap"], 1)
         self.assertNotIn("exact_building_length_ft", self.session.constraints)
         self.assertFalse(self.session.pairings)
@@ -335,16 +386,10 @@ class TestApplyBrief(unittest.TestCase):
 
         result = solve_massing_study(self.session)
         by_id = {m.id: m for m in result.masses}
-        # 50 is a cap. Bars are sized to the 3:5 ratio, not stretched to 50.
+        # 50 is a cap on every plan edge, not a length to fill.
         for mass in result.masses:
-            length = mass.floors[0].length_ft
             width = mass.floors[0].width_ft
-            self.assertGreater(
-                abs(length - 50.0),
-                0.4,
-                f"{mass.name} length {length} looks filled to the 50 ft cap",
-            )
-            self.assertAlmostEqual(length / width, 0.6, delta=0.05)
+            self.assertLessEqual(width, 50.0 + 1e-6, f"{mass.name} width {width}")
         gym = by_id[gym_mass.id]
         self.assertTrue(any(a.double_height for a in gym.floors[0].allocations))
         self.assertTrue(

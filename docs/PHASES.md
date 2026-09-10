@@ -221,8 +221,8 @@ Concept: [CONCEPT.md](CONCEPT.md). Workflow: [WORKFLOW.md](WORKFLOW.md).
 - [x] Explain and robustness — empty-cell sentences; program-area shock on the same strategy
 - [x] CP/CSP — distinct feasible partitions; the LLM does not invent P
 - [x] T and D — only drawable topologies and stated site; courtyard unsupported
-- [x] MCTS — over design actions, planner as expansion prior; `search.py` stays the baseline
-- [x] Bayesian optimization in `explore/bayes.py` — evaluation-budget manager, not a generator, not on feet
+- [x] MCTS — over design actions from several COVER elites; planner is expansion prior; `search.py` stays the baseline
+- [x] Bayesian optimization in `explore/bayes.py` — sequential EI budget manager, not a generator, not on invented feet
 
 ### The trust rule (unchanged)
 
@@ -240,7 +240,7 @@ A required grouping is not a Monte Carlo coordinate.
 | Courtyard | Named, unsupported, not a failed sample |
 | Planner cap | At most five typed actions; invented feet dropped |
 | LEARN | A/B among feasible elites; a written brief is not a choice |
-| MCTS | Sits on actions, not widths; planner is expansion prior |
+| MCTS | Starts from COVER elites; typed actions; nearby width is a local step; planner is expansion prior |
 | Chat path | `apply_brief` still solves and reports failed checks |
 
 ---

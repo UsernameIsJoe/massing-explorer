@@ -56,7 +56,7 @@ Recorded 9 Sep 2026. This is what happens when you chat a brief. Constitution: [
             next search actions
 ```
 
-MCTS sits around the **planner + engine** loop. Bayesian optimization, when it runs, spends a small evaluation budget on high-EI legal actions. Neither sits on feet.
+MCTS sits around the **planner + engine** loop. It starts from several diverse COVER elites and searches typed action sequences (depth 3–4, tens of simulations, stop on saturation). Bayesian optimization then spends ~10–15 sequential high-EI evaluations and refits after each. Nearby width is a local step from the current plate, not a width enumerator. Neither invents a foot target.
 
 ---
 
@@ -67,11 +67,11 @@ MCTS sits around the **planner + engine** loop. Bayesian optimization, when it r
 3. **Lock what was stated.** Named masses, keep-together, keep-apart, alone, same-mass, and a stated mass count stay locked. Pairing from the brief locks topology. A length cap is stored as a filter, not a target.
 4. **COVER the archive** (`explore/cover.py`).
    - Stratified joint samples across open axes: P, story patterns, drawable T, loading, envelope (balanced / compact / elongated).
-   - Adaptive budget: start ~40 → expand +10/+20 while new legal regions appear → stop when stagnant → cap ~120 (incomplete map if still discovering).
+   - Adaptive budget: start ~40 → expand +10/+20 while new legal regions or feature encodings appear → stop when stagnant → cap ~120 (incomplete map if still discovering).
 5. **LLM planner** proposes at most five typed actions. The engine applies or rejects them.
-6. **MCTS** searches over those actions, using the planner as an expansion prior.
-7. **Bayesian optimization** spends a few more evaluations on high expected-improvement actions, fit from the COVER archive.
-8. **REFINE** allocates local tries among several kept lineages (different P or T, not three widths of the same bar).
+6. **MCTS** searches typed actions from several COVER elites, using the planner as an expansion prior (~40–80 sims, depth 3–4, saturation stop).
+7. **Bayesian optimization** spends ~10–15 sequential evaluations on high expected-improvement actions, refitting the GP after each result, stop on saturation.
+8. **REFINE** allocates local neighbors (stories, nearby width/proportion, loading, small grouping, topology) among several kept lineages. LEARN taste steers the allocation; it does not override a must.
 9. **LEARN prepares a pair** when two feasible elites exist. A written brief is not a comparison.
 10. **Keep one drawing** on the study. Report legal vs infeasible cells, empty-cell reasons, robustness, applied vs illegal vs unsupported planner moves, the scheme kept, any pending A/B, and every failed check.
 
@@ -118,9 +118,9 @@ The archive holds one elite per **behavior cell**, not per width. A cell is a le
 
 **COVER** — What fundamentally different feasible strategies have we not investigated? Joint multi-axis samples with an adaptive evaluation budget. An unsupported cell is not a coverage failure.
 
-**LEARN** — What comparison would teach us the most about what the designer values? Pairwise A/B among feasible schemes only. Bradley–Terry on measured traits (spread, height variance, likeness, street edge if a frontage exists).
+**LEARN** — What comparison would teach us the most about what the designer values? Pairwise A/B among feasible, architecturally different schemes only. Bradley–Terry on the four soft eval axes (program coherence, preference alignment, performance efficiency, robustness). Taste steers later search; it cannot unlock a must.
 
-**REFINE** — Given what we currently know, which lineages deserve deeper exploration? Keep several architecturally distinct elites. Allocate local tries by weight, with a floor so a light lineage is not deleted. After a choice, reweight. Do not invent feet.
+**REFINE** — Given what we currently know, which lineages deserve deeper exploration? Keep several architecturally distinct elites. Allocate local neighbors (story ±1, nearby width, envelope/loading, small grouping, topology) by weight, with a floor so a light lineage is not deleted. After a choice, reweight. Do not invent feet.
 
 ---
 
