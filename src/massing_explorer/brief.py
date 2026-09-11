@@ -1890,6 +1890,15 @@ def parse_brief(text: str, department_names: list[str]) -> ParsedBrief:
     ):
         parsed.constraints["prefer_larger_footprint"] = 1
         parsed.notes.append("prefer larger footprint")
+    elif re.search(
+        r"(?:prefer(?:s|ably|red)?\s+)?(?:a\s+|the\s+)?(?:more\s+)?"
+        r"small(?:er)?\s+(?:ground[- ]floor\s+)?footprints?",
+        raw,
+        flags=re.I,
+    ):
+        if parsed.preference == "balanced":
+            parsed.preference = "compact"
+        parsed.notes.append("prefer smaller footprint")
 
     # Soft min / preferred mass floor area
     min_area = _first_area(
@@ -2149,11 +2158,31 @@ def parse_brief(text: str, department_names: list[str]) -> ParsedBrief:
 
     low = re.search(
         r"low[\s-]?rise|as low as|spread\s+out|keep it low|neighborhood-scale|"
-        r"fairly low|urban village|village rather than",
+        r"fairly low|urban village|village rather than|"
+        r"\belongated\b|"
+        r"\bloose(?:r)?\s+(?:layout|configuration|arrangement|massing|scheme|footprints?)\b|"
+        r"\b(?:layout|configuration|arrangement|massing|scheme)\s+"
+        r"(?:to\s+be\s+|should\s+be\s+|more\s+)?loose(?:r)?\b|"
+        r"\bmore\s+loose\b|"
+        r"\blooser\s+(?:layout|configuration|arrangement|massing|scheme)\b|"
+        r"\bprefer(?:s|ably|red)?\s+(?:a\s+|the\s+)?(?:more\s+)?"
+        r"(?:loose|spread[\s-]?out|elongated)\b",
         raw,
         flags=re.I,
     )
-    compact = re.search(r"\bcompact\b|small footprint|tight footprint|denser option", raw, flags=re.I)
+    compact = re.search(
+        r"\bcompact\b|"
+        r"small(?:er)?\s+footprints?|"
+        r"tight(?:er)?\s+footprints?|"
+        r"denser\s+option|"
+        r"\bmore\s+compact\b|"
+        r"\bprefer(?:s|ably|red)?\s+(?:a\s+|the\s+)?(?:more\s+)?"
+        r"(?:compact|smaller\s+footprint|small\s+footprint)\b|"
+        r"\b(?:layout|configuration|arrangement|massing|scheme)\s+"
+        r"(?:to\s+be\s+|should\s+be\s+|more\s+)?compact\b",
+        raw,
+        flags=re.I,
+    )
     if low:
         parsed.preference = "low_rise"
     elif compact:
@@ -3884,8 +3913,15 @@ def briefing_from_parsed(parsed: ParsedBrief) -> dict[str, list[dict[str, Any]]]
             "preference": preferences,
         }[role].append(entry)
     if parsed.preference and parsed.preference != "balanced":
+        lever = (
+            "compact"
+            if parsed.preference == "compact"
+            else "low_rise"
+            if parsed.preference == "low_rise"
+            else "scheme_preference"
+        )
         preferences.append(
-            {"kind": "preference", "lever": "scheme_preference", "text": parsed.preference}
+            {"kind": "preference", "lever": lever, "text": parsed.preference}
         )
     if parsed.constraints.get("preferred_stories"):
         preferences.append(
@@ -4300,6 +4336,16 @@ def apply_classified_clauses(parsed: ParsedBrief, reading: Any) -> dict[str, lis
                     parsed.length_over_width = float(length) / float(width)
             elif lever == "low_rise":
                 parsed.preference = "low_rise"
+            elif lever in {"compact", "smaller_footprint"}:
+                parsed.preference = "compact"
+            elif lever in {"elongated", "loose", "looser", "spread"}:
+                parsed.preference = "low_rise"
+            elif lever == "scheme_preference":
+                token = str(clause.get("text") or "").lower()
+                if "compact" in token or "small" in token:
+                    parsed.preference = "compact"
+                elif any(w in token for w in ("low", "loose", "elongat", "spread")):
+                    parsed.preference = "low_rise"
     briefing = briefing_from_parsed(parsed)
     if clauses:
         briefing = {
@@ -4607,6 +4653,11 @@ def apply_parsed_brief(
             reading_notes.append(f"pinned {dept} to level {lvl}")
     if parsed.constraints.get("stack_above"):
         session.constraints["stack_above"] = list(parsed.constraints["stack_above"])
+    # Seed COVER envelope from stated scheme preference (search may still sample others).
+    if parsed.preference == "compact":
+        session.constraints.setdefault("cover_envelope", "compact")
+    elif parsed.preference == "low_rise":
+        session.constraints.setdefault("cover_envelope", "elongated")
     story_lock: dict[str, int] = {}
     dh = set(parsed.double_height_departments)
     preferred_stories = parsed.constraints.get("preferred_stories")

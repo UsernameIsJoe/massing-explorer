@@ -31,7 +31,7 @@ PUBLIC_TOKENS = ("health", "physical", "dining", "food", "art", "music", "gym")
 # Deal-breaker for multi-floor departments: every floor slice of that
 # department must be at least this large. Stated in m²; engine stores SF.
 # Shared floors with other programs are allowed. No ratio remnant rule.
-MIN_SPLIT_PART_SQM = 100.0
+MIN_SPLIT_PART_SQM = 70.0
 _SQM_TO_SF = 10.76391041671
 MIN_SPLIT_PART_SF = MIN_SPLIT_PART_SQM * _SQM_TO_SF
 
@@ -267,10 +267,38 @@ def preference_distance(result: Any, session: Any = None) -> float:
             scores.append(min(1.0, abs(got - want) / max(float(want), 1.0)))
     briefing = session.constraints.get("briefing") or {}
     for clause in briefing.get("preferences") or []:
-        if clause.get("lever") == "low_rise":
-            stories = [len(list(m.floors or [])) for m in (getattr(result, "masses", None) or []) if m.floors]
+        lever = str(clause.get("lever") or "")
+        text = str(clause.get("text") or "").lower()
+        if lever == "low_rise" or (
+            lever in {"scheme_preference", "elongated", "loose", "looser", "spread"}
+            and any(w in text for w in ("low", "loose", "elongat", "spread"))
+        ):
+            stories = [
+                len(list(m.floors or []))
+                for m in (getattr(result, "masses", None) or [])
+                if m.floors
+            ]
             if stories:
                 scores.append(min(1.0, max(0.0, (max(stories) - 2) / 3.0)))
+        if lever == "compact" or (
+            lever in {"scheme_preference", "smaller_footprint"}
+            and ("compact" in text or "small" in text)
+        ):
+            aspects: list[float] = []
+            for mass in getattr(result, "masses", None) or []:
+                floors = list(getattr(mass, "floors", None) or [])
+                if not floors or not floors[0].width_ft:
+                    continue
+                w = float(floors[0].width_ft or 0)
+                length = float(floors[0].length_ft or 0)
+                if w <= 0:
+                    continue
+                asp = length / w
+                aspects.append(max(asp, 1.0 / asp if asp else 1.0))
+            if aspects:
+                mean_asp = sum(aspects) / len(aspects)
+                # Prefer squarer / more compact plates.
+                scores.append(min(1.0, max(0.0, (mean_asp - 1.0) / 3.0)))
     if not scores:
         return 0.0
     return sum(scores) / len(scores)
@@ -382,7 +410,7 @@ def _awkward_floor_splits(masses: list[Any]) -> float:
 
     Deal-breakers:
     - non-contiguous floors (program on L0 and L2 with nothing on L1)
-    - any floor slice of the department below MIN_SPLIT_PART_SF (~100 m²)
+    - any floor slice of the department below MIN_SPLIT_PART_SF (~70 m²)
 
     Sharing a floor with another program is allowed. No %-of-program remnant rule.
     """

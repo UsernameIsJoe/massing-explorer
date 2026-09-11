@@ -239,3 +239,91 @@ class TestUiPayload(unittest.TestCase):
         self.assertIn("program_coherence", pair["a"]["axes"])
         phases = [s["phase"] for s in t["process"]["steps"]]
         self.assertIn("LEARN", phases)
+
+    def test_space_distribution_marks_elites(self) -> None:
+        archive = {
+            "attempts": 2,
+            "legal": 2,
+            "cells": {
+                "c1": {
+                    "cell": "c1",
+                    "partition": "A",
+                    "fits_limitations": True,
+                    "stories": {"m1": 2, "m2": 1},
+                    "strategy": {
+                        "P": {"mass_count": 2, "partition": {"m1": ["A"], "m2": ["B"]}},
+                        "T": {"kind": "independent_bars"},
+                        "V": {},
+                        "G": {
+                            "stories": {"m1": 2, "m2": 1},
+                            "loading": "double",
+                            "envelope": "balanced",
+                        },
+                    },
+                    "performance": {
+                        "fits_limitations": True,
+                        "program_coherence": 0.8,
+                        "preference_alignment": 0.7,
+                        "performance_efficiency": 0.6,
+                        "robustness": 0.5,
+                    },
+                },
+                "c2": {
+                    "cell": "c2",
+                    "partition": "A",
+                    "fits_limitations": False,
+                    "stories": {"m1": 2, "m2": 2},
+                    "strategy": {
+                        "P": {"mass_count": 2, "partition": {"m1": ["A"], "m2": ["B"]}},
+                        "T": {"kind": "independent_bars"},
+                        "V": {},
+                        "G": {
+                            "stories": {"m1": 2, "m2": 2},
+                            "loading": "single",
+                            "envelope": "compact",
+                        },
+                    },
+                    "performance": {
+                        "fits_limitations": False,
+                        "program_coherence": 0.2,
+                        "preference_alignment": 0.1,
+                        "performance_efficiency": 0.1,
+                        "robustness": 0.1,
+                        "failed_kinds": ["program_split"],
+                    },
+                },
+            },
+        }
+        session = SimpleNamespace(
+            last_search=[],
+            constraints={
+                "briefing": {"requirements": [], "limitations": [], "preferences": []},
+                "explore": {"mode": "cover", "archive": archive, "kept_cell": "c1"},
+            },
+            masses=[],
+            config_path="",
+        )
+        t = transparency_payload(session, full_explore=True)
+        space = t["space"]
+        self.assertEqual(len(space["points"]), 2)
+        self.assertEqual(len(space["probe_axes"]), 9)
+        self.assertEqual(len(space["eval_axes"]), 4)
+        elite = next(p for p in space["points"] if p["cell_id"] == "c1")
+        other = next(p for p in space["points"] if p["cell_id"] == "c2")
+        self.assertTrue(elite["elite"])
+        self.assertTrue(elite["fits"])
+        self.assertFalse(other["elite"])
+        self.assertIn("program_organization", elite["probe"])
+        self.assertIn("program_coherence", elite["eval"])
+        self.assertEqual(len(elite["xyz_probe"]), 3)
+        self.assertEqual(len(elite["xyz_eval"]), 3)
+        self.assertIn("pca", space)
+        self.assertEqual(len(space["pca"]["probe"]["explained"]), 3)
+        # Distinct strategies should separate on at least one PCA axis.
+        self.assertTrue(
+            any(abs(a - b) > 1e-6 for a, b in zip(elite["xyz_probe"], other["xyz_probe"]))
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

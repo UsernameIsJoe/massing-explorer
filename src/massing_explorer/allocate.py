@@ -22,8 +22,8 @@ from .models import Room
 EPS = 1.0  # SF slack, keeps float noise from forcing spurious splits
 
 # Skip placing a department remnant smaller than the program_split deal-breaker
-# (100 m²) when the area can go elsewhere — keeps illegal thin slices out.
-MIN_FRAGMENT_SF = 100.0 * 10.76391041671  # ≈ 1,076 SF
+# (70 m²) when the area can go elsewhere — keeps illegal thin slices out.
+MIN_FRAGMENT_SF = 70.0 * 10.76391041671  # ≈ 753 SF
 MIN_FRAGMENT_FRACTION = 0.03
 
 DEFAULT_GROUND_KEYWORDS = (

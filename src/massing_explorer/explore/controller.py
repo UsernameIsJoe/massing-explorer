@@ -505,22 +505,78 @@ def select_elites_explained(
     )
     picked: list[dict[str, Any]] = [{"entry": ranked[0], "why": best_why}]
 
+    def _stories_of(entry: dict[str, Any]) -> tuple:
+        stories = entry.get("stories") or ((entry.get("strategy") or {}).get("G") or {}).get("stories") or {}
+        if isinstance(stories, dict):
+            return tuple(sorted((str(k), int(v)) for k, v in stories.items()))
+        return ()
+
+    def _geom_of(entry: dict[str, Any]) -> tuple[str, str, str]:
+        geom = (entry.get("strategy") or {}).get("G") or {}
+        return (
+            str(geom.get("envelope") or ""),
+            str(geom.get("loading") or ""),
+            str(geom.get("plate_profile") or ""),
+        )
+
     for entry in ranked[1:]:
+        if len(picked) >= 3:
+            break
+        if entry.get("cell") in {row["entry"].get("cell") for row in picked}:
+            continue
         if entry.get("partition") != picked[0]["entry"].get("partition"):
             picked.append({"entry": entry, "why": "Different program organization (P)."})
-            break
+            continue
         here_t = ((entry.get("strategy") or {}).get("T") or {}).get("kind")
         kept_t = ((picked[0]["entry"].get("strategy") or {}).get("T") or {}).get("kind")
         if here_t and kept_t and here_t != kept_t:
             picked.append({"entry": entry, "why": f"Different topology ({here_t} vs {kept_t})."})
-            break
-        here_e = ((entry.get("strategy") or {}).get("G") or {}).get("envelope")
-        kept_e = ((picked[0]["entry"].get("strategy") or {}).get("G") or {}).get("envelope")
+            continue
+        if _stories_of(entry) != _stories_of(picked[0]["entry"]):
+            picked.append({"entry": entry, "why": "Different story pattern (heights)."})
+            continue
+        here_e, here_l, here_pl = _geom_of(entry)
+        kept_e, kept_l, kept_pl = _geom_of(picked[0]["entry"])
         if here_e and kept_e and here_e != kept_e:
             picked.append({"entry": entry, "why": f"Different envelope ({here_e} vs {kept_e})."})
-            break
+            continue
+        if here_l and kept_l and here_l != kept_l:
+            picked.append({"entry": entry, "why": f"Different loading ({here_l} vs {kept_l})."})
+            continue
+        if here_pl and kept_pl and here_pl != kept_pl:
+            picked.append({"entry": entry, "why": f"Different plate profile ({here_pl} vs {kept_pl})."})
+            continue
     if len(picked) < 2 and len(ranked) > 1:
-        picked.append({"entry": ranked[1], "why": "Second-best stated-fit; keeps a nearby lineage."})
+        second = next(
+            (e for e in ranked[1:] if e.get("cell") != picked[0]["entry"].get("cell")),
+            None,
+        )
+        if second is not None:
+            he, hl, hp = _geom_of(second)
+            ke, kl, kp = _geom_of(picked[0]["entry"])
+            bits = []
+            if he != ke and he:
+                bits.append(f"envelope {he}")
+            if hl != kl and hl:
+                bits.append(f"loading {hl}")
+            if hp != kp and hp:
+                bits.append(f"plate {hp}")
+            detail = (", ".join(bits) + ". ") if bits else ""
+            same_h = _stories_of(second) == _stories_of(picked[0]["entry"])
+            warn = (
+                "Same story heights as #1, so the 3D silhouette looks almost identical. "
+                if same_h
+                else ""
+            )
+            picked.append(
+                {
+                    "entry": second,
+                    "why": (
+                        f"Second-best stated-fit ({detail}{warn}"
+                        "Legal basin is narrow — few distinct silhouettes survive)."
+                    ).strip(),
+                }
+            )
     light = min(ranked, key=lambda e: taste_weight(e, weights))
     if light.get("cell") not in {row["entry"].get("cell") for row in picked}:
         picked.append(

@@ -399,6 +399,92 @@ HTML = r"""<!DOCTYPE html>
     height: auto;
     display: block;
   }
+  .space-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .space-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+    font-size: 11px;
+    color: var(--faint);
+  }
+  .space-legend span {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .space-swatch {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+  .space-swatch.illegal { background: #3a3a3a; }
+  .space-swatch.legal { background: #6a8a9a; }
+  .space-swatch.elite { background: #d4a84b; box-shadow: 0 0 0 2px rgba(212,168,75,0.35); }
+  .space-block h4 {
+    margin: 0 0 6px;
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  .space-block .space-pca-meta {
+    margin: 0 0 8px;
+    font-size: 11px;
+    color: var(--faint);
+    line-height: 1.4;
+  }
+  .space-cloud {
+    position: relative;
+    width: 100%;
+    height: 320px;
+    background: #0a0a0a;
+    border: 1px solid #1c1c1c;
+    overflow: hidden;
+  }
+  .space-cloud canvas {
+    width: 100% !important;
+    height: 100% !important;
+    display: block;
+    cursor: grab;
+  }
+  .space-cloud canvas:active { cursor: grabbing; }
+  .space-cloud-tip {
+    position: absolute;
+    left: 10px;
+    bottom: 8px;
+    right: 10px;
+    font-size: 11px;
+    color: var(--muted);
+    pointer-events: none;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .space-elite-list {
+    margin: 0;
+    padding-left: 18px;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.45;
+  }
+  .space-elite-list li {
+    margin-bottom: 4px;
+  }
+  .space-elite-list button {
+    background: none;
+    border: none;
+    color: var(--warn);
+    cursor: pointer;
+    padding: 0;
+    font: inherit;
+    text-decoration: underline;
+  }
   .pill {
     display: inline-block;
     padding: 1px 6px;
@@ -901,6 +987,7 @@ HTML = r"""<!DOCTYPE html>
       <div class="process-tabs" id="processTabs">
         <button type="button" data-tab="interpreted" class="active">Interpreted</button>
         <button type="button" data-tab="pool">Sample pool</button>
+        <button type="button" data-tab="space">Space</button>
         <button type="button" data-tab="candidates">Top candidates</button>
         <button type="button" data-tab="process">Process / BO</button>
       </div>
@@ -1789,7 +1876,236 @@ function candidateRadarsHtml(c) {
   </div>`;
 }
 
+function pcaCaption(meta, dimLabel) {
+  if (!meta || !meta.loadings || !meta.loadings.length) {
+    return `${dimLabel} → 3 PCA axes (drag to orbit · click a dot to select).`;
+  }
+  const bits = meta.loadings.map((pc) => {
+    const pct = Math.round(100 * (pc.explained || 0));
+    const tops = (pc.top || []).slice(0, 2).map(t => (PROBE_AXIS_LABELS[t.axis] || EVAL_AXIS_LABELS[t.axis] || t.axis).replace(/_/g, " "));
+    return `PC${pc.pc} ${pct}% (${tops.join(", ")})`;
+  });
+  return `${dimLabel} → 3 PCA axes · ${bits.join(" · ")}. Drag to orbit; click a gold/teal dot to select.`;
+}
+
+let spaceCloudHandles = [];
+
+function disposeSpaceClouds() {
+  for (const h of spaceCloudHandles) {
+    try {
+      if (h.raf) cancelAnimationFrame(h.raf);
+      if (h.ro) h.ro.disconnect();
+      if (h.controls) h.controls.dispose();
+      if (h.renderer) {
+        h.renderer.dispose();
+        if (h.renderer.domElement && h.renderer.domElement.parentNode) {
+          h.renderer.domElement.parentNode.removeChild(h.renderer.domElement);
+        }
+      }
+      if (h.points) {
+        h.points.geometry?.dispose();
+        h.points.material?.dispose();
+      }
+      if (h.elites) {
+        h.elites.geometry?.dispose();
+        h.elites.material?.dispose();
+      }
+    } catch (_) { /* ignore */ }
+  }
+  spaceCloudHandles = [];
+}
+
+function mountSpaceCloud(host, points, xyzKey, tipEl) {
+  if (!host || !points.length) return;
+  const w0 = host.clientWidth || 640;
+  const h0 = host.clientHeight || 320;
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0a0a0a);
+  const camera = new THREE.PerspectiveCamera(42, w0 / Math.max(h0, 1), 0.1, 2000);
+  camera.position.set(70, 55, 90);
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setSize(w0, h0, false);
+  host.insertBefore(renderer.domElement, tipEl || null);
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+  controls.target.set(0, 0, 0);
+
+  const axis = new THREE.AxesHelper(36);
+  scene.add(axis);
+  const grid = new THREE.GridHelper(120, 12, 0x222222, 0x161616);
+  grid.position.y = -40;
+  scene.add(grid);
+
+  const positions = [];
+  const colors = [];
+  const elitePos = [];
+  const metaByIndex = [];
+  const eliteMeta = [];
+  for (const p of points) {
+    const xyz = p[xyzKey] || [0, 0, 0];
+    const x = Number(xyz[0]) || 0;
+    const y = Number(xyz[1]) || 0;
+    const z = Number(xyz[2]) || 0;
+    positions.push(x, y, z);
+    metaByIndex.push(p);
+    if (p.elite) {
+      colors.push(0.83, 0.66, 0.29);
+      elitePos.push(x, y, z);
+      eliteMeta.push(p);
+    } else if (p.fits) {
+      colors.push(0.42, 0.54, 0.60);
+    } else {
+      colors.push(0.22, 0.22, 0.22);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  const mat = new THREE.PointsMaterial({
+    size: 4.2,
+    vertexColors: true,
+    sizeAttenuation: true,
+    transparent: true,
+    opacity: 0.9,
+  });
+  const cloud = new THREE.Points(geo, mat);
+  cloud.userData.meta = metaByIndex;
+  scene.add(cloud);
+
+  let eliteCloud = null;
+  if (elitePos.length) {
+    const egeo = new THREE.BufferGeometry();
+    egeo.setAttribute("position", new THREE.Float32BufferAttribute(elitePos, 3));
+    const emat = new THREE.PointsMaterial({
+      size: 9.5,
+      color: 0xd4a84b,
+      sizeAttenuation: true,
+      transparent: true,
+      opacity: 0.95,
+    });
+    eliteCloud = new THREE.Points(egeo, emat);
+    eliteCloud.userData.meta = eliteMeta;
+    scene.add(eliteCloud);
+  }
+
+  const raycaster = new THREE.Raycaster();
+  raycaster.params.Points = { threshold: 3.5 };
+  const pointer = new THREE.Vector2();
+
+  function pick(ev) {
+    const rect = renderer.domElement.getBoundingClientRect();
+    pointer.x = ((ev.clientX - rect.left) / Math.max(rect.width, 1)) * 2 - 1;
+    pointer.y = -((ev.clientY - rect.top) / Math.max(rect.height, 1)) * 2 + 1;
+    raycaster.setFromCamera(pointer, camera);
+    const targets = eliteCloud ? [eliteCloud, cloud] : [cloud];
+    const hits = raycaster.intersectObjects(targets, false);
+    if (!hits.length) return null;
+    const hit = hits[0];
+    const list = hit.object.userData.meta || [];
+    return list[hit.index] || null;
+  }
+
+  function onMove(ev) {
+    const p = pick(ev);
+    if (tipEl) {
+      tipEl.textContent = p
+        ? [p.label, p.envelope, p.loading, p.plate].filter(Boolean).join(" · ")
+        : "Hover a sample · drag to orbit";
+    }
+  }
+  function onClick(ev) {
+    const p = pick(ev);
+    if (p && p.cell_id) selectCandidate(p.cell_id);
+  }
+  renderer.domElement.addEventListener("pointermove", onMove);
+  renderer.domElement.addEventListener("click", onClick);
+
+  const handle = {
+    renderer,
+    controls,
+    points: cloud,
+    elites: eliteCloud,
+    raf: 0,
+    ro: null,
+  };
+  function frame() {
+    handle.raf = requestAnimationFrame(frame);
+    controls.update();
+    renderer.render(scene, camera);
+  }
+  frame();
+
+  handle.ro = new ResizeObserver(() => {
+    const w = host.clientWidth || w0;
+    const h = host.clientHeight || h0;
+    camera.aspect = w / Math.max(h, 1);
+    camera.updateProjectionMatrix();
+    renderer.setSize(w, h, false);
+  });
+  handle.ro.observe(host);
+  spaceCloudHandles.push(handle);
+}
+
+function renderSpaceTab(t) {
+  disposeSpaceClouds();
+  const space = t.space || {};
+  const points = space.points || [];
+  if (!points.length) {
+    processBody.innerHTML = `<div class="empty-msg">No COVER archive points yet — generate to map the sample space.</div>`;
+    return;
+  }
+  const pca = space.pca || {};
+  const elites = points.filter(p => p.elite);
+  const eliteList = elites.length
+    ? `<ol class="space-elite-list">${elites.map(p => {
+        const why = p.elite_why ? ` — ${esc(p.elite_why)}` : "";
+        return `<li><button type="button" data-space-cell="${esc(p.cell_id)}">${esc(p.label || p.cell_id)}</button>${why}</li>`;
+      }).join("")}</ol>`
+    : `<div class="empty-msg">No top candidates highlighted.</div>`;
+  processBody.innerHTML = `
+    <div class="space-wrap">
+      <div class="notes-line" style="margin-top:0">
+        ${points.length} archive cell(s) · ${space.legal || 0} legal · ${space.illegal || 0} illegal ·
+        ${space.elite_count || 0} top candidate(s) as gold dots.
+        Each sample is one point; 9 probe / 4 eval axes are compressed to 3 PCA coordinates.
+      </div>
+      ${space.note ? `<div class="notes-line">${esc(space.note)}</div>` : ""}
+      <div class="space-legend">
+        <span><i class="space-swatch illegal"></i> illegal</span>
+        <span><i class="space-swatch legal"></i> legal</span>
+        <span><i class="space-swatch elite"></i> top candidate</span>
+      </div>
+      <div class="space-block">
+        <h4>9 probe axes — COVER strategy space</h4>
+        <div class="space-pca-meta">${esc(pcaCaption(pca.probe, "9D"))}</div>
+        <div class="space-cloud" id="spaceCloudProbe"><div class="space-cloud-tip">Hover a sample · drag to orbit</div></div>
+      </div>
+      <div class="space-block">
+        <h4>4 eval axes — soft quality</h4>
+        <div class="space-pca-meta">${esc(pcaCaption(pca.eval, "4D"))}</div>
+        <div class="space-cloud" id="spaceCloudEval"><div class="space-cloud-tip">Hover a sample · drag to orbit</div></div>
+      </div>
+      <div class="space-block">
+        <h4>Top candidates</h4>
+        ${eliteList}
+      </div>
+    </div>`;
+  const probeHost = document.getElementById("spaceCloudProbe");
+  const evalHost = document.getElementById("spaceCloudEval");
+  if (probeHost) mountSpaceCloud(probeHost, points, "xyz_probe", probeHost.querySelector(".space-cloud-tip"));
+  if (evalHost) mountSpaceCloud(evalHost, points, "xyz_eval", evalHost.querySelector(".space-cloud-tip"));
+  processBody.querySelectorAll("[data-space-cell]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const id = btn.getAttribute("data-space-cell");
+      if (id) selectCandidate(id);
+    });
+  });
+}
+
 function renderProcess(t) {
+  if (activeTab !== "space") disposeSpaceClouds();
   if (!t) {
     processBody.innerHTML = `<div class="empty-msg">Generate to see requirements, limitations, preferences, and search steps.</div>`;
     return;
@@ -1810,6 +2126,10 @@ function renderProcess(t) {
       ${notes ? `<div class="notes-line">Notes: ${notes}</div>` : ""}
       ${unk ? `<div class="notes-line">Unknown programs: ${unk}</div>` : ""}
       <div class="notes-line">Source: ${esc(i.source || "regex")}</div>`;
+    return;
+  }
+  if (activeTab === "space") {
+    renderSpaceTab(t);
     return;
   }
   if (activeTab === "pool") {
@@ -2344,6 +2664,7 @@ class Handler(BaseHTTPRequestHandler):
                     "unmatched": [],
                 },
                 "sample_pool": {"count": 0, "schemes": [], "archive_preview": [], "selected_rank": None},
+                "space": {"probe_axes": [], "eval_axes": [], "points": [], "pca": {}, "note": ""},
                 "top_candidates": [],
                 "process": {
                     "mode": "error",

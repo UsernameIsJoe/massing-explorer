@@ -125,6 +125,7 @@ class TestUserBriefRegression(unittest.TestCase):
     def test_top_floor_above_wording_variants(self) -> None:
         cases = [
             "media prefer on top floor above admin",
+            "media prefer on the top floor above admin",
             "media preferably on the top floor above administration",
             "Media should sit on the uppermost floor above admin.",
             "prefer media on top floor above admin",
@@ -144,6 +145,42 @@ class TestUserBriefRegression(unittest.TestCase):
                     ),
                     msg=(text, stacks, parsed.constraints.get("floor_pins")),
                 )
+                if "top" in text.lower() or "uppermost" in text.lower() or "highest" in text.lower():
+                    pins = parsed.constraints.get("floor_pins") or {}
+                    self.assertEqual(int(pins.get("MEDIA CENTER", 0)), -1, msg=text)
+
+    def test_compact_and_loose_layout_preferences(self) -> None:
+        compact_cases = [
+            "prefer smaller footprint",
+            "prefer layout to be more compact",
+            "keep the configuration more compact",
+            "prefer a compact massing",
+        ]
+        loose_cases = [
+            "layout to be more loose",
+            "configuration to be more loose",
+            "prefer a loose layout",
+            "prefer elongated bars",
+            "prefer a looser arrangement",
+        ]
+        for text in compact_cases:
+            with self.subTest(text=text):
+                parsed = parse_brief(text, DEPTS)
+                briefing = briefing_from_parsed(parsed)
+                self.assertEqual(parsed.preference, "compact", msg=text)
+                self.assertIn("compact", _levers(briefing, "preferences"))
+        for text in loose_cases:
+            with self.subTest(text=text):
+                parsed = parse_brief(text, DEPTS)
+                briefing = briefing_from_parsed(parsed)
+                self.assertEqual(parsed.preference, "low_rise", msg=text)
+                self.assertIn("low_rise", _levers(briefing, "preferences"))
+        # "loose cluster" is program adjacency, not envelope taste.
+        cluster = parse_brief(
+            "Food, dining, and fitness should form a loose cluster.",
+            DEPTS,
+        )
+        self.assertEqual(cluster.preference, "balanced")
 
     def test_numbers_accounted_for_comma_min(self) -> None:
         text = "length max 70 meters, min 10 meters"

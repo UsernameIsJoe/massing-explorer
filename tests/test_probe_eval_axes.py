@@ -124,7 +124,7 @@ class TestEvalAxes(unittest.TestCase):
         self.assertEqual(TRAIT_NAMES, EVAL_AXIS_NAMES)
         self.assertEqual(len(TRAIT_NAMES), 4)
 
-    def test_awkward_split_min_area_100_sqm(self) -> None:
+    def test_awkward_split_min_area_70_sqm(self) -> None:
         from massing_explorer.explore.performance import (
             MIN_SPLIT_PART_SF,
             MIN_SPLIT_PART_SQM,
@@ -135,8 +135,8 @@ class TestEvalAxes(unittest.TestCase):
             prefer_clean_splits,
         )
 
-        self.assertEqual(MIN_SPLIT_PART_SQM, 100.0)
-        self.assertAlmostEqual(MIN_SPLIT_PART_SF, 100.0 * 10.76391041671, places=3)
+        self.assertEqual(MIN_SPLIT_PART_SQM, 70.0)
+        self.assertAlmostEqual(MIN_SPLIT_PART_SF, 70.0 * 10.76391041671, places=3)
 
         def mass_with_floors(floor_allocs: list[list[tuple[str, float]]]) -> list:
             floors = []
@@ -153,7 +153,7 @@ class TestEvalAxes(unittest.TestCase):
                 )
             return [SimpleNamespace(id="m1", name="Mass 1", floors=floors)]
 
-        # Thin split slice under 100 m² (~1076 SF) — fail
+        # Thin split slice under 70 m² (~753 SF) — fail
         self.assertEqual(
             _awkward_floor_splits(
                 mass_with_floors([[("CORE", 5000.0)], [("CORE", 500.0)]])

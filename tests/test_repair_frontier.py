@@ -51,7 +51,7 @@ class TestViolationDistance(unittest.TestCase):
                 _check("site_length:mass_1", "Mass 1: length 280.0 ft vs max 196.0 ft"),
                 _check(
                     "program_split:mass_1:CORE ACADEMIC",
-                    "Mass 1 / CORE ACADEMIC (L0+L1): split slice under 100 m²",
+                    "Mass 1 / CORE ACADEMIC (L0+L1): split slice under 70 m²",
                 ),
                 _check(
                     "ratio_band:mass_1",

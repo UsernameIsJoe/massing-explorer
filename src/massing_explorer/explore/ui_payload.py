@@ -145,6 +145,222 @@ def _slim_scheme(
     return out
 
 
+def _stories_signature(entry: dict[str, Any]) -> tuple:
+    stories = entry.get("stories") or ((entry.get("strategy") or {}).get("G") or {}).get("stories") or {}
+    if isinstance(stories, dict):
+        return tuple(sorted((str(k), int(v)) for k, v in stories.items()))
+    return ()
+
+
+def _dot(a: list[float], b: list[float]) -> float:
+    return sum(x * y for x, y in zip(a, b))
+
+
+def _norm(v: list[float]) -> float:
+    return _dot(v, v) ** 0.5
+
+
+def _mat_vec(m: list[list[float]], v: list[float]) -> list[float]:
+    return [_dot(row, v) for row in m]
+
+
+def _pca_project_3d(
+    rows: list[list[float]],
+    axis_names: list[str],
+    *,
+    scale: float = 48.0,
+) -> tuple[list[list[float]], dict[str, Any]]:
+    """
+    Project high-D rows to 3D via PCA (pure Python).
+
+    Returns per-row xyz (scaled for the Three.js cloud) and a small meta
+    blob: explained variance shares + top loadings per PC for the UI.
+    """
+    n = len(rows)
+    d = len(axis_names)
+    if n == 0 or d == 0:
+        return [], {
+            "method": "pca",
+            "explained": [0.0, 0.0, 0.0],
+            "loadings": [],
+            "axis_names": list(axis_names),
+        }
+
+    # Pad / truncate each row to d.
+    data = []
+    for row in rows:
+        vals = [float(x) for x in row[:d]]
+        if len(vals) < d:
+            vals.extend([0.0] * (d - len(vals)))
+        data.append(vals)
+
+    mean = [sum(data[i][j] for i in range(n)) / n for j in range(d)]
+    centered = [[data[i][j] - mean[j] for j in range(d)] for i in range(n)]
+
+    # Covariance d×d (unbiased if n>1).
+    denom = float(max(n - 1, 1))
+    cov = [[0.0] * d for _ in range(d)]
+    for i in range(d):
+        for j in range(i, d):
+            s = sum(centered[r][i] * centered[r][j] for r in range(n)) / denom
+            cov[i][j] = s
+            cov[j][i] = s
+
+    total_var = sum(cov[i][i] for i in range(d)) or 1.0
+    components: list[list[float]] = []
+    eigenvalues: list[float] = []
+
+    # Power iteration with deflation for top 3 eigenvectors.
+    for _ in range(3):
+        v = [0.0] * d
+        # Seed on largest remaining diagonal, then a tiny jitter.
+        seed = max(range(d), key=lambda k: abs(cov[k][k]))
+        v[seed] = 1.0
+        for j in range(d):
+            v[j] += 1e-6 * ((j * 17 + 3) % 7)
+        for _iter in range(64):
+            w = _mat_vec(cov, v)
+            nrm = _norm(w)
+            if nrm < 1e-12:
+                break
+            v = [x / nrm for x in w]
+            # Re-orthogonalize against earlier components.
+            for u in components:
+                proj = _dot(v, u)
+                v = [x - proj * y for x, y in zip(v, u)]
+            nrm = _norm(v)
+            if nrm < 1e-12:
+                break
+            v = [x / nrm for x in v]
+        lam = _dot(v, _mat_vec(cov, v))
+        if _norm(v) < 1e-12 or abs(lam) < 1e-14:
+            v = [0.0] * d
+            # Fill unused PC with a residual standard basis direction.
+            used = {max(range(d), key=lambda k: abs(u[k])) for u in components if u}
+            for j in range(d):
+                if j not in used:
+                    v[j] = 1.0
+                    break
+            else:
+                v[0] = 1.0
+            lam = 0.0
+        components.append(v)
+        eigenvalues.append(max(0.0, lam))
+        # Deflate: C ← C − λ vvᵀ
+        for i in range(d):
+            for j in range(d):
+                cov[i][j] -= lam * v[i] * v[j]
+
+    # Scores: centered · V
+    xyz_raw = [
+        [_dot(centered[r], components[k]) for k in range(3)]
+        for r in range(n)
+    ]
+    # Scale so the cloud fits a comfortable view box.
+    max_abs = max((abs(c) for row in xyz_raw for c in row), default=0.0) or 1.0
+    xyz = [[(c / max_abs) * scale for c in row] for row in xyz_raw]
+
+    explained = [round(e / total_var, 4) for e in eigenvalues]
+    loadings: list[dict[str, Any]] = []
+    for k, comp in enumerate(components):
+        ranked = sorted(
+            ((axis_names[j], round(comp[j], 4)) for j in range(d)),
+            key=lambda t: abs(t[1]),
+            reverse=True,
+        )
+        loadings.append(
+            {
+                "pc": k + 1,
+                "explained": explained[k] if k < len(explained) else 0.0,
+                "top": [{"axis": a, "weight": w} for a, w in ranked[:3]],
+            }
+        )
+
+    return xyz, {
+        "method": "pca",
+        "explained": explained,
+        "loadings": loadings,
+        "axis_names": list(axis_names),
+        "scale": scale,
+    }
+
+
+def _attach_pca_clouds(
+    points: list[dict[str, Any]],
+    *,
+    probe_names: list[str],
+    eval_names: list[str],
+) -> dict[str, Any]:
+    probe_rows = [[float((p.get("probe") or {}).get(a) or 0.0) for a in probe_names] for p in points]
+    eval_rows = [[float((p.get("eval") or {}).get(a) or 0.0) for a in eval_names] for p in points]
+    probe_xyz, probe_meta = _pca_project_3d(probe_rows, probe_names)
+    eval_xyz, eval_meta = _pca_project_3d(eval_rows, eval_names)
+    for i, p in enumerate(points):
+        p["xyz_probe"] = probe_xyz[i] if i < len(probe_xyz) else [0.0, 0.0, 0.0]
+        p["xyz_eval"] = eval_xyz[i] if i < len(eval_xyz) else [0.0, 0.0, 0.0]
+    return {"probe": probe_meta, "eval": eval_meta}
+
+
+def _space_distribution(
+    archive: dict[str, Any],
+    top_candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Archive points in 9 probe + 4 eval axes for the Space tab."""
+    from massing_explorer.explore.axes import PROBE_AXIS_NAMES
+    from massing_explorer.explore.performance import EVAL_AXIS_NAMES
+
+    elite_why = {str(c.get("cell_id") or ""): str(c.get("why") or "") for c in top_candidates}
+    elite_ids = {k for k in elite_why if k}
+    points: list[dict[str, Any]] = []
+    for entry in _all_archive_entries(archive):
+        cell = str(entry.get("cell") or "")
+        geom = ((entry.get("strategy") or {}).get("G") or {})
+        points.append(
+            {
+                "cell_id": cell,
+                "label": _cell_label(entry),
+                "fits": bool(entry.get("fits_limitations")),
+                "elite": cell in elite_ids,
+                "elite_why": elite_why.get(cell) or "",
+                "stories": entry.get("stories") or geom.get("stories") or {},
+                "envelope": geom.get("envelope") or "",
+                "loading": geom.get("loading") or "",
+                "plate": geom.get("plate_profile") or "",
+                "topology": ((entry.get("strategy") or {}).get("T") or {}).get("kind") or "",
+                "probe": _probe_axes_for_entry(entry),
+                "eval": _eval_axes_for_entry(entry),
+            }
+        )
+    pca = _attach_pca_clouds(
+        points,
+        probe_names=list(PROBE_AXIS_NAMES),
+        eval_names=list(EVAL_AXIS_NAMES),
+    )
+    legal = [p for p in points if p.get("fits")]
+    elites = [p for p in points if p.get("elite")]
+    story_set = {_stories_signature({"stories": p.get("stories")}) for p in legal}
+    elite_stories = {_stories_signature({"stories": p.get("stories")}) for p in elites}
+    note = ""
+    if elites and len(elite_stories) <= 1 and legal:
+        note = (
+            "Top candidates share the same story heights, so their 3D silhouettes look alike. "
+            "They still differ on COVER axes (envelope / loading / plate) — gold dots in the cloud. "
+            f"Only {len(story_set)} legal story pattern(s) survived in the archive."
+        )
+    elif not legal:
+        note = "No legal cells yet — cloud shows illegal COVER samples only."
+    return {
+        "probe_axes": list(PROBE_AXIS_NAMES),
+        "eval_axes": list(EVAL_AXIS_NAMES),
+        "points": points,
+        "pca": pca,
+        "legal": len(legal),
+        "illegal": len(points) - len(legal),
+        "elite_count": len(elites),
+        "note": note,
+    }
+
+
 def _slim_candidate(entry: dict[str, Any], *, kept: bool = False, story_height_ft: float = 14.0) -> dict[str, Any]:
     strategy = entry.get("strategy") or {}
     geom = strategy.get("G") or {}
@@ -598,6 +814,21 @@ def transparency_payload(
         except Exception:
             top_candidates = []
 
+    space = (
+        _space_distribution(archive, top_candidates)
+        if archive
+        else {
+            "probe_axes": [],
+            "eval_axes": [],
+            "points": [],
+            "pca": {"probe": {}, "eval": {}},
+            "legal": 0,
+            "illegal": 0,
+            "elite_count": 0,
+            "note": "",
+        }
+    )
+
     process = {
         "mode": store.get("mode") or ("cover" if full_explore else "quick"),
         "full_explore": bool(full_explore and store),
@@ -676,6 +907,7 @@ def transparency_payload(
     return {
         "interpreted": interpreted,
         "sample_pool": sample_pool,
+        "space": space,
         "top_candidates": top_candidates,
         "learn_pair": learn_pair,
         "process": process,

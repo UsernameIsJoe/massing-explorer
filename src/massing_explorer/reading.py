@@ -429,8 +429,16 @@ def _fold_clause_into_reading(reading: DesignReading, clause: dict[str, Any]) ->
                 reading.loading = "double"
         elif lever == "low_rise" and not reading.preference:
             reading.preference = "low_rise"
-        elif lever in {"compact", "spread"} and not reading.preference:
-            reading.preference = "compact" if lever == "compact" else "balanced"
+        elif lever in {"compact", "smaller_footprint"} and not reading.preference:
+            reading.preference = "compact"
+        elif lever in {"spread", "elongated", "loose", "looser"} and not reading.preference:
+            reading.preference = "low_rise"
+        elif lever == "scheme_preference" and not reading.preference:
+            token = str(clause.get("text") or "").lower()
+            if "compact" in token or "small" in token:
+                reading.preference = "compact"
+            elif any(w in token for w in ("low", "loose", "elongat", "spread")):
+                reading.preference = "low_rise"
 
 
 def _positive_number(value: Any) -> float | None:
@@ -490,8 +498,14 @@ def reading_prompt(text: str, department_names: list[str], parsed: dict[str, Any
         "Levers: same_mass, alone, mass_count, double_height, keep_together, "
         "keep_apart, exact_length, exact_width, exact_depth, dept_width, "
         "max_length, max_width, max_stories, max_height, "
-        "site_length, max_total_length, pin_ground, pin_floor, ratio, loading, "
-        "low_rise, compact, preferred_width.\n"
+        "site_length, max_total_length, pin_ground, pin_floor, stack_above, ratio, loading, "
+        "low_rise, compact, elongated, loose, preferred_width.\n"
+        "Envelope / footprint taste: 'smaller footprint', 'more compact', "
+        "'compact layout/configuration' → lever compact. "
+        "'more loose', 'loose layout/configuration', 'spread out', 'elongated' "
+        "→ lever low_rise (or elongated/loose). "
+        "'media on the top floor above admin' → pin_floor (media) + stack_above "
+        "(media above admin); ground-floor admin stays pin_ground.\n"
         "For a stated size on one program (e.g. 'core academic width must be "
         "80 ft'), use exact_width / preferred_width / max_width with "
         "departments filled and value in feet (convert m→ft only if unit is m).\n"
