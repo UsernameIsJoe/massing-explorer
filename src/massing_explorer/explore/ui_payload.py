@@ -277,6 +277,18 @@ def _process_steps(store: dict[str, Any]) -> list[dict[str, Any]]:
                 "detail": archive.get("note") or store.get("note") or "",
             }
         )
+    repair = store.get("repair") or {}
+    if repair.get("ran") or repair.get("tried"):
+        steps.append(
+            {
+                "phase": "REPAIR",
+                "summary": (
+                    f"{repair.get('legalized') or 0} legalized · "
+                    f"{repair.get('tried') or 0} projection(s)"
+                ),
+                "detail": repair.get("note") or "",
+            }
+        )
     diagnose = store.get("diagnose") or {}
     if diagnose.get("ran"):
         probes = diagnose.get("probes") or []
@@ -615,6 +627,16 @@ def transparency_payload(
             "cells": len(archive.get("cells") or {}),
             "unsupported": list(archive.get("unsupported") or [])[:12],
             "partitions": store.get("partitions") or archive.get("stated_partition"),
+            "frontier": [
+                {
+                    "idea": row.get("idea"),
+                    "distance": row.get("distance"),
+                    "failed_kinds": list(row.get("failed_kinds") or [])[:6],
+                    "reason": row.get("reason") or "",
+                }
+                for row in (archive.get("frontier") or [])[:3]
+            ],
+            "frontier_count": len(archive.get("frontier") or []),
         }
         if archive
         else None,

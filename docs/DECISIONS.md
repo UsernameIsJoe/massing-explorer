@@ -10,11 +10,11 @@ Decisions locked from the initial planning discussion (Sep 2026). Update this fi
 
 **Massing Explorer** is a standalone **program-to-massing explorer**. It is not a parametric slider toy, not a site-context exporter, and not an AI shape generator.
 
-Primary goal: make the architect smarter about the design problem — which legal strategies exist, which archive cells are empty and why — while continuously validating GSF.
+Primary goal: make the architect smarter about the design problem — which legal strategies exist, which near-feasible ideas can be repaired into the same concept, which archive cells are empty and why — while continuously validating GSF.
 
 Secondary goal: export geometry to Rhino.
 
-A strategy is `S = (P, T, V, G, D)`, not a width. The LLM emits typed design actions. The engine applies or rejects them. COVER / LEARN / REFINE are modes over one archive.
+A strategy is `S = (P, T, V, G, D)`, not a width. The LLM emits typed design actions. The engine applies or rejects them. COVER / REPAIR / LEARN / REFINE are modes over one archive. REPAIR projects an illegal COVER idea onto the nearest legal twin of that idea; it does not regroup a must.
 
 ---
 
@@ -190,7 +190,7 @@ Translate an architectural program spreadsheet into conceptual building masses:
 | 10 | Assign programs to floors; keep departments together |
 | 11 | Solve paired masses: W = (A₁+A₂)/L, L₁ = A₁/W, L₂ = A₂/W |
 | 12 | Apply site constraints; compensate via other dim / floors / distribution |
-| 13 | Compare alternatives among **legal** strategies (COVER map, LEARN A/B, REFINE lineages) |
+| 13 | Compare alternatives among **legal** strategies (COVER map, REPAIR twins, LEARN A/B, REFINE lineages) |
 | 14 | Recalculate on every dimension change |
 | 15 | Final GSF verification: Fit = Actual − Target |
 
@@ -210,7 +210,7 @@ Translate an architectural program spreadsheet into conceptual building masses:
 | 10 | Pins from brief/chat; engine allocates per floor |
 | 11 | Engine (pairing is T when the brief actually paired) |
 | 12 | Engine (from config/chat limits). A cap is a filter, never a length to draw. |
-| 13 | `explore/` archive: COVER / LEARN / REFINE. `search.py` is the width/story baseline. |
+| 13 | `explore/` archive: COVER / REPAIR / LEARN / REFINE. `search.py` is the width/story baseline. |
 | 14–15 | Engine (always) |
 
 ---

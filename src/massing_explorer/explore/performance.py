@@ -157,6 +157,9 @@ def measure(result: Any, session: Any = None, archive: dict[str, Any] | None = N
 
     vector.update(eval_composites(vector, session))
     vector["novelty"] = novelty_versus_archive(vector, archive)
+    from .feasibility import attach_feasibility
+
+    attach_feasibility(vector, result, session, awkward=awkward_fail)
     return {k: (round(v, 4) if isinstance(v, float) else v) for k, v in vector.items()}
 
 

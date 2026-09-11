@@ -168,3 +168,55 @@ def partition_id(session: Any) -> str:
     for mass in session.masses:
         chunks.append("+".join(sorted(mass.departments)))
     return " / ".join(sorted(chunks))
+
+
+def idea_key(session: Any) -> str:
+    """Coarse COVER idea: P + T + loading + envelope + plate + story bands.
+
+    Exact widths are omitted so a repaired plate stays the same idea.
+    """
+    loading = session.constraints.get("loading") or "double"
+    topo = topology_of(session)
+    env = session.constraints.get("cover_envelope") or "balanced"
+    plate = _plate_profile_of(session)
+    parts = [
+        f"P:{partition_id(session)}",
+        f"T:{topo}",
+        f"L:{loading}",
+        f"E:{env}",
+        f"PL:{plate}",
+    ]
+    for mass in session.masses:
+        parts.append(f"{mass.id}:{story_band(mass.story_count)}")
+    return "|".join(parts)
+
+
+def idea_key_from_entry(entry: dict[str, Any] | None) -> str:
+    """Rebuild an idea key from an archive entry when `idea` was not stored."""
+    if not entry:
+        return ""
+    if entry.get("idea"):
+        return str(entry["idea"])
+    strat = entry.get("strategy") or {}
+    program = strat.get("P") or {}
+    topo = (strat.get("T") or {}).get("kind") or "independent_bars"
+    geom = strat.get("G") or {}
+    loading = geom.get("loading") or "double"
+    env = geom.get("envelope") or "balanced"
+    plate = geom.get("plate_profile") or "uniform"
+    partition = entry.get("partition") or ""
+    if not partition:
+        parts = []
+        for depts in (program.get("partition") or {}).values():
+            parts.append("+".join(sorted(str(d) for d in (depts or []))))
+        partition = " / ".join(sorted(parts))
+    stories = geom.get("stories") or entry.get("stories") or {}
+    bands = []
+    for mid, n in stories.items():
+        try:
+            bands.append(f"{mid}:{story_band(int(n))}")
+        except (TypeError, ValueError):
+            continue
+    return "|".join(
+        [f"P:{partition}", f"T:{topo}", f"L:{loading}", f"E:{env}", f"PL:{plate}", *bands]
+    )

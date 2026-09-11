@@ -4,7 +4,7 @@ Step-by-step build plan. Do not skip validation gates between phases.
 
 Phases 1–6 built the **engine** (ingest, chat, solver, pairing, floors, width
 search). The **control loop** on that engine is [BLUEPRINT-search.md](BLUEPRINT-search.md):
-COVER / LEARN / REFINE over a strategy archive. See [CONCEPT.md](CONCEPT.md)
+COVER / REPAIR / LEARN / REFINE over a strategy archive. See [CONCEPT.md](CONCEPT.md)
 and [WORKFLOW.md](WORKFLOW.md).
 
 ---
@@ -198,7 +198,7 @@ least as strict as the solver on every shared limit.
 | Scenario C | the case that needed manual reasoning now solves automatically | PASS |
 
 Chat no longer *stops* at this enumerator. `search.py` remains the width/story
-**baseline**. A brief now runs COVER / LEARN / REFINE over distinct legal
+**baseline**. A brief now runs COVER / REPAIR / LEARN / REFINE over distinct
 strategies in `explore/` (next section).
 
 ---
@@ -223,6 +223,7 @@ Concept: [CONCEPT.md](CONCEPT.md). Workflow: [WORKFLOW.md](WORKFLOW.md).
 - [x] T and D — only drawable topologies and stated site; courtyard unsupported
 - [x] MCTS — over design actions from several COVER elites; planner is expansion prior; `search.py` stays the baseline
 - [x] Bayesian optimization in `explore/bayes.py` — sequential EI budget manager, not a generator, not on invented feet
+- [x] REPAIR / frontier — violation distance, project illegal COVER ideas onto the same concept, MCTS from legal ∪ frontier, DIAGNOSE on low yield
 
 ### The trust rule (unchanged)
 
@@ -240,7 +241,8 @@ A required grouping is not a Monte Carlo coordinate.
 | Courtyard | Named, unsupported, not a failed sample |
 | Planner cap | At most five typed actions; invented feet dropped |
 | LEARN | A/B among feasible elites; a written brief is not a choice |
-| MCTS | Starts from COVER elites; typed actions; nearby width is a local step; planner is expansion prior |
+| REPAIR | Slight site-length miss can become legal without regrouping P |
+| MCTS | Starts from COVER elites and frontier near-misses; typed actions; nearby width is a local step |
 | Chat path | `apply_brief` still solves and reports failed checks |
 
 ---
@@ -279,7 +281,7 @@ Phase 5 (program per level)
     ↓
 Phase 6 (scheme search / auto-fit) — enumeration baseline
     ↓
-Strategy search (blueprint 0–8) — archive + COVER/LEARN/REFINE
+Strategy search (blueprint 0–8) — archive + COVER/REPAIR/LEARN/REFINE
     ↓
 Phase 7 (Rhino) — optional
 ```

@@ -20,6 +20,7 @@ BO_CAP = 12
 BO_MIN = 4
 REFINE_CAP = 12
 REFINE_MIN = 4
+REPAIR_CAP = 24
 FEATURE_NOVEL_DIST = 0.12
 
 
@@ -51,6 +52,7 @@ def read_explore_budget(session: Any) -> dict[str, int]:
         "mcts_roots": int(cfg.get("mcts_roots", MCTS_ROOTS)),
         "bo": int(cfg.get("bo", BO_CAP)),
         "refine": int(cfg.get("refine", REFINE_CAP)),
+        "repair": int(cfg.get("repair", REPAIR_CAP)),
     }
 
 

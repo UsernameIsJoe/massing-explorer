@@ -5,6 +5,38 @@ Update this file at the end of every work session.
 
 ---
 
+## 2026-09-11 — REPAIR / near-feasible frontier
+
+### Done
+
+COVER treated every illegal sample as reward 0, so a 0.5% edge miss looked
+the same as a garbage scheme. MCTS and DIAGNOSE only started from legal
+cells (DIAGNOSE exited if *any* legal existed). That is now a projection
+layer, not a rewrite of COVER / MCTS / BO / LEARN.
+
+- **Violation vector** (`explore/feasibility.py`) — hard-limit distance only
+  (edge overrun, min-edge, hard ratio, split, required width, other). Soft
+  prefs do not enter. Illegal `search_reward` stays 0.
+- **Archive frontier** — top ~12 illegal idea-keys with distance < 0.35; a
+  closer illegal replaces a worse occupant of the same cell.
+- **REPAIR** (`explore/repair.py`) after COVER — ~8 closest ideas × ≤3
+  existing actions (`ResizeSuggestion` width, `SET_WIDTH`, `SET_STORIES`,
+  hard ratio project, unlocked `CLEAR_PAIRINGS`). Same partition. Not taste.
+- **MCTS roots** — legal elites first, then frontier. **DIAGNOSE** on zero
+  legal, or legal < 3 with frontier ≥ 5. LEARN pairs stay legal-only.
+- Docs: BLUEPRINT, CONCEPT, WORKFLOW, README, PHASES, DECISIONS.
+
+Tests: `tests/test_repair_frontier.py`.
+
+### Next steps
+
+- Diversity COVER sampler (max-distance over the discrete pool) — not more
+  sample count.
+- BO dual model (quality | feasibility) and categorical partition distance
+  instead of SHA-hash on `program_organization`.
+
+---
+
 ## 2026-09-10 — Exploit COVER: multi-root MCTS, sequential BO, broader REFINE
 
 ### Done

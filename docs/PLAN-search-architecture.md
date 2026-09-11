@@ -2,7 +2,7 @@
 
 Recorded 8 Sep 2026. This is the implementation plan for `docs/DISCUSSION-search-architecture.md`. It is not a rewrite of the solver, the brief roles, or the L-shape.
 
-**Superseded as project law by `docs/BLUEPRINT-search.md` (9 Sep 2026).** The three jobs below (cover, learn, refine) remain. They are modes over a design archive, not a one-way Stage 1 → 2 → 3 pipeline. Build order, grouping rule, and the control loop live in the blueprint. Product pages: [CONCEPT.md](CONCEPT.md), [WORKFLOW.md](WORKFLOW.md).
+**Superseded as project law by `docs/BLUEPRINT-search.md` (9 Sep 2026; REPAIR / frontier 11 Sep 2026).** The three jobs below (cover, learn, refine) remain. They are modes over a design archive, not a one-way Stage 1 → 2 → 3 pipeline. Illegal COVER samples are ranked by distance-to-feasibility and may be projected onto the same idea. Build order, grouping rule, and the control loop live in the blueprint. Product pages: [CONCEPT.md](CONCEPT.md), [WORKFLOW.md](WORKFLOW.md).
 
 ---
 

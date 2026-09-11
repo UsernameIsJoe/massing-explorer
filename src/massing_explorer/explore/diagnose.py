@@ -1,10 +1,11 @@
 """
-DIAGNOSE: when COVER finds zero legal schemes.
+DIAGNOSE: when COVER+REPAIR finds zero legal schemes, or a low legal yield
+with a large recoverable frontier.
 
-Do not proceed to LEARN / REFINE. Classify why the archive is empty of
-legal cells, run at most one targeted COVER batch if search looks thin,
-then name the smallest conflicting brief clauses and offer relaxation
-probes. Never apply a probe — the architect decides.
+Do not proceed to LEARN / REFINE on an empty legal set. Classify why the
+archive is empty of legal cells, run at most one targeted COVER batch if
+search looks thin, then name the smallest conflicting brief clauses and
+offer relaxation probes. Never apply a probe — the architect decides.
 """
 
 from __future__ import annotations
@@ -25,6 +26,20 @@ from .strategy import grouping_is_required
 TARGETED_BUDGET = 15
 MIN_ATTEMPTS_FOR_CONFLICT = 8
 DOMINANT_FRAC = 0.55
+LEGAL_YIELD_LOW = 3
+FRONTIER_DIAGNOSE_MIN = 5
+LEGAL_YIELD_SKIP = 8
+
+
+def should_diagnose(archive: dict[str, Any]) -> bool:
+    """True when DIAGNOSE can still help after COVER + REPAIR."""
+    n_legal = len(archive_mod.legal_cells(archive))
+    n_front = len(archive.get("frontier") or archive_mod.frontier_entries(archive))
+    if n_legal >= LEGAL_YIELD_SKIP:
+        return False
+    if n_legal == 0:
+        return True
+    return n_legal < LEGAL_YIELD_LOW and n_front >= FRONTIER_DIAGNOSE_MIN
 
 
 def diagnose(
@@ -41,11 +56,11 @@ def diagnose(
     requirements permanently.
     """
     legal = archive_mod.legal_cells(archive)
-    if legal:
+    if not should_diagnose(archive):
         return {
             "ran": False,
             "skipped": True,
-            "reason": "legal cells already exist",
+            "reason": "enough legal cells" if legal else "no recoverable frontier",
             "class": None,
             "note": "",
         }

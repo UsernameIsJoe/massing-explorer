@@ -252,14 +252,8 @@ def _clear_pairings(session: Any, action: dict[str, Any]) -> dict[str, Any]:
 
 
 def _set_width(session: Any, action: dict[str, Any]) -> dict[str, Any]:
-    """Nearby width step from the current plate — not an invented target."""
+    """Nearby width step from the current plate — or an explicit projected width."""
     mass_id = str(action.get("mass") or action.get("mass_id") or "")
-    try:
-        delta = float(action.get("delta_ft") or 0)
-    except (TypeError, ValueError):
-        return _reject("SET_WIDTH", "Need a nearby width step (delta_ft).")
-    if abs(delta) < 0.1:
-        return _reject("SET_WIDTH", "Width step is empty.")
     mass = next((m for m in (session.masses or []) if m.id == mass_id), None)
     if mass is None:
         return _reject("SET_WIDTH", f"Unknown mass: {mass_id}")
@@ -276,13 +270,33 @@ def _set_width(session: Any, action: dict[str, Any]) -> dict[str, Any]:
         current = float(current)
     except (TypeError, ValueError):
         current = 60.0
-    nxt = current + delta
+    target = action.get("width_ft")
+    if target is not None:
+        try:
+            nxt = float(target)
+        except (TypeError, ValueError):
+            return _reject("SET_WIDTH", "Need a numeric width_ft.")
+    else:
+        try:
+            delta = float(action.get("delta_ft") or 0)
+        except (TypeError, ValueError):
+            return _reject("SET_WIDTH", "Need a nearby width step (delta_ft).")
+        if abs(delta) < 0.1:
+            return _reject("SET_WIDTH", "Width step is empty.")
+        nxt = current + delta
     min_w = 45.0
+    min_edge = session.constraints.get("min_edge_ft")
+    if min_edge is not None:
+        min_w = max(min_w, float(min_edge))
     max_w = session.constraints.get("max_building_width_ft")
+    if max_w is None:
+        max_w = session.constraints.get("max_edge_ft")
     if nxt < min_w:
         return _reject("SET_WIDTH", f"Width would drop below {min_w:g} ft.")
     if max_w is not None and nxt > float(max_w) + 0.01:
-        return _reject("SET_WIDTH", "Width would exceed the stated max.")
+        nxt = float(max_w)
+        if abs(nxt - current) < 0.1:
+            return _reject("SET_WIDTH", "Width would exceed the stated max.")
     session.constraints[f"{mass_id}_width_ft"] = round(nxt, 4)
     if hasattr(session, "save"):
         session.save()

@@ -1,12 +1,13 @@
 """
-Search controller: COVER / LEARN / REFINE over the archive.
+Search controller: COVER / REPAIR / LEARN / REFINE over the archive.
 
-Default after a brief: adaptive multi-axis COVER (start ~40, expand while
-new regions or feature encodings appear, cap ~120), then planner / MCTS
-from several COVER elites / sequential BO / REFINE local neighbors / LEARN pair.
+Default after a brief: adaptive multi-axis COVER, then a small REPAIR
+projection on near-feasible illegal samples, then planner / MCTS from
+legal elites plus frontier starts / sequential BO / REFINE / LEARN.
 
-Zero legal COVER cells → DIAGNOSE (not LEARN). LEARN / REFINE only run once
-a feasible design space exists.
+Zero legal COVER cells after repair → DIAGNOSE (not LEARN). DIAGNOSE also
+runs when legal yield is low and the near-feasible frontier is large.
+LEARN / REFINE only run once a feasible design space exists.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from ..solver import solve_massing_study
 from ..tools import solve_dimensions
 from . import archive as archive_mod
 from .cover import run_cover
-from .diagnose import diagnose
+from .diagnose import diagnose, should_diagnose
 from .partitions import apply_partition, enumerate_partitions
 from .performance import measure
 from .preference import next_pair, schemes_from_archive, taste_weight
@@ -43,31 +44,30 @@ def run_search(session: Any, mode: str = "cover", client: Any = None, plan: Any 
 
     if mode == "cover":
         _cover(session, archive)
-        if not archive_mod.legal_cells(archive):
+        has_legal = bool(archive_mod.legal_cells(archive))
+        has_frontier = bool(archive_mod.frontier_entries(archive))
+        if has_legal or has_frontier:
+            plan_report = _run_planner(session, archive, client, plan)
+            mcts_report = _run_mcts(session, archive, client, plan, weights)
+            if has_legal:
+                bayes_report = _run_bayes(session, archive, weights)
+                refine_report = _refine(session, archive)
+        if should_diagnose(archive):
             diagnose_report = diagnose(
                 session,
                 archive,
                 evaluate=_evaluate,
             )
-            # Still none → stop. Do not invent a feasible space via LEARN.
-            if not archive_mod.legal_cells(archive):
-                learning = _prepare_learn(archive, learning)
-            else:
+            if archive_mod.legal_cells(archive) and not has_legal:
                 plan_report = _run_planner(session, archive, client, plan)
                 mcts_report = _run_mcts(session, archive, client, plan, weights)
                 bayes_report = _run_bayes(session, archive, weights)
                 refine_report = _refine(session, archive)
-                learning = _prepare_learn(archive, learning)
-        else:
-            plan_report = _run_planner(session, archive, client, plan)
-            mcts_report = _run_mcts(session, archive, client, plan, weights)
-            bayes_report = _run_bayes(session, archive, weights)
-            refine_report = _refine(session, archive)
-            learning = _prepare_learn(archive, learning)
+        learning = _prepare_learn(archive, learning)
     elif mode == "learn":
         if not archive.get("attempts"):
             _cover(session, archive)
-        if not archive_mod.legal_cells(archive):
+        if should_diagnose(archive):
             diagnose_report = diagnose(session, archive, evaluate=_evaluate)
         learning = _prepare_learn(archive, learning)
     else:
@@ -75,7 +75,7 @@ def run_search(session: Any, mode: str = "cover", client: Any = None, plan: Any 
             _cover(session, archive)
         if archive_mod.legal_cells(archive):
             refine_report = _refine(session, archive)
-        else:
+        elif should_diagnose(archive):
             diagnose_report = diagnose(session, archive, evaluate=_evaluate)
         learning = _prepare_learn(archive, learning)
 
@@ -87,6 +87,9 @@ def run_search(session: Any, mode: str = "cover", client: Any = None, plan: Any 
         note += " " + str(plan_report.get("note") or "")
     if mcts_report.get("ran"):
         note += " " + str(mcts_report.get("note") or "")
+    repair_report = archive.get("repair") or {}
+    if repair_report.get("ran") or repair_report.get("note"):
+        note += " " + str(repair_report.get("note") or "")
     if bayes_report.get("ran"):
         note += " " + str(bayes_report.get("note") or "")
     if refine_report.get("ran"):
@@ -144,6 +147,14 @@ def run_search(session: Any, mode: str = "cover", client: Any = None, plan: Any 
     store["kept_cell"] = kept.get("cell") if kept else None
     store["learning"] = learning
     store["refine"] = refine_report
+    store["repair"] = {
+        "ran": bool(repair_report.get("ran")),
+        "candidates": repair_report.get("candidates"),
+        "tried": repair_report.get("tried"),
+        "legalized": repair_report.get("legalized"),
+        "note": repair_report.get("note"),
+        "moves": list(repair_report.get("moves") or [])[:8],
+    }
     store["diagnose"] = {
         "ran": diagnose_report.get("ran"),
         "class": diagnose_report.get("class"),
@@ -243,6 +254,7 @@ def run_search(session: Any, mode: str = "cover", client: Any = None, plan: Any 
             "cells": sorted((archive.get("cells") or {}).keys()),
             "unsupported": archive.get("unsupported"),
             "note": archive.get("note"),
+            "frontier": len(archive.get("frontier") or []),
         },
         "learning": {
             "pending_pair": learning.get("pending_pair"),
@@ -350,6 +362,9 @@ def _cover(session: Any, archive: dict[str, Any]) -> None:
         step_large=int(cfg.get("step_large", 20)),
         max_attempts=int(cfg.get("max", 120)),
     )
+    from .repair import run_repair
+
+    run_repair(session, archive)
 
 
 def _cover_topology(session: Any, archive: dict[str, Any]) -> None:

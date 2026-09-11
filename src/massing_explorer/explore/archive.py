@@ -10,7 +10,7 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from .strategy import cell_key, partition_id, read_strategy
+from .strategy import cell_key, idea_key, partition_id, read_strategy
 
 # Hard brief constraints COVER / DIAGNOSE / REFINE may temporarily change.
 # Snapshots must round-trip these or a probe permanently erases the brief.
@@ -52,6 +52,7 @@ def empty_archive() -> dict[str, Any]:
         "unsupported": ["courtyard", "podium", "perpendicular_wings"],
         "mode": "cover",
         "note": "",
+        "frontier": [],
     }
 
 
@@ -74,6 +75,7 @@ def insert(
     legal = bool(performance.get("fits_limitations"))
     entry = {
         "cell": key,
+        "idea": idea_key(session),
         "partition": partition_id(session),
         "strategy": read_strategy(session),
         "fits_limitations": legal,
@@ -91,6 +93,8 @@ def insert(
             archive["legal"] = int(archive.get("legal") or 0) + 1
             current["fits_limitations"] = True
             current["performance"] = performance
+            current["idea"] = entry["idea"]
+        refresh_frontier(archive)
         return current
     if legal:
         archive["legal"] = int(archive.get("legal") or 0) + (0 if current and current.get("fits_limitations") else 1)
@@ -100,7 +104,10 @@ def insert(
             cells[key] = entry
     elif current is None:
         cells[key] = entry
-    return entry
+    elif not current.get("fits_limitations") and _closer_illegal(entry, current):
+        cells[key] = entry
+    refresh_frontier(archive)
+    return cells.get(key, entry)
 
 
 def legal_cells(archive: dict[str, Any]) -> list[dict[str, Any]]:
@@ -122,6 +129,9 @@ def explain(archive: dict[str, Any], grouping_locked: bool) -> str:
     ]
     if infeasible:
         bits.append("Infeasible cells do not count as coverage.")
+    frontier = archive.get("frontier") or []
+    if frontier:
+        bits.append(f"{len(frontier)} near-feasible on the frontier.")
     bits.append("Unsupported (not drawable): " + ", ".join(unsupported) + ".")
     if grouping_locked:
         bits.append(lock.strip())
@@ -142,6 +152,74 @@ def explain(archive: dict[str, Any], grouping_locked: bool) -> str:
 def _better(new: dict[str, Any], old: dict[str, Any]) -> bool:
     """Prefer fewer failed checks. Not a quality score."""
     return int(new.get("failed_checks") or 0) < int(old.get("failed_checks") or 0)
+
+
+def _closer_illegal(new_entry: dict[str, Any], old_entry: dict[str, Any]) -> bool:
+    from .feasibility import feasibility_distance_of
+
+    return feasibility_distance_of(new_entry) < feasibility_distance_of(old_entry)
+
+
+def refresh_frontier(archive: dict[str, Any]) -> list[dict[str, Any]]:
+    """Keep the closest illegal occupant per idea, capped, below the distance cut."""
+    from .feasibility import (
+        FRONTIER_DISTANCE,
+        FRONTIER_MAX,
+        feasibility_distance_of,
+        idea_of,
+    )
+
+    cells = archive.get("cells") or {}
+    legal_ideas = {
+        idea_of(e) for e in cells.values() if e.get("fits_limitations") and idea_of(e)
+    }
+    best: dict[str, dict[str, Any]] = {}
+    for entry in cells.values():
+        if entry.get("fits_limitations"):
+            continue
+        idea = idea_of(entry)
+        if not idea or idea in legal_ideas:
+            continue
+        dist = feasibility_distance_of(entry)
+        if dist >= FRONTIER_DISTANCE:
+            continue
+        prev = best.get(idea)
+        if prev is None or dist < feasibility_distance_of(prev):
+            best[idea] = entry
+    ranked = sorted(best.values(), key=feasibility_distance_of)[:FRONTIER_MAX]
+    archive["frontier"] = [
+        {
+            "cell": e.get("cell"),
+            "idea": idea_of(e),
+            "distance": round(feasibility_distance_of(e), 4),
+            "failed_kinds": list((e.get("performance") or {}).get("failed_kinds") or []),
+            "reason": e.get("reason") or "",
+        }
+        for e in ranked
+    ]
+    return archive["frontier"]
+
+
+def frontier_entries(archive: dict[str, Any]) -> list[dict[str, Any]]:
+    cells = archive.get("cells") or {}
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in archive.get("frontier") or []:
+        key = str(row.get("cell") or "")
+        entry = cells.get(key)
+        if not entry or entry.get("fits_limitations"):
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(entry)
+    if not out and not (archive.get("frontier") or []):
+        refresh_frontier(archive)
+        for row in archive.get("frontier") or []:
+            entry = cells.get(str(row.get("cell") or ""))
+            if entry and not entry.get("fits_limitations"):
+                out.append(entry)
+    return out
 
 
 def capture(session: Any) -> dict[str, Any]:

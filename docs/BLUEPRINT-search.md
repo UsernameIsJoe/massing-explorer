@@ -1,6 +1,7 @@
 # Blueprint: hierarchical strategy search
 
-Recorded 9 Sep 2026. This is the constitution of the search. Older notes in
+Recorded 9 Sep 2026; REPAIR / near-feasible frontier added 11 Sep 2026. This is
+the constitution of the search. Older notes in
 `DISCUSSION-search-architecture.md` and `PLAN-search-architecture.md` describe
 the three *jobs* (cover, learn, refine). This file says how those jobs sit in
 the system: they are modes over an archive, not a one-way Stage 1 → 2 → 3
@@ -26,8 +27,11 @@ language reasoning
 Not `prompt → AI shape`. Not `parameters → optimizer → shape`.
 
 The system's value is to make the architect smarter about the design problem:
-which legal strategies exist, which regions of the archive are empty and why,
-which brief clauses collapsed the feasible set. It is not merely "Option 17."
+which legal strategies exist, which near-feasible ideas can be projected onto
+the legal set, which regions of the archive are empty and why, which brief
+clauses collapsed the feasible set. It is not merely "Option 17."
+Architectural feasibility is often a boundary you can navigate toward, not
+only a cliff.
 
 ---
 
@@ -80,26 +84,46 @@ which brief clauses collapsed the feasible set. It is not merely "Option 17."
        COVER        LEARN      REFINE
          │            │          │
          │      user comparison  │
-         │            │          │
          └────────────┴──────────┘
                     │
                     ▼
             next search actions
 ```
 
-MCTS sits around the **planner + engine** loop. It starts from several diverse
-COVER elites, not one current scheme, and searches typed action sequences.
-Nearby width is a local `delta_ft` step from the current plate, not a width
-enumerator. Bayesian optimization spends a sequential evaluation budget on
-high-EI legal actions and refits after each result. Neither sits on an
-invented foot target.
-
-When COVER returns **zero legal cells**, the controller runs **DIAGNOSE**
-instead of LEARN / REFINE / MCTS / BO:
+COVER explores **architectural ideas**. Illegal COVER samples are not all
+worthless. A small deterministic **REPAIR** layer asks how far a sample is
+from feasibility and, using existing typed actions, finds the nearest legal
+twin of the *same idea* (same partition, topology, loading, plate profile,
+envelope). Repair optimizes constraint violation, not taste.
 
 ```
-COVER → legal?
-  YES → planner / MCTS / BO / REFINE / LEARN
+COVER → SOLVE ── legal ──────────────→ ARCHIVE
+              │                           ↓
+              └─ illegal → REPAIR ─ legal
+                         │
+                         └─ still illegal
+                                ↓
+                        NEAR-FEASIBLE FRONTIER
+                                ↓
+                   DIAGNOSE / selected MCTS roots
+```
+
+MCTS sits around the **planner + engine** loop. It starts from several diverse
+**legal COVER elites plus a few near-feasible frontier** samples, not one
+current scheme, and searches typed action sequences. Nearby width is a local
+`delta_ft` step from the current plate, not a width enumerator. Bayesian
+optimization spends a sequential evaluation budget on high-EI **legal**
+actions and refits after each result. Neither sits on an invented foot target.
+LEARN pairwise taste stays among legal schemes only.
+
+**DIAGNOSE** runs when COVER+REPAIR still has **zero legal cells**, or when
+legal yield is low (fewer than three) and the recoverable frontier is large.
+It does not run when the archive already has plenty of legal cells.
+
+```
+COVER → REPAIR → legal or frontier?
+  YES → planner / MCTS (legal ∪ frontier) / BO+REFINE if legal / LEARN
+  also DIAGNOSE if zero legal, or low legal yield + large frontier
   NO  → DIAGNOSE (search | conflict | model)
           search → one targeted COVER batch, then re-check
           still none / conflict / model → minimal relaxation probes → USER
@@ -120,9 +144,11 @@ knowledge about why regions are empty.
 | Semantic actions | `explore/actions.py` |
 | Constraint / massing engine | `solver.py`, `layout.py`, `allocate.py`, pairing, GSF |
 | Performance vector | `explore/performance.py` |
-| Design archive | `explore/archive.py` |
+| Distance to feasibility | `explore/feasibility.py` |
+| Design archive + frontier | `explore/archive.py` |
 | COVER / LEARN / REFINE | `explore/controller.py`, `explore/cover.py` |
-| DIAGNOSE (zero legal) | `explore/diagnose.py` |
+| REPAIR (project onto feasible set) | `explore/repair.py` |
+| DIAGNOSE (zero legal or low yield) | `explore/diagnose.py` |
 | LEARN (pairwise) | `explore/preference.py` |
 | Open P | `explore/csp.py`, `explore/partitions.py` |
 | Drawable T and stated D | `explore/topology.py` |
@@ -200,7 +226,9 @@ Unknown departments and invented sizes are dropped, as in `reading.py`.
 The archive holds one elite per **behavior cell**, not per width. A cell is a
 legal typology: organization (and partition id when P was open), story band,
 loading, topology, and envelope family. Illegal evaluations are attempts, not
-coverage.
+coverage — except a small **near-feasible frontier** (closest illegal idea
+keys under a distance cut). That frontier is for REPAIR and MCTS starts, not
+for LEARN taste or “best scheme” display.
 
 ### COVER
 
@@ -216,6 +244,27 @@ feature-space novelty → if still discovering, add +10 or +20 → stop when
 stagnant (no meaningful new cells or encodings) → hard cap ~100–120.
 If the cap hits while regions are still opening, mark the map incomplete.
 Do not call a truncated story product a joint sample.
+
+COVER also samples floor-plate profile (uniform vs two-type step) on
+multi-story masses.
+
+### REPAIR
+
+Given this COVER idea, what is the nearest legal version of the *same* idea?
+
+When a sample misses a hard limit, rank it by a **violation vector** (edge
+overrun, min-edge shortfall, hard ratio, awkward program split, required
+width, other hard kinds). Soft prefs do not enter that vector. Illegal
+`search_reward` stays 0 so LEARN / BO do not treat near-misses as good
+architecture.
+
+A short catalog of existing actions then projects toward feasibility: apply a
+solver `ResizeSuggestion` width, `SET_WIDTH`, `SET_STORIES` ±1 if unlocked,
+project onto a hard ratio band, or `CLEAR_PAIRINGS` if topology is unlocked.
+Repair does **not** regroup programs (`APPLY_PARTITION`), invent courtyards,
+or optimize preference scores. Budget is separate from COVER (~8 ideas × ≤3
+moves). A successful width repair may land in a new behavior cell; that is
+intended.
 
 ### LEARN
 
@@ -243,14 +292,18 @@ further neighbors stop improving or adding cells.
 Default schedule for a fresh brief:
 
 ```
-Intent extraction → COVER → LLM planner → MCTS → Bayesian optimization
-→ REFINE → LEARN pair preparation
+Intent extraction → COVER → REPAIR → LLM planner → MCTS (legal ∪ frontier)
+→ Bayesian optimization → REFINE → LEARN pair preparation
+→ DIAGNOSE if zero legal or low yield + large frontier
 ```
 
 COVER fills the archive first so planner / MCTS / BO see a real multi-axis map.
-MCTS then exploits several COVER elites (~40–80 sims, depth 3–4) until reward
-or cell novelty saturates. BO spends ~10–15 sequential proposals, refitting
-the GP after each evaluation, and also stops on saturation.
+REPAIR then projects promising illegal samples onto the feasible set. MCTS
+exploits several COVER elites and a few frontier starts (~40–80 sims, depth
+3–4) until reward or cell novelty saturates. BO spends ~10–15 sequential
+proposals, refitting the GP after each evaluation, and also stops on
+saturation. BO remains blind to exact feet by design; REPAIR owns dimension
+projection.
 A later turn can switch mode (`cover` / `learn` / `refine`). The three jobs
 from the earlier plan remain; they are no longer the identity of the algorithm.
 
@@ -258,8 +311,10 @@ from the earlier plan remain; they are no longer the identity of the algorithm.
 
 ## Evaluation
 
-Hard feasibility first (requirements + limitations). Soft ranking among legal
-schemes uses four evaluation composites — not one quality score:
+Hard feasibility first (requirements + limitations). Among illegal samples, a
+separate **feasibility distance** ranks how close a scheme is to the legal
+set. Soft ranking among legal schemes uses four evaluation composites — not
+one quality score:
 
 1. **Program coherence** — grouping / distribution sense; penalize awkward
    floor splits and fragmentation
@@ -333,16 +388,22 @@ repository. Do not rewrite the solver to "start over."
    unsupported until layout can draw it.
 8. **MCTS** — over design actions, planner as expansion prior.
    `search.py` remains the enumeration baseline for experiments.
+9. **REPAIR / frontier** — violation vector, project illegal COVER ideas onto
+   the feasible set, seed MCTS from legal ∪ frontier, DIAGNOSE on low yield.
 
-Phases 0–8 are in. Bayesian optimization sits beside COVER as an
+Phases 0–8 are in. REPAIR sits between COVER and exploit so feasibility is a
+boundary, not only a cliff. Bayesian optimization sits beside COVER as an
 evaluation-budget manager; it is not a generator and is not on invented feet.
-MCTS exploits COVER elites over typed actions. Nearby width is a local step,
-not a width product. Do not put either on an invented foot target.
+MCTS exploits COVER elites and near-feasible starts over typed actions.
+Nearby width is a local step, not a width product. Do not put either on an
+invented foot target.
 
 ---
 
 ## Line to hold
 
-This is a way to explore among legal strategies and to say why other
-strategies are empty or illegal. It is not a license to override a must, fill
-a cap, invent a courtyard, or call a width a concept.
+This is a way to explore among legal strategies, to project a near-miss onto
+the same idea’s legal twin, and to say why other strategies are empty or
+illegal. It is not a license to override a must, fill a cap, invent a
+courtyard, or call a width a concept. Repair does not shop for a different
+COVER idea.

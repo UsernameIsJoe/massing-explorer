@@ -2,7 +2,7 @@
 
 A **program-aware massing explorer** that turns architectural program spreadsheets into dimensionally tested conceptual masses. A local LLM reasons about design decisions. A deterministic Python engine owns geometry, GSF, and checks.
 
-The system's value is to make the architect smarter about the design problem: which legal strategies exist, which archive cells are empty and why, which brief clauses collapsed the feasible set. It is not merely "Option 17."
+The system's value is to make the architect smarter about the design problem: which legal strategies exist, which near-feasible ideas can be repaired into the same concept, which archive cells are empty and why, which brief clauses collapsed the feasible set. It is not merely "Option 17."
 
 **Standalone project.** Algorithm-first. Constitution: [docs/BLUEPRINT-search.md](docs/BLUEPRINT-search.md). Concept and workflow: [docs/CONCEPT.md](docs/CONCEPT.md), [docs/WORKFLOW.md](docs/WORKFLOW.md).
 
@@ -12,10 +12,11 @@ The system's value is to make the architect smarter about the design problem: wh
 
 1. **Ingests** a program from Excel/CSV
 2. **Interprets** a chat brief into requirements, limitations, and preferences
-3. **Explores** legal strategies `S = (P, T, V, G, D)` — COVER / LEARN / REFINE over an archive, not a width enumerator
+3. **Explores** strategies `S = (P, T, V, G, D)` — COVER / REPAIR / LEARN / REFINE over an archive, not a width enumerator
 4. **Proves** each move through the massing engine (footprints, pairing, voids, GSF, floors)
-5. **Reports** legal vs empty cells, a kept drawing, and an optional A/B pair among schemes that already fit
-6. **Remembers** study state across the conversation
+5. **Projects** near-illegal COVER ideas onto the same concept when a typed action can fix a hard miss
+6. **Reports** legal vs empty cells, a kept drawing, optional A/B among schemes that already fit, and a near-feasible frontier
+7. **Remembers** study state across the conversation
 
 A requirement is a must. A limitation is a cap, never a length to draw. A preference may be met more than one way. A ground-floor note is a pin, not a mass. Partitions are proposed only when the brief did not require a grouping.
 
@@ -39,11 +40,14 @@ A requirement is a must. A limitation is a cap, never a length to draw. A prefer
                  Performance
                       |
            Diverse design archive
-             /         |         \
-          COVER      LEARN      REFINE
+                      |
+         COVER → REPAIR → LEARN / REFINE
+                      |
+         illegal COVER idea → nearest legal twin
+         or near-feasible frontier (MCTS start, not LEARN)
 ```
 
-MCTS sits around planner + engine. Bayesian optimization is a small evaluation-budget manager, not a shape generator. Neither sits on feet. `search.py` remains a width/story enumeration baseline.
+MCTS sits around planner + engine and may start from legal elites **or** near-feasible frontier samples. Bayesian optimization is a small evaluation-budget manager on **legal** actions, not a shape generator. Neither sits on feet. REPAIR owns “nudge this plate onto the cap.” `search.py` remains a width/story enumeration baseline.
 
 **Rule:** the LLM proposes typed actions; the engine applies or rejects them. Never trust the LLM for arithmetic.
 
@@ -89,11 +93,12 @@ Full rationale: [docs/DECISIONS.md](docs/DECISIONS.md)
 | **7** | Rhino massing geometry export | Optional / present as `rhino_export.py` |
 | **Search 0–8** | Blueprint loop: archive, COVER/LEARN/REFINE, planner, CSP, drawable T, MCTS | **Complete** |
 | **BO** | Bayesian optimization as evaluation-budget manager (not a generator) | **In code** |
+| **REPAIR** | Project illegal COVER ideas onto the feasible set; near-feasible frontier | **In code** |
 
 Phases 3–5 *evaluate* a scheme you specify. Phase 6 enumerates widths and stories.
-The blueprint search sits **on top** of that engine: a brief now COVER/LEARN/REFINE
-over distinct legal strategies. Every drawing is still re-verified through
-`solve_massing_study`.
+The blueprint search sits **on top** of that engine: a brief now COVER / REPAIR /
+LEARN / REFINE over distinct strategies. Every drawing is still re-verified
+through `solve_massing_study`.
 
 Details: [docs/PHASES.md](docs/PHASES.md). Progress: [docs/PROGRESS.md](docs/PROGRESS.md).
 Decisions: [docs/DECISIONS.md](docs/DECISIONS.md).
@@ -108,11 +113,14 @@ massing-explorer/
 │   ├── brief.py            # Intent: roles, grouping, apply brief → search
 │   ├── reading.py          # LLM reading of a brief
 │   ├── chat.py             # Chat turn; A/B is a LEARN choice
-│   ├── explore/            # Strategy archive + COVER/LEARN/REFINE
+│   ├── explore/            # Strategy archive + COVER/REPAIR/LEARN/REFINE
 │   │   ├── controller.py   # Modes over the archive
 │   │   ├── strategy.py     # S = (P, T, V, G, D)
 │   │   ├── actions.py      # Typed moves; engine apply/reject
-│   │   ├── archive.py      # One elite per legal cell
+│   │   ├── archive.py      # One elite per legal cell; near-feasible frontier
+│   │   ├── cover.py        # Joint multi-axis COVER
+│   │   ├── feasibility.py  # Hard-limit violation vector
+│   │   ├── repair.py       # Project an idea onto the feasible set
 │   │   ├── planner.py      # ≤5 typed actions
 │   │   ├── csp.py          # Legal partitions when P is open
 │   │   ├── topology.py     # Drawable T; stated D
@@ -144,13 +152,13 @@ massing-explorer/
 ## Workflow
 
 A chat brief now runs the [blueprint control loop](docs/WORKFLOW.md): interpret →
-structured strategy → planner actions → engine → performance → archive →
-COVER / LEARN / REFINE.
+structured strategy → COVER → REPAIR → planner / MCTS / BO / REFINE → LEARN.
 
 The older 15-step program-to-massing checklist (GSF, footprints, pairing, floors)
 is still what the **engine** automates. See [docs/DECISIONS.md](docs/DECISIONS.md#manual-workflow-reference).
 Step 13 (compare alternatives) is no longer deferred: LEARN compares two legal
-drawings; the archive keeps several distinct elites.
+drawings; the archive keeps several distinct elites; REPAIR projects near-misses
+of the same idea onto the legal set.
 
 ---
 

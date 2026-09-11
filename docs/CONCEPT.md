@@ -1,12 +1,12 @@
 # Concept
 
-Recorded 9 Sep 2026. Project law is [BLUEPRINT-search.md](BLUEPRINT-search.md). This page is the product idea in plain language.
+Recorded 9 Sep 2026; REPAIR / frontier 11 Sep 2026. Project law is [BLUEPRINT-search.md](BLUEPRINT-search.md). This page is the product idea in plain language.
 
 ---
 
 ## What this is
 
-Massing Explorer turns a program spreadsheet into conceptual masses that have been dimensionally tested. It exists to make the architect smarter about the **design problem**: which legal strategies exist, which regions of the archive are empty and why, which brief clauses collapsed the feasible set.
+Massing Explorer turns a program spreadsheet into conceptual masses that have been dimensionally tested. It exists to make the architect smarter about the **design problem**: which legal strategies exist, which near-feasible ideas can be repaired into the same concept, which regions of the archive are empty and why, which brief clauses collapsed the feasible set.
 
 It is not merely “Option 17.” It is not `prompt → AI shape`. It is not `parameters → optimizer → shape`.
 
@@ -59,8 +59,9 @@ Two different partitions (`academic + arts / gym + dining` vs `academic / arts +
 A useful run reports:
 
 - which **legal** strategies were found
+- which COVER ideas were **almost legal** and whether REPAIR found a same-idea twin
 - which cells are **empty**, and why (unsupported vs locked vs cap-miss vs infeasible)
-- when COVER finds **no** legal cells: a **DIAGNOSE** class (search / conflict / model), optional targeted COVER, and **relaxation probes the architect must choose** — never auto-applied
+- when COVER+REPAIR finds **no** legal cells, or very few plus a large recoverable frontier: a **DIAGNOSE** class (search / conflict / model), optional targeted COVER, and **relaxation probes the architect must choose** — never auto-applied
 - whether the kept strategy **survived** a program-area shock
 - a pending **A/B** pair among drawings that already fit, if LEARN has two elites
 
@@ -70,6 +71,6 @@ It does not invent a courtyard, fill a cap, or call three widths of the same bar
 
 ## What Bayesian optimization is (and is not)
 
-Bayesian optimization is an **evaluation-budget manager** for expensive simulations. After COVER has filled the archive, a small Gaussian process ranks unevaluated typed actions by expected improvement, evaluates one, refits, and repeats (~10–15 sequential proposals, or until new evaluations stop improving or adding feature diversity). It is not an architectural generator. It does not sit on invented feet. It is not on the critical path until a run costs minutes.
+Bayesian optimization is an **evaluation-budget manager** for expensive simulations. After COVER and REPAIR have filled the archive, a small Gaussian process ranks unevaluated typed actions by expected improvement among **legal** schemes, evaluates one, refits, and repeats (~10–15 sequential proposals, or until new evaluations stop improving or adding feature diversity). It is not an architectural generator. It does not sit on invented feet — **REPAIR** projects a near-miss plate onto the cap. It is not on the critical path until a run costs minutes.
 
 `search.py` (`balanced` / `low_rise` / `compact`) remains an experimental enumeration baseline, not “quality.”

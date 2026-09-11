@@ -256,45 +256,63 @@ def cover_roots(
     weights: dict[str, float] | None = None,
     cap: int = ROOT_CAP,
 ) -> list[dict[str, Any]]:
-    """Diverse / promising legal COVER elites as MCTS (and BO) start states."""
-    from .archive import legal_cells
+    """Legal COVER elites first, then a few near-feasible frontier starts."""
+    from .archive import frontier_entries, legal_cells
+    from .feasibility import feasibility_distance_of, idea_of
     from .preference import taste_weight
 
     legal = legal_cells(archive)
+    frontier = frontier_entries(archive)
     current = {
         "snapshot": archive_mod.capture(session),
         "stories": {m.id: m.story_count for m in session.masses},
         "label": "current",
         "entry": None,
     }
-    if not legal:
-        return [current]
-    ranked = sorted(legal, key=lambda e: taste_weight(e, weights), reverse=True)
     picked: list[dict[str, Any]] = []
     seen: set[tuple] = set()
-    for entry in ranked:
-        strat = entry.get("strategy") or {}
-        axis = (
-            entry.get("partition"),
-            ((strat.get("T") or {}).get("kind")),
-            ((strat.get("G") or {}).get("envelope") or (strat.get("G") or {}).get("loading")),
-        )
-        if axis in seen and len(picked) >= 2:
-            continue
-        seen.add(axis)
+    seen_ideas: set[str] = set()
+
+    def _append(entry: dict[str, Any], label: str) -> None:
         snap = entry.get("snapshot") or {}
         if not snap:
-            continue
+            return
         picked.append(
             {
                 "snapshot": snap,
                 "stories": entry.get("stories") or snap.get("stories") or {},
-                "label": str(entry.get("reason") or entry.get("cell") or "elite"),
+                "label": label,
                 "entry": entry,
             }
         )
+
+    if legal:
+        ranked = sorted(legal, key=lambda e: taste_weight(e, weights), reverse=True)
+        n_front = min(len(frontier), 2 if cap > 1 else 0)
+        legal_slots = max(1, cap - n_front)
+        for entry in ranked:
+            strat = entry.get("strategy") or {}
+            axis = (
+                entry.get("partition"),
+                ((strat.get("T") or {}).get("kind")),
+                ((strat.get("G") or {}).get("envelope") or (strat.get("G") or {}).get("loading")),
+            )
+            if axis in seen and len(picked) >= 2:
+                continue
+            seen.add(axis)
+            seen_ideas.add(idea_of(entry))
+            _append(entry, str(entry.get("reason") or entry.get("cell") or "elite"))
+            if len(picked) >= legal_slots:
+                break
+    for entry in sorted(frontier, key=feasibility_distance_of):
         if len(picked) >= cap:
             break
+        idea = idea_of(entry)
+        if idea and idea in seen_ideas:
+            continue
+        seen_ideas.add(idea)
+        dist = feasibility_distance_of(entry)
+        _append(entry, f"frontier d={dist:.3f}")
     return picked or [current]
 
 
