@@ -310,13 +310,6 @@ def _set_envelope(session: Any, action: dict[str, Any]) -> dict[str, Any]:
     session.constraints["cover_envelope"] = env
     if hasattr(session, "save"):
         session.save()
-    if getattr(session, "program", None) is not None:
-        try:
-            from .cover import _apply_envelope_geometry
-
-            _apply_envelope_geometry(session, env)
-        except Exception:
-            pass
     return _ok("SET_ENVELOPE", f"Envelope family is {env}.")
 
 

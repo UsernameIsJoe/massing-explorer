@@ -1044,7 +1044,7 @@ class TestMcts(unittest.TestCase):
         catalog = catalog_actions(session)
         self.assertTrue(any(a.get("op") == "COURTYARD" for a in catalog))
         self.assertFalse(any("width_ft" in a for a in catalog))
-        self.assertTrue(any(a.get("op") == "SET_WIDTH" and a.get("delta_ft") for a in catalog))
+        self.assertFalse(any(a.get("op") == "SET_WIDTH" for a in catalog))
         self.assertTrue(any(a.get("op") == "SET_ENVELOPE" for a in catalog))
         self.assertTrue(any(a.get("op") == "SET_LOADING" for a in catalog))
         report = run_mcts(

@@ -16,12 +16,10 @@ from . import archive as archive_mod
 from .actions import apply_action
 from .axes import PROBE_AXIS_NAMES, encode_named, encode_strategy  # noqa: F401
 from .mcts import action_key, catalog_actions, cover_roots
-from .performance import measure
 from .saturate import BO_CAP, BO_MIN, Saturation, encodings_from_archive, feature_is_novel, read_explore_budget, search_reward
 from .strategy import cell_key, read_strategy
 
-# Shared isotropic ℓ for now. ARD can replace with a 9-vector later without
-# renaming PROBE_AXIS_NAMES in axes.py.
+# Shared isotropic ℓ for now. ARD can replace later without renaming axes.
 LENGTHSCALE = 0.75
 SIGNAL = 0.6
 NOISE = 0.08
@@ -135,10 +133,9 @@ def run_bayes(
             spent += 1
             sat.observe(True)
             continue
-        from ..solver import solve_massing_study
+        from .realize import realize
 
-        result = solve_massing_study(session)
-        performance = measure(result, session, archive=archive)
+        result, performance = realize(session)
         key = cell_key(session)
         feat = encode_strategy(read_strategy(session))
         if key in seen_cells:

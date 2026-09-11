@@ -258,13 +258,12 @@ width, other hard kinds). Soft prefs do not enter that vector. Illegal
 `search_reward` stays 0 so LEARN / BO do not treat near-misses as good
 architecture.
 
-A short catalog of existing actions then projects toward feasibility: apply a
-solver `ResizeSuggestion` width, `SET_WIDTH`, `SET_STORIES` ±1 if unlocked,
-project onto a hard ratio band, or `CLEAR_PAIRINGS` if topology is unlocked.
-Repair does **not** regroup programs (`APPLY_PARTITION`), invent courtyards,
-or optimize preference scores. Budget is separate from COVER (~8 ideas × ≤3
-moves). A successful width repair may land in a new behavior cell; that is
-intended.
+A short **realize(s)** pass fills widths / ratio projection for the restored
+idea (stories and P stay frozen). Soft prefs are not the objective. Repair
+does **not** regroup programs (`APPLY_PARTITION`), invent courtyards, bump
+stories, or optimize preference scores. Story ±1 stays an MCTS / BO lever.
+Budget is separate from COVER (~8 ideas). Realized plates stay on the same
+idea cell (`cell_key` = `idea_key`).
 
 ### LEARN
 
@@ -284,9 +283,9 @@ Given what we currently know, which lineages deserve deeper exploration?
 
 Keep several architecturally distinct elites (different P or T, not three
 widths of the same bar). Allocate local tries by weight, with a floor so a
-light lineage is not deleted. Local neighbors include story ±1, nearby width
-(`delta_ft` from the current plate), envelope / loading, small grouping, and
-drawable topology — not invented feet. After a choice, reweight. Stop when
+light lineage is not deleted. Local neighbors include story ±1, envelope /
+loading, small grouping, and drawable topology — not `SET_WIDTH`. Exact feet
+are filled by `realize(s)`. After a choice, reweight. Stop when
 further neighbors stop improving or adding cells.
 
 Default schedule for a fresh brief:

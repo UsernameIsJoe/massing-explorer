@@ -26,9 +26,6 @@ COVER_MAX = 120
 # Stop when a batch adds no new cells and few novel feature encodings.
 COVER_STAGNANT_FRAC = 0.08
 COVER_PARTITION_CAP = 8
-# When P/T/story locks shrink the axis product below COVER_MAX, keep sampling
-# distinct site-search width schemes (geom ranks) until the budget fills.
-COVER_GEOM_RANKS = 20
 
 ENVELOPES = ("balanced", "compact", "elongated")  # elongated → search low_rise
 LOADINGS = ("double", "single")
@@ -48,7 +45,7 @@ class CoverSample:
     loading: str = "double"
     envelope: str = "balanced"
     plate_profile: str = "uniform"  # uniform | step
-    geom_rank: int = 0  # 0 = best under envelope preference; 1.. = next widths
+    geom_rank: int = 0  # unused; realize fills widths
     label: str = ""
 
 
@@ -133,14 +130,6 @@ def story_pattern_library(
     return out
 
 
-def _search_preference(envelope: str) -> str:
-    if envelope == "compact":
-        return "compact"
-    if envelope == "elongated":
-        return "low_rise"
-    return "balanced"
-
-
 def build_cover_plan(session: Any, *, pool_size: int = COVER_MAX) -> CoverPlan:
     """Build a stratified pool of joint samples (larger than start budget)."""
     plan = CoverPlan()
@@ -209,7 +198,6 @@ def _stratified_samples(
         i_l: int,
         i_e: int,
         i_pl: int = 0,
-        geom_rank: int = 0,
     ) -> CoverSample:
         stories = plan.story_patterns[i_s % s_n]
         profile = profiles[i_pl % pl_n]
@@ -220,12 +208,10 @@ def _stratified_samples(
             loading=plan.loadings[i_l % l_n],
             envelope=plan.envelopes[i_e % e_n],
             plate_profile=profile,
-            geom_rank=int(geom_rank),
             label=(
                 f"P{i_p % p_n}+S{i_s % s_n}+T{plan.topologies[i_t % t_n]}"
                 f"+L{plan.loadings[i_l % l_n]}+G{plan.envelopes[i_e % e_n]}"
                 f"+PL{profile}"
-                + (f"+W{geom_rank}" if geom_rank else "")
             ),
         )
 
@@ -240,7 +226,6 @@ def _stratified_samples(
             sample.loading,
             sample.envelope,
             sample.plate_profile,
-            int(sample.geom_rank),
         )
         if key in seen:
             return
@@ -304,29 +289,6 @@ def _stratified_samples(
                                     return iter(ordered[:pool_size])
                                 push(make(i_p, i_s, i_t, i_l, i_e, i_pl))
 
-    if len(ordered) < pool_size and ordered:
-        base = [s for s in ordered if int(s.geom_rank) == 0] or list(ordered)
-        ranks_needed = max(2, (pool_size + len(base) - 1) // max(len(base), 1))
-        ranks_needed = min(COVER_GEOM_RANKS, ranks_needed)
-        for rank in range(1, ranks_needed):
-            if len(ordered) >= pool_size:
-                break
-            for sample in base:
-                if len(ordered) >= pool_size:
-                    break
-                push(
-                    CoverSample(
-                        partition_index=sample.partition_index,
-                        stories=sample.stories,
-                        topology=sample.topology,
-                        loading=sample.loading,
-                        envelope=sample.envelope,
-                        plate_profile=sample.plate_profile,
-                        geom_rank=rank,
-                        label=(sample.label or "cover") + f"+W{rank}",
-                    )
-                )
-
     return iter(ordered[:pool_size])
 
 
@@ -354,10 +316,14 @@ def apply_cover_sample(
     origin: dict[str, Any],
     search_cache: dict[str, Any] | None = None,
 ) -> str:
-    """Apply one joint sample onto the session. Returns reason string."""
+    """Apply one joint sample onto the session. Returns reason string.
+
+    Widths are left for realize(s). search_cache is unused (kept for callers).
+    """
     from ..tools import clear_pairings, pair_masses
     from . import archive as archive_mod
 
+    del search_cache
     archive_mod.restore_snapshot(session, origin)
 
     part = plan.partitions[sample.partition_index % len(plan.partitions)]
@@ -385,7 +351,7 @@ def apply_cover_sample(
     if not session.constraints.get("loading_required"):
         session.constraints["loading"] = sample.loading
     session.constraints["cover_envelope"] = sample.envelope
-    session.constraints["cover_geom_rank"] = int(sample.geom_rank)
+    session.constraints.pop("cover_geom_rank", None)
     _apply_plate_profile(session, getattr(sample, "plate_profile", None) or "uniform")
 
     if topology_is_required(session):
@@ -399,104 +365,7 @@ def apply_cover_sample(
             if frontage and proposals:
                 pair_masses(session, proposals[0], float(frontage), length_is_cap=True)
 
-    applied = _apply_envelope_geometry(
-        session, sample.envelope, geom_rank=int(sample.geom_rank), cache=search_cache
-    )
-    if int(sample.geom_rank) > 0 and not applied:
-        return f"{sample.label or 'cover'} (no alt width)"
     return sample.label or "cover sample"
-
-
-def _apply_envelope_geometry(
-    session: Any,
-    envelope: str,
-    *,
-    geom_rank: int = 0,
-    cache: dict[str, Any] | None = None,
-) -> bool:
-    """Pull a site-search candidate under the envelope preference.
-
-    Returns True when a candidate was applied. geom_rank>0 picks the next
-    distinct verified width scheme so locked briefs can fill COVER_MAX.
-    """
-    if not session.masses:
-        return False
-    from ..search import SiteEnvelope, apply_scheme as apply_candidate, search_schemes
-
-    preference = _search_preference(envelope)
-    envelope_obj = SiteEnvelope(
-        max_building_length_ft=session.constraints.get("max_building_length_ft"),
-        max_building_width_ft=session.constraints.get("max_building_width_ft"),
-        max_total_length_ft=session.constraints.get("max_total_length_ft"),
-        max_stories=int(session.constraints.get("max_stories") or 4),
-    )
-    if not any(
-        [
-            envelope_obj.max_building_length_ft,
-            envelope_obj.max_building_width_ft,
-            envelope_obj.max_total_length_ft,
-        ]
-    ):
-        return False
-
-    need = max(COVER_GEOM_RANKS, int(geom_rank) + 1)
-    cache_key = (
-        partition_id(session),
-        tuple((m.id, int(m.story_count)) for m in session.masses),
-        str(session.constraints.get("loading") or "double"),
-        preference,
-        bool(session.pairings),
-        tuple(
-            sorted(
-                (str(k), float(v))
-                for k, v in (session.constraints.get("department_widths") or {}).items()
-                if isinstance(v, (int, float)) and not isinstance(v, bool)
-            )
-        ),
-        need,
-    )
-    store = cache if cache is not None else {}
-    candidates = store.get(cache_key)
-    if candidates is None:
-        # Pin COVER's story pattern so search sizes width for this cell, not a
-        # free story sweep that would overwrite the sample.
-        held_lock = dict(session.constraints.get("story_lock") or {})
-        session.constraints["story_lock"] = {
-            **held_lock,
-            **{m.id: int(m.story_count) for m in session.masses},
-        }
-        try:
-            found, _notes = search_schemes(
-                session, envelope_obj, preference=preference, top_n=need
-            )
-        except Exception:
-            found = []
-        if held_lock:
-            session.constraints["story_lock"] = held_lock
-        else:
-            session.constraints.pop("story_lock", None)
-        # Keep width-distinct schemes only (ranking may repeat near-clones).
-        distinct: list[Any] = []
-        seen_w: set[tuple] = set()
-        for cand in found or []:
-            sig = tuple(
-                (o.mass_id, round(float(o.width_ft), 1), int(o.stories))
-                for o in (cand.options or [])
-            )
-            if sig in seen_w:
-                continue
-            seen_w.add(sig)
-            distinct.append(cand)
-        store[cache_key] = distinct
-        candidates = distinct
-
-    if not candidates:
-        return False
-    rank = max(0, int(geom_rank))
-    if rank >= len(candidates):
-        return False
-    apply_candidate(session, candidates[rank], save=False)
-    return True
 
 
 def run_cover(
@@ -530,7 +399,7 @@ def run_cover(
         "topologies": list(plan.topologies),
         "loadings": list(plan.loadings),
         "envelopes": list(plan.envelopes),
-        "geom_ranks": COVER_GEOM_RANKS,
+        "plate_profiles": list(plan.plate_profiles),
         "pool": len(plan.samples),
     }
 
@@ -538,7 +407,6 @@ def run_cover(
     all_regions: set[str] = set()
     cursor = 0
     batches: list[dict[str, Any]] = []
-    search_cache: dict[str, Any] = {}
     stagnant = False
 
     evaluate(session, archive, "COVER: stated scheme")
@@ -564,16 +432,7 @@ def run_cover(
         ):
             sample = plan.samples[cursor]
             cursor += 1
-            reason = apply_cover_sample(
-                session,
-                plan,
-                sample,
-                origin=origin,
-                search_cache=search_cache,
-            )
-            if int(sample.geom_rank) > 0 and "no alt width" in reason:
-                # Do not burn budget or insert a duplicate drawing.
-                continue
+            reason = apply_cover_sample(session, plan, sample, origin=origin)
             evaluate(session, archive, f"COVER {tag}: {reason}")
             sig = region_signature(session)
             all_regions.add(sig)

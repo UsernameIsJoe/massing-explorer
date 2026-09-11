@@ -14,14 +14,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..solver import solve_massing_study
 from ..tools import solve_dimensions
 from . import archive as archive_mod
 from .cover import run_cover
 from .diagnose import diagnose, should_diagnose
 from .partitions import apply_partition, enumerate_partitions
-from .performance import measure
 from .preference import next_pair, schemes_from_archive, taste_weight
+from .realize import realize
 from .saturate import REFINE_CAP, REFINE_MIN, Saturation, encodings_from_archive, feature_is_novel, read_explore_budget
 from .strategy import grouping_is_required, partition_id, read_strategy
 
@@ -419,45 +418,13 @@ def _cover_geometry(session: Any, archive: dict[str, Any]) -> None:
             _evaluate(session, archive, f"cover stories on {mass.name}: {stories}")
         mass.story_count = baseline[mass.id]
 
-    if session.masses:
-        _ingest_site_search(session, archive)
-
     for mass in session.masses:
         mass.story_count = baseline.get(mass.id, mass.story_count)
 
 
 def _evaluate(session: Any, archive: dict[str, Any], reason: str) -> None:
-    result = solve_massing_study(session)
-    performance = measure(result, session, archive=archive)
+    result, performance = realize(session)
     archive_mod.insert(archive, session, result, performance, reason=reason)
-
-
-def _ingest_site_search(session: Any, archive: dict[str, Any]) -> None:
-    from ..search import SiteEnvelope, apply_scheme as apply_candidate, search_schemes
-
-    envelope = SiteEnvelope(
-        max_building_length_ft=session.constraints.get("max_building_length_ft"),
-        max_building_width_ft=session.constraints.get("max_building_width_ft"),
-        max_total_length_ft=session.constraints.get("max_total_length_ft"),
-        max_stories=int(session.constraints.get("max_stories") or 4),
-    )
-    held = {
-        m.id: (m.story_count, session.constraints.get(f"{m.id}_width_ft"))
-        for m in session.masses
-    }
-    candidates, _notes = search_schemes(session, envelope, preference="balanced", top_n=8)
-    session.last_search = [c.to_dict() for c in candidates]
-    for candidate in candidates:
-        apply_candidate(session, candidate, save=False)
-        _evaluate(session, archive, "site-envelope G variant")
-    for mass in session.masses:
-        stories, width = held.get(mass.id, (mass.story_count, None))
-        mass.story_count = stories
-        key = f"{mass.id}_width_ft"
-        if width is None:
-            session.constraints.pop(key, None)
-        else:
-            session.constraints[key] = width
 
 
 def _prepare_learn(archive: dict[str, Any], learning: dict[str, Any]) -> dict[str, Any]:

@@ -5,6 +5,22 @@ Update this file at the end of every work session.
 
 ---
 
+## 2026-09-11 — Realize strategy (pairwise P + realize(s))
+
+### Done
+
+- Pairwise same-mass P-block in `encode_strategy` (pad to C(12,2)=66).
+- New `explore/realize.py`: freeze stories/P/T; try a few widths; legal-best
+  else min feasibility distance.
+- COVER/BO/MCTS/REPAIR/`_evaluate` go through realize; no geom-rank width
+  padding; `SET_WIDTH` left search catalogs; `cell_key` = `idea_key`.
+
+### Next steps
+
+COVER max-distance sampler; GP ARD / dual output; width-band robustness.
+
+---
+
 ## 2026-09-11 — Plan: realize strategy, then BO
 
 ### Done

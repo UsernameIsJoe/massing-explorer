@@ -115,8 +115,8 @@ class AdaptiveCoverTests(unittest.TestCase):
         self.assertGreaterEqual(len(plan.samples), min(COVER_START, product, COVER_MAX))
         self.assertGreaterEqual(len(plan.samples), COVER_START)
 
-    def test_thin_axis_product_fills_with_geom_ranks(self) -> None:
-        """When typology product << COVER_MAX, geometry ranks pad the pool."""
+    def test_thin_axis_product_does_not_pad_with_geom_ranks(self) -> None:
+        """Widths are realize's job; COVER does not invent geom-rank padding."""
         self.session.constraints["story_lock"] = {
             m.id: int(m.story_count) for m in self.session.masses
         }
@@ -127,10 +127,11 @@ class AdaptiveCoverTests(unittest.TestCase):
             * max(1, len(plan.topologies))
             * max(1, len(plan.loadings))
             * max(1, len(plan.envelopes))
+            * max(1, len(plan.plate_profiles or ["uniform"]))
         )
         self.assertLess(product, COVER_MAX)
-        self.assertEqual(len(plan.samples), COVER_MAX)
-        self.assertTrue(any(int(s.geom_rank) > 0 for s in plan.samples))
+        self.assertLessEqual(len(plan.samples), product + 2)  # stated + stated+step
+        self.assertTrue(all(int(getattr(s, "geom_rank", 0) or 0) == 0 for s in plan.samples))
 
     def test_adaptive_stops_when_stagnant(self) -> None:
         archive = archive_mod.empty_archive()

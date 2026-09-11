@@ -1,10 +1,13 @@
 """
-Nine COVER probe axes — the strategy feature space for novelty and BO.
+COVER probe encoding — the strategy feature space for novelty and BO.
 
-These coordinates describe *what kind of strategy* a cell is. They are not
-LEARN taste and not a quality score. Courtyard / podium / perpendicular wings
-stay unsupported and are not sample targets; topology only encodes drawable
-kinds (independent / paired, plus L-leftover when the void layout already exists).
+Product language still names nine axes. Internally, program organization is a
+pairwise same-mass block (not a SHA scalar), followed by the other eight
+scalars. Exact feet are not coordinates; they are filled by realize(s).
+
+Courtyard / podium / perpendicular wings stay unsupported and are not sample
+targets; topology only encodes drawable kinds (independent / paired, plus
+L-leftover when the void layout already exists).
 
 Distance today is isotropic RBF (shared ℓ). Per-axis length scales (ARD) can
 plug in later without renaming these axes.
@@ -12,10 +15,9 @@ plug in later without renaming these axes.
 
 from __future__ import annotations
 
-import hashlib
 from typing import Any
 
-# Ordered — index i is axis i in encode_strategy / GP X rows.
+# Ordered product names. encode_named keeps this map; encode_strategy is longer.
 PROBE_AXIS_NAMES = (
     "program_organization",
     "mass_count",
@@ -28,10 +30,15 @@ PROBE_AXIS_NAMES = (
     "geometric_character",
 )
 
+# Pad to C(12, 2) so every GP row shares a length.
+P_BLOCK_DEPTS = 12
+P_BLOCK_SIZE = P_BLOCK_DEPTS * (P_BLOCK_DEPTS - 1) // 2
+STRATEGY_DIM = P_BLOCK_SIZE + (len(PROBE_AXIS_NAMES) - 1)
+
 
 def encode_strategy(strategy: dict[str, Any] | None) -> list[float]:
     """
-    Nine normalized coordinates in [0, 1] (approximately).
+    Strategy vector: pairwise P-block + eight normalized scalars.
 
     No invented feet. No unsupported courtyard code path.
     """
@@ -41,6 +48,11 @@ def encode_strategy(strategy: dict[str, Any] | None) -> list[float]:
     vertical = strategy.get("V") or {}
     geom = strategy.get("G") or {}
     partition = program.get("partition") or {}
+    if not partition and strategy.get("masses"):
+        partition = {
+            str(m.get("id") or i): list(m.get("departments") or [])
+            for i, m in enumerate(strategy["masses"])
+        }
     stories = [float(v) for v in (geom.get("stories") or {}).values()]
     if not stories and strategy.get("masses"):
         stories = [float(m.get("stories") or 0) for m in strategy["masses"]]
@@ -85,8 +97,7 @@ def encode_strategy(strategy: dict[str, Any] | None) -> list[float]:
 
     n_mass = float(program.get("mass_count") or len(sizes) or len(stories) or 0)
 
-    return [
-        _partition_fingerprint(partition),
+    return pairwise_partition_block(partition) + [
         min(1.0, n_mass / 8.0),
         max(0.0, min(1.0, balance)),
         topology,
@@ -99,25 +110,53 @@ def encode_strategy(strategy: dict[str, Any] | None) -> list[float]:
 
 
 def encode_named(strategy: dict[str, Any] | None) -> dict[str, float]:
-    """Same vector as a name→value map (docs / debugging)."""
+    """Nine product axes. program_organization is a compact id of the P-block."""
     vals = encode_strategy(strategy)
-    return {name: round(vals[i], 4) for i, name in enumerate(PROBE_AXIS_NAMES)}
+    block = vals[:P_BLOCK_SIZE]
+    scalars = vals[P_BLOCK_SIZE:]
+    named = {"program_organization": round(_p_block_id(block), 4)}
+    for i, name in enumerate(PROBE_AXIS_NAMES[1:]):
+        named[name] = round(scalars[i], 4) if i < len(scalars) else 0.0
+    return named
 
 
-def _partition_fingerprint(partition: dict[str, Any]) -> float:
+def pairwise_partition_block(partition: dict[str, Any] | None) -> list[float]:
     """
-    Stable [0,1] id for who-is-with-whom.
+    Same-mass bits for each department pair i<j, padded to C(12, 2).
 
-    Same grouping → same value. Different organizations → usually different.
-    Not a quality score.
+    Canonical order is sorted department names on the study. 1 if the pair
+    shares a mass, else 0. Unused department slots stay 0.
     """
-    groups = []
-    for depts in (partition or {}).values():
-        groups.append(tuple(sorted(str(d) for d in (depts or []))))
-    groups.sort()
-    if not groups:
-        return 0.0
-    raw = "|".join(",".join(g) for g in groups)
-    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()
-    # Take 32 bits → [0,1)
-    return int(digest[:8], 16) / float(0xFFFFFFFF)
+    names = _department_names(partition)
+    owner: dict[str, str] = {}
+    for mass_id, depts in (partition or {}).items():
+        mid = str(mass_id)
+        for dept in depts or []:
+            owner[str(dept)] = mid
+    bits: list[float] = []
+    n = P_BLOCK_DEPTS
+    for i in range(n):
+        for j in range(i + 1, n):
+            if i >= len(names) or j >= len(names):
+                bits.append(0.0)
+                continue
+            a = owner.get(names[i])
+            b = owner.get(names[j])
+            bits.append(1.0 if a and b and a == b else 0.0)
+    return bits
+
+
+def _department_names(partition: dict[str, Any] | None) -> list[str]:
+    names = {str(d) for depts in (partition or {}).values() for d in (depts or [])}
+    return sorted(names)[:P_BLOCK_DEPTS]
+
+
+def _p_block_id(block: list[float]) -> float:
+    """Stable [0, 1] summary of the pairwise bits (radar / debugging)."""
+    acc = 0
+    width = min(24, len(block))
+    for i in range(width):
+        if block[i] >= 0.5:
+            acc |= 1 << i
+    denom = float((1 << width) - 1) if width else 1.0
+    return acc / denom if denom else 0.0

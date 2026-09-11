@@ -13,7 +13,6 @@ from typing import Any
 
 from . import archive as archive_mod
 from .actions import UNSUPPORTED, apply_action
-from .performance import measure
 from .planner import parse_plan
 from .saturate import MCTS_DEPTH, MCTS_ROOTS, MCTS_SIMS, Saturation, read_explore_budget
 from .strategy import grouping_is_required
@@ -317,13 +316,12 @@ def cover_roots(
 
 
 def catalog_actions(session: Any, include_unsupported: bool = True) -> list[dict[str, Any]]:
-    """Local typed neighbors. Nearby width is a step, not an invented target."""
+    """Local typed neighbors. Width is filled by realize, not by catalog steps."""
     from .topology import pairing_proposals, stated_frontage_ft, topology_is_required
 
     actions: list[dict[str, Any]] = []
     lock = session.constraints.get("story_lock") or {}
     cap = max(1, int(session.constraints.get("max_stories") or 4))
-    paired_ids = {mid for p in (session.pairings or []) for mid in (p.mass_ids or [])}
     for mass in session.masses or []:
         if mass.id in lock:
             continue
@@ -331,9 +329,6 @@ def catalog_actions(session: Any, include_unsupported: bool = True) -> list[dict
         for stories in (current - 1, current + 1):
             if 1 <= stories <= cap and stories != current:
                 actions.append({"op": "SET_STORIES", "mass": mass.id, "stories": stories})
-        if mass.id not in paired_ids:
-            for delta in (-10.0, 10.0):
-                actions.append({"op": "SET_WIDTH", "mass": mass.id, "delta_ft": delta})
     loading = str(session.constraints.get("loading") or "double")
     if not session.constraints.get("loading_required"):
         other = "single" if loading != "single" else "double"
@@ -483,11 +478,10 @@ def _score(session: Any, archive: dict[str, Any], node: _Node, weights: dict[str
         return 0.0
     if getattr(session, "program", None) is None:
         return 0.6 if node.kind in {"applied", "root", "cover_root"} else 0.0
-    from ..solver import solve_massing_study
+    from .realize import realize
     from .saturate import search_reward
 
-    result = solve_massing_study(session)
-    performance = measure(result, session, archive=archive)
+    result, performance = realize(session)
     archive_mod.insert(
         archive,
         session,

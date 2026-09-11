@@ -5,6 +5,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+
 from types import SimpleNamespace
 
 from massing_explorer.explore.archive import (
@@ -22,9 +23,9 @@ from massing_explorer.explore.feasibility import (
 )
 from massing_explorer.explore.mcts import cover_roots
 from massing_explorer.explore.preference import schemes_from_archive
-from massing_explorer.explore.repair import pick_repair_action, run_repair
+from massing_explorer.explore.repair import run_repair
 from massing_explorer.explore.saturate import search_reward
-from massing_explorer.explore.strategy import partition_id
+from massing_explorer.explore.strategy import cell_key, idea_key, partition_id
 from massing_explorer.massing_models import ValidationCheck
 from massing_explorer.models import Department, GrossingConfig, ProgramStudy, Room
 from massing_explorer.session import StudySession
@@ -302,21 +303,34 @@ class TestRepair(unittest.TestCase):
         archive = empty_archive()
         insert(archive, self.session, result, perf, reason="COVER: stated scheme")
         before_p = partition_id(self.session)
+        before_stories = {m.id: int(m.story_count) for m in self.session.masses}
         report = run_repair(self.session, archive)
         self.assertGreaterEqual(report["tried"], 1)
         self.assertEqual(partition_id(self.session), before_p)
+        self.assertEqual(
+            {m.id: int(m.story_count) for m in self.session.masses},
+            before_stories,
+        )
         self.assertTrue(
             legal_cells(archive) or report["legalized"] >= 1,
             report,
         )
+        self.assertEqual(cell_key(self.session), idea_key(self.session))
 
-    def test_pick_repair_never_regroups(self) -> None:
-        perf = {"failed_kinds": ["site_length"], "fits_limitations": False}
-        result = SimpleNamespace(resize_suggestions=[], masses=[])
-        action = pick_repair_action(self.session, result, perf, set())
-        self.assertIsNotNone(action)
-        self.assertNotEqual(action.get("op"), "APPLY_PARTITION")
-        self.assertIn(action.get("op"), {"SET_WIDTH", "SET_STORIES", "CLEAR_PAIRINGS"})
+    def test_realize_legalizes_without_story_change(self) -> None:
+        from massing_explorer.explore.realize import realize
+
+        before_stories = {m.id: int(m.story_count) for m in self.session.masses}
+        before_p = partition_id(self.session)
+        result, perf = realize(self.session)
+        self.assertEqual(
+            {m.id: int(m.story_count) for m in self.session.masses},
+            before_stories,
+        )
+        self.assertEqual(partition_id(self.session), before_p)
+        self.assertTrue(perf.get("fits_limitations"), perf.get("failed_kinds"))
+        width = float(self.session.constraints.get("mass_1_width_ft") or 0)
+        self.assertGreater(width, 80.0)
 
 
 if __name__ == "__main__":

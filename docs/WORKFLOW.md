@@ -70,7 +70,7 @@ MCTS sits around the **planner + engine** loop. Nearby width is a local step fro
 4. **COVER the archive** (`explore/cover.py`).
    - Stratified joint samples across open axes: P, story patterns, drawable T, loading, envelope (balanced / compact / elongated), plate profile (uniform / step).
    - Adaptive budget: start ~40 → expand +10/+20 while new legal regions or feature encodings appear → stop when stagnant → cap ~120 (incomplete map if still discovering).
-5. **REPAIR** (`explore/repair.py`). Rank illegal COVER samples by distance-to-feasibility. Project the closest ideas (~8 × ≤3 existing actions: `SET_WIDTH`, `SET_STORIES`, hard ratio, unlocked `CLEAR_PAIRINGS`). Same partition. Soft prefs are not the objective.
+5. **REPAIR** (`explore/repair.py`). Rank illegal COVER samples by distance-to-feasibility. Restore the closest ideas and run `realize(s)` to fill feet (same P / stories). Soft prefs are not the objective.
 6. **LLM planner** proposes at most five typed actions. The engine applies or rejects them.
 7. **MCTS** searches typed actions from several COVER elites **and** a few near-feasible frontier starts, using the planner as an expansion prior (~40–80 sims, depth 3–4, saturation stop).
 8. **Bayesian optimization** spends ~10–15 sequential evaluations on high expected-improvement **legal** actions, refitting the GP after each result, stop on saturation.

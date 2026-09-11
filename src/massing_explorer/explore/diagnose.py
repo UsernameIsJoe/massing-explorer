@@ -215,14 +215,11 @@ def run_targeted_cover(
     origin = archive_mod.capture(session)
     plan = build_cover_plan(session, pool_size=max(budget * 2, 30))
     samples = list(_targeted_samples(session, plan, focus=focus, budget=budget))
-    search_cache: dict[str, Any] = {}
     before_legal = len(archive_mod.legal_cells(archive))
     before_attempts = int(archive.get("attempts") or 0)
     ran = 0
     for sample in samples:
-        reason = apply_cover_sample(
-            session, plan, sample, origin=origin, search_cache=search_cache
-        )
+        reason = apply_cover_sample(session, plan, sample, origin=origin)
         evaluate(session, archive, f"DIAGNOSE targeted ({focus}): {reason}")
         ran += 1
     archive_mod.restore_snapshot(session, origin)

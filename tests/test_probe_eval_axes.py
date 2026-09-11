@@ -5,13 +5,21 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
-from massing_explorer.explore.axes import PROBE_AXIS_NAMES, encode_named, encode_strategy
+from massing_explorer.explore.axes import (
+    P_BLOCK_SIZE,
+    PROBE_AXIS_NAMES,
+    STRATEGY_DIM,
+    encode_named,
+    encode_strategy,
+    pairwise_partition_block,
+)
 from massing_explorer.explore.performance import EVAL_AXIS_NAMES, eval_composites, measure
 from massing_explorer.explore.preference import TRAIT_NAMES
+from massing_explorer.explore.saturate import feature_distance
 
 
 class TestProbeAxes(unittest.TestCase):
-    def test_encode_has_nine_named_axes(self) -> None:
+    def test_encode_has_pairwise_block_plus_scalars(self) -> None:
         strategy = {
             "P": {
                 "mass_count": 3,
@@ -33,15 +41,69 @@ class TestProbeAxes(unittest.TestCase):
         vec = encode_strategy(strategy)
         named = encode_named(strategy)
         self.assertEqual(len(PROBE_AXIS_NAMES), 9)
-        self.assertEqual(len(vec), 9)
+        self.assertEqual(len(vec), STRATEGY_DIM)
+        self.assertEqual(P_BLOCK_SIZE, 66)
         self.assertEqual(list(named.keys()), list(PROBE_AXIS_NAMES))
         self.assertAlmostEqual(named["mass_count"], 3 / 8.0)
         self.assertEqual(named["loading"], 1.0)
         self.assertEqual(named["topology"], 0.0)
         self.assertGreater(named["distribution_balance"], 0.0)
-        # Same partition → same organization fingerprint.
+        # Same partition → same organization block.
         again = encode_strategy(strategy)
-        self.assertEqual(again[0], vec[0])
+        self.assertEqual(again, vec)
+        self.assertEqual(again[0:P_BLOCK_SIZE], vec[0:P_BLOCK_SIZE])
+
+    def test_pairwise_related_closer_than_unrelated(self) -> None:
+        # Same department set; only who-shares-a-mass changes.
+        depts = ["ADMINISTRATION", "ART & MUSIC", "CORE ACADEMIC"]
+        together = {
+            "a": ["CORE ACADEMIC", "ART & MUSIC"],
+            "b": ["ADMINISTRATION"],
+        }
+        one_split = {
+            "a": ["CORE ACADEMIC"],
+            "b": ["ART & MUSIC"],
+            "c": ["ADMINISTRATION"],
+        }
+        other_group = {
+            "a": ["CORE ACADEMIC", "ADMINISTRATION"],
+            "b": ["ART & MUSIC"],
+        }
+        def strat(partition: dict, n_mass: int) -> dict:
+            return {
+                "P": {"mass_count": n_mass, "partition": partition},
+                "T": {"kind": "independent_bars"},
+                "V": {},
+                "G": {
+                    "stories": {mid: 2 for mid in partition},
+                    "loading": "double",
+                    "envelope": "balanced",
+                },
+            }
+
+        va = encode_strategy(strat(together, 2))
+        vb = encode_strategy(strat(one_split, 3))
+        # Flip which pair shares a mass (further from together than one_split
+        # in Hamming on the CORE–ART bit vs CORE–ADMIN bit).
+        vc = encode_strategy(strat(other_group, 2))
+        # Keep mass_count matched when comparing together vs other_group.
+        self.assertEqual(len(va), STRATEGY_DIM)
+        self.assertLess(
+            feature_distance(va, encode_strategy(strat(together, 2))),
+            feature_distance(va, vc) + 1e-9,
+        )
+        # Direct block: together and one_split differ only on CORE–ART bit.
+        bt = pairwise_partition_block(together)
+        bs = pairwise_partition_block(one_split)
+        bo = pairwise_partition_block(other_group)
+        ham_ts = sum(1 for x, y in zip(bt, bs) if x != y)
+        ham_to = sum(1 for x, y in zip(bt, bo) if x != y)
+        self.assertEqual(ham_ts, 1)
+        self.assertGreaterEqual(ham_to, ham_ts)
+        self.assertEqual(sorted(depts), sorted(
+            {d for g in together.values() for d in g}
+        ))
+        self.assertLess(feature_distance(va, vb), feature_distance(va, vc) + 0.5)
 
     def test_paired_topology_and_envelope_shift(self) -> None:
         base = {
@@ -63,8 +125,6 @@ class TestEvalAxes(unittest.TestCase):
         self.assertEqual(len(TRAIT_NAMES), 4)
 
     def test_awkward_split_min_area_100_sqm(self) -> None:
-        from types import SimpleNamespace
-
         from massing_explorer.explore.performance import (
             MIN_SPLIT_PART_SF,
             MIN_SPLIT_PART_SQM,
