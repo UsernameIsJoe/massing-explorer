@@ -325,11 +325,13 @@ one quality score:
 4. **Robustness / flexibility** — survive vs collapse under same-strategy
    program area probes (proxy when no probe yet)
 
-**Probe / novelty encoding** (COVER feature space, BO distance) is a separate
-nine-axis vector: program organization, mass count, distribution balance,
-topology (drawable only), loading, mean height, height articulation, vertical
-organization, geometric character. Courtyard / podium stay `unsupported` —
-named, not COVER targets. GP distance is isotropic RBF for now (ARD later).
+**Probe / novelty encoding** (COVER feature space, BO distance) is a strategy
+vector: a **pairwise program-organization block** (same-mass bits, not a SHA
+scalar) plus mass count, distribution balance, topology, loading, mean height,
+height articulation, vertical organization, and geometric character. Courtyard /
+podium stay `unsupported` — named, not COVER targets. GP distance is isotropic
+RBF for now (ARD later). Exact feet are not GP coordinates; they are filled by
+`realize(s)` — see [PLAN-realize-strategy.md](PLAN-realize-strategy.md).
 
 Raw geometry signals (spread, leftover, …) remain diagnostic inputs.
 `search.py`'s weighted sum is an experimental baseline only. Daylight /
@@ -349,10 +351,10 @@ No Architect / Engineer / Client / Critic role-play. A Critic is added only if
 experiments show the planner repeats the same illegal move.
 
 Bayesian optimization is an evaluation-budget manager for expensive
-simulations. After COVER, it ranks unevaluated typed actions by expected
-improvement, evaluates one, refits, and repeats (~10–15, or until saturation).
-It is not an architectural generator. It is not on the critical path until a
-run costs minutes.
+simulations. It ranks unevaluated **strategies** by expected improvement on
+`F(s)` — the quality of `s` after `realize` fills width/length. It does not
+propose `SET_WIDTH`. It is not an architectural generator. It is not on the
+critical path until a run costs minutes.
 
 ---
 

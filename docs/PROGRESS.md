@@ -5,6 +5,22 @@ Update this file at the end of every work session.
 
 ---
 
+## 2026-09-11 — Plan: realize strategy, then BO
+
+### Done
+
+Wrote [PLAN-realize-strategy.md](PLAN-realize-strategy.md): strategy `s` is
+P, T, loading, envelope, plate profile, and **story counts**. Width, length,
+ratio, and plate sizes are dimensions `d` filled by a cheap inner `realize(s)`.
+BO learns `F(s)` after realize, not feet. Pairwise P-block (same-mass bits)
+replaces the SHA partition scalar. `SET_WIDTH` leaves MCTS/BO catalogs.
+
+### Next steps
+
+Implement pairwise encoding, `realize.py`, wire COVER/BO/MCTS/REPAIR, tests.
+
+---
+
 ## 2026-09-11 — REPAIR / near-feasible frontier
 
 ### Done

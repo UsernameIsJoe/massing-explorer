@@ -138,6 +138,8 @@ massing-explorer/
 ├── tests/                  # test_phase1 … test_phase6, test_explore
 ├── docs/
 │   ├── BLUEPRINT-search.md # Constitution
+│   ├── PLAN-realize-strategy.md  # Strategy vs dimensions; realize(s)
+│   ├── PLAN-search-architecture.md
 │   ├── CONCEPT.md
 │   ├── WORKFLOW.md
 │   ├── PHASES.md
