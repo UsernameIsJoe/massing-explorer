@@ -19,6 +19,12 @@ TRAIT_NAMES = (
     "robustness",
 )
 
+# Cap A/B questions so LEARN stays short (under 5).
+MAX_LEARN_COMPARISONS = 4
+
+# Reject near-twin drawings: need a clear architectural difference to choose.
+MIN_PAIR_DIVERSITY = 4.0
+
 
 def utility(weights: dict[str, float], traits: dict[str, Any]) -> float:
     return sum(float(weights.get(name, 0.0)) * float(traits.get(name, 0.0) or 0.0) for name in TRAIT_NAMES)
@@ -30,10 +36,22 @@ def chance_a_beats_b(traits_a: dict[str, Any], traits_b: dict[str, Any], weights
 
 
 def stated_weight(entry: dict[str, Any]) -> float:
+    """Pre-LEARN ranking among legal cells. Awkward floor splits are heavily down-ranked."""
     perf = entry.get("performance") or {}
     fail = 1.0 / (1.0 + float(perf.get("failed_checks") or 0.0))
     pref = 1.0 - min(1.0, max(0.0, float(perf.get("preference_distance") or 0.0)))
-    return fail * (0.65 + 0.35 * pref)
+    awkward = min(1.0, max(0.0, float(perf.get("awkward_splits") or 0.0)))
+    frag = min(1.0, max(0.0, float(perf.get("fragmentation") or 0.0)))
+    raw_coh = perf.get("program_coherence")
+    try:
+        coherence = float(raw_coh) if raw_coh is not None else (1.0 - awkward)
+    except (TypeError, ValueError):
+        coherence = 1.0 - awkward
+    # Squared drop so even a partial awkward share tanks "best fit".
+    awkward_factor = max(0.05, (1.0 - awkward) ** 2)
+    # Prefer schemes that keep departments on single floors when scores tie.
+    frag_factor = max(0.55, 1.0 - 0.45 * frag)
+    return fail * (0.45 * pref + 0.35 * coherence + 0.20) * awkward_factor * frag_factor
 
 
 def taste_weight(entry: dict[str, Any], weights: dict[str, float] | None) -> float:
@@ -85,40 +103,67 @@ def next_pair(
     weights: dict[str, float],
     comparisons: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
+    if len(comparisons) >= MAX_LEARN_COMPARISONS:
+        return None
     legal = [s for s in schemes if s.get("fits") and s.get("traits")]
     if len(legal) < 2:
         return None
     compared = {item.get("a") for item in comparisons} | {item.get("b") for item in comparisons}
     unseen = [s for s in legal if s["id"] not in compared]
     seen = [s for s in legal if s["id"] in compared]
+
     if unseen and seen:
-        fresh = max(
-            unseen,
-            key=lambda s: max(_pair_diversity(s, o) for o in seen),
-        )
-        other = max(seen, key=lambda s: _pair_diversity(s, fresh))
-        return _pair(fresh, other, "connecting")
+        # Prefer a fresh scheme vs an already-seen one, but only if visibly different.
+        best = None
+        best_div = -1.0
+        for fresh in unseen:
+            for other in seen:
+                d = _pair_diversity(fresh, other)
+                if d < MIN_PAIR_DIVERSITY:
+                    continue
+                if d > best_div:
+                    best_div = d
+                    best = _pair(fresh, other, "connecting")
+        if best:
+            return best
+
     if len(unseen) >= 2:
         best = None
         best_div = -1.0
+        best_score = -1.0
         for i, left in enumerate(unseen):
             for right in unseen[i + 1 :]:
                 d = _pair_diversity(left, right)
-                if d > best_div:
+                if d < MIN_PAIR_DIVERSITY:
+                    continue
+                pa = chance_a_beats_b(left["traits"], right["traits"], weights)
+                score = d + 0.5 * information(pa)
+                if d > best_div + 1e-9 or (abs(d - best_div) < 1e-9 and score > best_score):
                     best_div = d
-                    best = _pair(left, right, "connecting")
-        return best or _pair(unseen[0], unseen[1], "connecting")
+                    best_score = score
+                    best = _pair(
+                        left,
+                        right,
+                        "contrast" if d >= MIN_PAIR_DIVERSITY + 2 else "connecting",
+                    )
+        if best:
+            return best
+
     best = None
     best_score = -1.0
     for i, left in enumerate(legal):
         for right in legal[i + 1 :]:
             if _already(comparisons, left["id"], right["id"]):
                 continue
+            d = _pair_diversity(left, right)
+            if d < MIN_PAIR_DIVERSITY:
+                continue
             pa = chance_a_beats_b(left["traits"], right["traits"], weights)
-            score = information(pa) * (1.0 + 0.35 * _pair_diversity(left, right))
+            # Weight diversity more than BT ambiguity so A/B is chooseable.
+            score = d * (1.0 + 0.25 * information(pa))
             if score > best_score:
                 best_score = score
-                best = _pair(left, right, "ambiguous" if score >= 0.2 else "obvious")
+                best = _pair(left, right, "ambiguous" if information(pa) >= 0.2 else "contrast")
     return best
 
 
@@ -188,12 +233,20 @@ def describe_weights(weights: dict[str, float]) -> str:
 
 
 def take_choice(session: Any, text: str) -> dict[str, Any] | None:
+    side = parse_choice(text)
+    if side is None:
+        return None
+    return apply_choice(session, side)
+
+
+def apply_choice(session: Any, side: str) -> dict[str, Any] | None:
+    """Record A/B winner ('a' or 'b'), refit LEARN weights, restore the winner."""
+    side = str(side or "").strip().lower()
+    if side not in {"a", "b"}:
+        return None
     learning = dict((session.constraints.get("explore") or {}).get("learning") or {})
     pair = learning.get("pending_pair")
     if not pair or not pair.get("a") or not pair.get("b"):
-        return None
-    side = parse_choice(text)
-    if side is None:
         return None
     archive = (session.constraints.get("explore") or {}).get("archive") or {}
     schemes = schemes_from_archive(archive)
@@ -205,11 +258,14 @@ def take_choice(session: Any, text: str) -> dict[str, Any] | None:
     weights = fit_weights(comparisons, by_id)
     nxt = next_pair(schemes, weights, comparisons)
     note = describe_weights(weights)
+    if nxt is None and len(comparisons) >= MAX_LEARN_COMPARISONS:
+        note = f"{note} LEARN complete ({len(comparisons)}/{MAX_LEARN_COMPARISONS} comparisons)."
     learning = {
         "weights": weights,
         "comparisons": comparisons,
         "pending_pair": nxt,
         "note": note,
+        "max_comparisons": MAX_LEARN_COMPARISONS,
     }
     store = dict(session.constraints.get("explore") or {})
     store["learning"] = learning
@@ -217,46 +273,148 @@ def take_choice(session: Any, text: str) -> dict[str, Any] | None:
     from .archive import restore_entry
 
     chosen = by_id[pair[side]]
-    other = by_id[pair["b" if side == "a" else "a"]]
     restore_entry(session, chosen["entry"])
     store["kept_cell"] = chosen["id"]
     session.constraints["explore"] = store
     if hasattr(session, "save"):
         session.save()
     reply = (
-        f"You chose {chosen['id']} over {other['id']}. {note} "
+        f"You chose {'A' if side == 'a' else 'B'} "
+        f"({chosen['id'][:48]}…) over the other. {note} "
         "Requirements and caps are unchanged."
     )
     if nxt:
-        reply += f" Next pair: {nxt['a']} or {nxt['b']} ({nxt.get('kind')})."
+        remaining = MAX_LEARN_COMPARISONS - len(comparisons)
+        reply += f" Next pair ready ({nxt.get('kind') or 'pair'}; {remaining} left)."
     else:
-        reply += " No further informative pair among the legal cells."
-    return {"ok": True, "reply": reply, "learning": learning}
+        reply += " No further A/B questions."
+    return {
+        "ok": True,
+        "reply": reply,
+        "learning": learning,
+        "winner": side,
+        "kept_cell": chosen["id"],
+        "next_pair": nxt,
+    }
 
 
 def _pair(left: dict[str, Any], right: dict[str, Any], kind: str) -> dict[str, Any]:
-    return {"a": left["id"], "b": right["id"], "kind": kind}
+    return {
+        "a": left["id"],
+        "b": right["id"],
+        "kind": kind,
+        "diversity": round(_pair_diversity(left, right), 3),
+    }
+
+
+def _story_signature(entry: dict[str, Any]) -> tuple[int, ...]:
+    stories = entry.get("stories") or {}
+    if stories:
+        return tuple(sorted(int(v) for v in stories.values()))
+    plates = entry.get("plates") or []
+    if plates:
+        return tuple(sorted(int(p.get("stories") or 0) for p in plates))
+    geom = ((entry.get("strategy") or {}).get("G") or {}).get("stories") or {}
+    if geom:
+        return tuple(sorted(int(v) for v in geom.values()))
+    return ()
+
+
+def _silhouette(entry: dict[str, Any]) -> list[tuple[int, int, int]]:
+    """Coarse visual fingerprint: (stories, width_bin, length_bin) per mass."""
+    plates = list(entry.get("plates") or [])
+    rows: list[tuple[int, int, int]] = []
+    if plates:
+        for p in plates:
+            try:
+                stories = int(p.get("stories") or 0)
+                width = int(round(float(p.get("width_ft") or 0) / 10.0) * 10)
+                length = int(round(float(p.get("length_ft") or 0) / 20.0) * 20)
+            except (TypeError, ValueError):
+                continue
+            if width > 0 and length > 0:
+                rows.append((stories, width, length))
+    else:
+        snap = entry.get("snapshot") or {}
+        stories = entry.get("stories") or snap.get("stories") or {}
+        widths = snap.get("widths") or {}
+        lengths = list((entry.get("performance") or {}).get("lengths") or [])
+        for i, mass in enumerate(snap.get("masses") or []):
+            if not isinstance(mass, dict):
+                continue
+            mid = str(mass.get("id") or "")
+            try:
+                w = int(round(float(widths.get(mid) or 0) / 10.0) * 10)
+                st = int(stories.get(mid) or mass.get("story_count") or 0)
+                ln = int(round(float(lengths[i] if i < len(lengths) else 0) / 20.0) * 20)
+            except (TypeError, ValueError):
+                continue
+            if w > 0 and ln > 0:
+                rows.append((st, w, ln))
+    rows.sort()
+    return rows
+
+
+def _probe_l1(entry_a: dict[str, Any], entry_b: dict[str, Any]) -> float:
+    from .axes import encode_strategy
+
+    def prep(entry: dict[str, Any]) -> dict[str, Any]:
+        strategy = dict(entry.get("strategy") or {})
+        geom = dict(strategy.get("G") or {})
+        if not geom.get("stories") and entry.get("stories"):
+            geom["stories"] = dict(entry["stories"])
+            strategy["G"] = geom
+        return strategy
+
+    va = encode_strategy(prep(entry_a))
+    vb = encode_strategy(prep(entry_b))
+    return sum(abs(a - b) for a, b in zip(va, vb))
 
 
 def _pair_diversity(left: dict[str, Any], right: dict[str, Any]) -> float:
-    """How different two legal archive schemes are (P / T / envelope / traits)."""
+    """How different two legal archive schemes are (must be chooseable on sight)."""
     ea = left.get("entry") or {}
     eb = right.get("entry") or {}
     score = 0.0
     if ea.get("partition") != eb.get("partition"):
-        score += 2.0
+        score += 3.0
     ta = ((ea.get("strategy") or {}).get("T") or {}).get("kind")
     tb = ((eb.get("strategy") or {}).get("T") or {}).get("kind")
     if ta != tb:
-        score += 2.0
+        score += 3.0
     ga = ((ea.get("strategy") or {}).get("G") or {}).get("envelope")
     gb = ((eb.get("strategy") or {}).get("G") or {}).get("envelope")
     if ga != gb:
-        score += 1.0
+        score += 1.5
     la = ((ea.get("strategy") or {}).get("G") or {}).get("loading")
     lb = ((eb.get("strategy") or {}).get("G") or {}).get("loading")
     if la != lb:
-        score += 1.0
+        score += 1.5
+
+    sa = _story_signature(ea)
+    sb = _story_signature(eb)
+    if sa != sb:
+        score += 2.5
+        if len(sa) != len(sb):
+            score += 1.5
+        elif sa and sb:
+            n = min(len(sa), len(sb))
+            score += min(2.0, 0.5 * sum(abs(sa[i] - sb[i]) for i in range(n)))
+
+    sil_a = _silhouette(ea)
+    sil_b = _silhouette(eb)
+    if sil_a and sil_b and sil_a != sil_b:
+        n = max(len(sil_a), len(sil_b))
+        matched = sum(1 for i in range(min(len(sil_a), len(sil_b))) if sil_a[i] == sil_b[i])
+        score += 2.0 * (1.0 - matched / n)
+        tot_a = sum(p[2] for p in sil_a) or 1
+        tot_b = sum(p[2] for p in sil_b) or 1
+        rel = abs(tot_a - tot_b) / max(tot_a, tot_b)
+        score += min(2.0, 3.0 * rel)
+
+    probe = _probe_l1(ea, eb)
+    score += min(3.0, probe)
+
     traits_a = left.get("traits") or {}
     traits_b = right.get("traits") or {}
     for name in TRAIT_NAMES:

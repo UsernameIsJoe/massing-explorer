@@ -61,13 +61,34 @@ class TestStepMath(unittest.TestCase):
                 self.assertEqual(len(plates), stories)
 
     def test_weights_set_relative_plate_sizes(self) -> None:
+        # >2 distinct weights collapse to 2 types: base + first setback.
         plates = solve_stepped_plates(30000, [1.0, 0.5, 0.25])
         self.assertAlmostEqual(plates[1] / plates[0], 0.5, places=6)
-        self.assertAlmostEqual(plates[2] / plates[0], 0.25, places=6)
+        self.assertAlmostEqual(plates[2] / plates[0], 0.5, places=6)
+
+    def test_two_plate_types_preserved(self) -> None:
+        plates = solve_stepped_plates(30000, [1.0, 0.5, 0.5])
+        self.assertAlmostEqual(plates[1] / plates[0], 0.5, places=6)
+        self.assertAlmostEqual(plates[2] / plates[0], 0.5, places=6)
 
     def test_area_is_conserved(self) -> None:
         plates = solve_stepped_plates(30000, [1.0, 0.8, 0.4])
         self.assertAlmostEqual(sum(plates), 30000, places=6)
+        # Canonical: [1, 0.8, 0.8]
+        self.assertAlmostEqual(plates[1], plates[2], places=6)
+        self.assertGreater(plates[0], plates[1])
+
+    def test_increasing_weights_clamp_to_biggest_at_bottom(self) -> None:
+        from massing_explorer.solver import canonicalize_step_weights
+
+        self.assertEqual(
+            canonicalize_step_weights([1.0, 1.3, 1.6]),
+            [1.0, 1.0, 1.0],
+        )
+        self.assertEqual(
+            canonicalize_step_weights([1.0, 0.8, 0.64, 0.5]),
+            [1.0, 0.8, 0.8, 0.8],
+        )
 
     def test_area_is_conserved_with_a_void(self) -> None:
         """Sum of plates less the single void cut must equal the target."""
@@ -133,11 +154,14 @@ class TestStepWeightResolution(unittest.TestCase):
     def test_default_is_uniform(self) -> None:
         self.assertEqual(resolve_step_weights(self.session, "academic", 3), [1.0] * 3)
 
-    def test_taper_is_geometric(self) -> None:
+    def test_taper_collapses_to_two_plate_types(self) -> None:
         set_floor_taper(self.session, "academic", 0.8)
         weights = resolve_step_weights(self.session, "academic", 3)
+        # Raw geometric [1, 0.8, 0.64] → base + first setback.
+        self.assertAlmostEqual(weights[0], 1.0, places=6)
         self.assertAlmostEqual(weights[1], 0.8, places=6)
-        self.assertAlmostEqual(weights[2], 0.64, places=6)
+        self.assertAlmostEqual(weights[2], 0.8, places=6)
+        self.assertEqual(len(set(round(w, 6) for w in weights)), 2)
 
     def test_taper_survives_a_story_count_change(self) -> None:
         set_floor_taper(self.session, "academic", 0.5)
@@ -167,7 +191,8 @@ class TestStepWeightResolution(unittest.TestCase):
     def test_persists_across_reload(self) -> None:
         set_floor_steps(self.session, "academic", [1.0, 0.6, 0.3])
         reloaded = StudySession.load("weights")
-        self.assertEqual(reloaded.floor_steps["academic"], [1.0, 0.6, 0.3])
+        # Stored canonical form: ≤2 plate types.
+        self.assertEqual(reloaded.floor_steps["academic"], [1.0, 0.6, 0.6])
         set_floor_taper(reloaded, "academic", 0.9)
         again = StudySession.load("weights")
         self.assertAlmostEqual(again.floor_tapers["academic"], 0.9)
@@ -240,8 +265,9 @@ class TestSteppedSolve(unittest.TestCase):
         set_floor_taper(session, "academic", 0.75)
         mass = solve_massing_study(session, config_path=str(CONFIG)).masses[0]
         self.assertTrue(mass.is_stepped)
+        # Collapsed to two types: L0 base, L1+L2 at first setback ratio.
         self.assertAlmostEqual(mass.step_ratios[1], 0.75, places=3)
-        self.assertAlmostEqual(mass.step_ratios[2], 0.5625, places=3)
+        self.assertAlmostEqual(mass.step_ratios[2], 0.75, places=3)
 
     def test_width_held_constant_while_length_steps(self) -> None:
         session = self._academic()
@@ -250,7 +276,7 @@ class TestSteppedSolve(unittest.TestCase):
         self.assertEqual(len({round(f.width_ft, 4) for f in mass.floors}), 1)
         lengths = [f.length_ft for f in mass.floors]
         self.assertGreater(lengths[0], lengths[1])
-        self.assertGreater(lengths[1], lengths[2])
+        self.assertAlmostEqual(lengths[1], lengths[2], places=4)
 
     def test_uniform_mass_is_not_flagged_stepped(self) -> None:
         mass = solve_massing_study(self._academic(), config_path=str(CONFIG)).masses[0]
@@ -291,7 +317,8 @@ class TestSteppedSolve(unittest.TestCase):
 
     def test_gentle_step_back_over_a_void_is_clean(self) -> None:
         session = self._athletics()
-        set_floor_taper(session, "athletics", 0.85)
+        # Explicit two-type step keeps L1 large enough for the gym void.
+        set_floor_steps(session, "athletics", [1.0, 0.9, 0.9])
         result = solve_massing_study(session, config_path=str(CONFIG))
         mass = result.masses[0]
 
@@ -299,32 +326,40 @@ class TestSteppedSolve(unittest.TestCase):
         relevant = [
             v.message
             for v in result.validation
-            if not v.passed and not v.check.startswith("unassigned")
+            if not v.passed
+            and not v.check.startswith("unassigned")
+            and not v.check.startswith("program_split")
         ]
         self.assertEqual(relevant, [])
         self.assertAlmostEqual(mass.actual_gsf, mass.target_gsf, delta=1.0)
 
-    def test_cantilever_is_reported_as_a_note(self) -> None:
+    def test_cantilever_weights_clamp_biggest_at_bottom(self) -> None:
         session = self._academic()
-        set_floor_steps(session, "academic", [1.0, 1.3, 1.6])
+        out = set_floor_steps(session, "academic", [1.0, 1.3, 1.6])
+        self.assertEqual(out["weights"], [1.0, 1.0, 1.0])
         result = solve_massing_study(session, config_path=str(CONFIG))
-
-        notes = [v for v in result.validation if v.check.startswith("step_cantilever")]
-        self.assertEqual(len(notes), 2)
-        self.assertTrue(all(n.passed for n in notes))
-        self.assertIn("cantilever", notes[0].message)
+        step_fails = [
+            v
+            for v in result.validation
+            if not v.passed
+            and (
+                v.check.startswith("step_stack")
+                or v.check.startswith("step_align")
+                or v.check.startswith("step_cantilever")
+            )
+        ]
+        self.assertEqual(step_fails, [])
 
     def test_length_check_uses_the_longest_floor(self) -> None:
-        """With a cantilever the worst floor is not the ground floor."""
+        """Site length uses the longest plate; equal plates all share that length."""
         session = self._academic()
-        set_floor_steps(session, "academic", [1.0, 1.0, 2.0])
-        session.constraints["max_building_length_ft"] = 150
+        set_floor_steps(session, "academic", [1.0, 1.0, 1.0])
+        session.constraints["max_building_length_ft"] = 80
         session.save()
         result = solve_massing_study(session, config_path=str(CONFIG))
 
         check = next(v for v in result.validation if v.check.startswith("site_length"))
         self.assertFalse(check.passed)
-        self.assertIn("L2", check.message)
 
     def test_pairing_divides_frontage_by_ground_plates(self) -> None:
         session = StudySession(
@@ -442,7 +477,7 @@ class TestSteppedSearch(unittest.TestCase):
 
     def test_search_respects_length_cap_on_the_stepped_ground_floor(self) -> None:
         """A step-back enlarges the ground plate, so the cap binds harder."""
-        set_floor_taper(self.session, "academic", 0.6)
+        set_floor_steps(self.session, "academic", [1.0, 0.7, 0.7])
         candidates, _ = search_schemes(
             self.session, self.envelope, top_n=30, config_path=str(CONFIG), verify=False
         )
@@ -502,8 +537,15 @@ class TestStepTools(unittest.TestCase):
         self.assertIn("3 stories", out["note"])
 
     def test_no_note_when_counts_match(self) -> None:
-        out = set_floor_steps(self.session, "academic", [1.0, 0.8, 0.5])
+        out = set_floor_steps(self.session, "academic", [1.0, 0.5, 0.5])
         self.assertIsNone(out["note"])
+
+    def test_notes_when_collapsed_to_two_plate_types(self) -> None:
+        out = set_floor_steps(self.session, "academic", [1.0, 0.8, 0.5])
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["weights"], [1.0, 0.8, 0.8])
+        self.assertIsNotNone(out["note"])
+        self.assertIn("2 plate types", out["note"])
 
     def test_taper_range_is_enforced(self) -> None:
         for bad in (0.0, 0.1, 1.5, -0.5):

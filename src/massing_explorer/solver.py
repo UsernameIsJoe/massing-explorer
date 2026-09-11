@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from typing import Any
 
 from .config import gsf_tolerance_from_config, load_project_config
@@ -61,6 +62,53 @@ def plate_area(target_gsf: float, story_count: int, void_area_sf: float = 0.0) -
     return (target_gsf + void_area_sf * n_void_floors) / story_count
 
 
+def canonicalize_step_weights(weights: list[float]) -> list[float]:
+    """
+    Mass plate rules: biggest→smallest bottom-to-top, at most two footprints.
+
+    Width stays fixed elsewhere (shared long edge). Weights only control length
+    / area. Continuous tapers with many distinct sizes collapse to a podium
+    step: base weight on lower floors, upper weight on the rest.
+    """
+    if not weights:
+        return []
+    w = [max(1e-9, float(x)) for x in weights]
+    for i in range(1, len(w)):
+        if w[i] > w[i - 1] + 1e-12:
+            w[i] = w[i - 1]
+
+    def _near(a: float, b: float) -> bool:
+        return abs(a - b) <= 1e-6 * max(1.0, abs(a), abs(b))
+
+    uniq: list[float] = []
+    for x in w:
+        if not uniq or not _near(x, uniq[-1]):
+            uniq.append(x)
+    if len(uniq) <= 2:
+        # Snap near-duplicates to the first of each run so keys stay clean.
+        out: list[float] = []
+        cur = w[0]
+        for x in w:
+            if _near(x, cur):
+                out.append(cur)
+            else:
+                cur = x
+                out.append(cur)
+        return out
+
+    base = w[0]
+    drops = [x for x in w[1:] if x < base * 0.99]
+    if not drops:
+        return [base] * len(w)
+    # Upper plate type = first step-back weight (not the smallest tip of a
+    # long taper), so a mild setback stays mild across all upper floors.
+    upper = drops[0]
+    trans = next(i for i, x in enumerate(w) if x < base * 0.99)
+    if trans <= 0:
+        trans = 1
+    return [base] * trans + [upper] * (len(w) - trans)
+
+
 def resolve_step_weights(
     session: StudySession,
     mass_id: str,
@@ -71,7 +119,8 @@ def resolve_step_weights(
 
     Explicit weights win over a taper ratio. A taper is story-count independent
     (each level is `ratio` times the one below), so a search over story counts
-    can still vary the height of a tapered mass.
+    can still vary the height of a tapered mass. Results are canonicalized to
+    biggest→smallest with at most two plate types.
     """
     story_count = max(1, story_count)
 
@@ -80,11 +129,12 @@ def resolve_step_weights(
         weights = [float(w) for w in explicit][:story_count]
         while len(weights) < story_count:
             weights.append(weights[-1] if weights else 1.0)
-        return weights
+        return canonicalize_step_weights(weights)
 
     taper = session.floor_tapers.get(mass_id)
     if taper:
-        return [float(taper) ** level for level in range(story_count)]
+        raw = [float(taper) ** level for level in range(story_count)]
+        return canonicalize_step_weights(raw)
 
     return [1.0] * story_count
 
@@ -103,15 +153,17 @@ def solve_stepped_plates(
         k * sum(w) - void = target   ->   k = (target + void) / sum(w)
 
     Uniform weights reduce this to `plate_area`, which is why both the flat and
-    the stepped case go through one code path.
+    the stepped case go through one code path. Weights are canonicalized first
+    (≤2 plate types, biggest→smallest).
     """
     if not weights:
         return []
+    if any(float(w) <= 0 for w in weights):
+        raise ValueError("every step weight must be > 0")
+    weights = canonicalize_step_weights(list(weights))
     total_weight = sum(weights)
     if total_weight <= 0:
         raise ValueError("step weights must sum to > 0")
-    if any(w <= 0 for w in weights):
-        raise ValueError("every step weight must be > 0")
 
     void = void_area_sf if (len(weights) > 1 and void_area_sf > 0) else 0.0
     k = (target_gsf + void) / total_weight
@@ -509,11 +561,12 @@ def reserve_upper_for_stacked_programs(
 
 def check_step_geometry(mass: SolvedMass) -> list[ValidationCheck]:
     """
-    Checks that only matter once floor plates differ.
+    Floor-plate stacking rules for a mass:
 
-    A void bigger than the plate it is cut into would silently clamp usable area
-    to zero and lose program area, and an upper floor larger than the one below
-    is a cantilever the user should be told about rather than discover in Rhino.
+    - plates share an edge (same width; upper length ≤ lower — no overhang)
+    - biggest → smallest bottom to top
+    - at most two distinct footprints
+    - void must fit in its plate
     """
     checks: list[ValidationCheck] = []
     if len(mass.floors) < 2:
@@ -534,18 +587,60 @@ def check_step_geometry(mass: SolvedMass) -> list[ValidationCheck]:
                 )
             )
 
+    widths = {round(float(f.width_ft or 0), 3) for f in mass.floors}
+    if len(widths) > 1:
+        checks.append(
+            ValidationCheck(
+                check=f"step_align:{mass.id}",
+                passed=False,
+                message=(
+                    f"{mass.name}: floor plates must share an edge — "
+                    f"width must be constant up the mass (got {sorted(widths)})"
+                ),
+            )
+        )
+
     for lower, upper in zip(mass.floors, mass.floors[1:]):
-        if upper.area_sf > lower.area_sf + 1e-6:
+        if float(upper.length_ft or 0) > float(lower.length_ft or 0) + 1e-6:
             checks.append(
                 ValidationCheck(
-                    check=f"step_cantilever:{mass.id}",
-                    passed=True,
+                    check=f"step_align:{mass.id}",
+                    passed=False,
                     message=(
-                        f"{mass.name}: L{upper.level} ({upper.area_sf:,.0f} SF) is larger "
-                        f"than L{lower.level} ({lower.area_sf:,.0f} SF) - cantilever"
+                        f"{mass.name}: L{upper.level} length {upper.length_ft:.1f} ft "
+                        f"overhangs L{lower.level} ({lower.length_ft:.1f} ft) — "
+                        f"plates must share an edge, biggest to smallest upward"
                     ),
                 )
             )
+        if float(upper.area_sf or 0) > float(lower.area_sf or 0) + 1e-6:
+            checks.append(
+                ValidationCheck(
+                    check=f"step_stack:{mass.id}",
+                    passed=False,
+                    message=(
+                        f"{mass.name}: L{upper.level} ({upper.area_sf:,.0f} SF) is larger "
+                        f"than L{lower.level} ({lower.area_sf:,.0f} SF) — "
+                        f"stack biggest to smallest, bottom to top"
+                    ),
+                )
+            )
+
+    keys = {
+        (round(float(f.width_ft or 0), 2), round(float(f.length_ft or 0), 2))
+        for f in mass.floors
+    }
+    if len(keys) > 2:
+        checks.append(
+            ValidationCheck(
+                check=f"step_plate_types:{mass.id}",
+                passed=False,
+                message=(
+                    f"{mass.name}: at most 2 plate types per mass "
+                    f"(found {len(keys)} distinct footprints)"
+                ),
+            )
+        )
 
     return checks
 
@@ -792,11 +887,202 @@ def _width_from_brief(session: StudySession, mass_def: Any, config: dict[str, An
     if exact and plate > 0:
         return plate / float(exact)
     ratio = c.get("length_over_width")
+    if not ratio:
+        band = c.get("ratio_band")
+        if isinstance(band, (list, tuple)) and len(band) >= 2:
+            try:
+                ratio = (float(band[0]) + float(band[1])) / 2.0
+            except (TypeError, ValueError):
+                ratio = None
     if ratio and plate > 0:
         # Prefer the stated proportion. If that length then exceeds a cap,
         # the check fails. Do not widen until length equals the cap.
         width = max(width, math.sqrt(plate / float(ratio)))
     return width
+
+
+def _mass_edge_ft(mass: SolvedMass, edge: str) -> float | None:
+    if not mass.floors:
+        return None
+    ground = mass.floors[0]
+    length = float(ground.length_ft or 0)
+    width = float(ground.width_ft or 0)
+    if length <= 0 or width <= 0:
+        return None
+    kind = str(edge or "").strip().lower()
+    if kind in {"long", "longer", "long_edge"}:
+        return max(length, width)
+    if kind in {"short", "shorter", "short_edge"}:
+        return min(length, width)
+    if kind in {"length", "longitudinal"}:
+        return length
+    if kind in {"width", "depth"}:
+        return width
+    return max(length, width)
+
+
+def _resolve_mass_ref(session: StudySession, ref: str, solved_by_id: dict[str, SolvedMass]) -> SolvedMass | None:
+    from .brief import _normalize_mass_ref
+
+    token = _normalize_mass_ref(str(ref or "").strip().lower())
+    if not token:
+        return None
+    masses = list(session.masses or [])
+    try:
+        idx = int(token)
+    except ValueError:
+        idx = 0
+    if 1 <= idx <= len(masses):
+        mid = masses[idx - 1].id
+        if mid in solved_by_id:
+            return solved_by_id[mid]
+    for mass_def in masses:
+        solved = solved_by_id.get(mass_def.id)
+        if not solved:
+            continue
+        name = str(getattr(mass_def, "name", "") or "").lower()
+        mid = str(mass_def.id or "").lower()
+        if token == mid or token in mid.split("_") or f"mass {token}" in name or name.endswith(token):
+            return solved
+        if re.search(rf"\b{re.escape(token)}\b", name):
+            return solved
+    # Fall back to ordinal among solved masses if session order empty.
+    solved_list = list(solved_by_id.values())
+    if 1 <= idx <= len(solved_list):
+        return solved_list[idx - 1]
+    return None
+
+
+def check_ratio_band(
+    session: StudySession,
+    result: MassingStudyResult,
+) -> list[ValidationCheck]:
+    """Hard gate when ratio_band is a limitation/requirement (not preference).
+
+    Ratios are orientation-agnostic: 2:5 matches 5:2. A band passes if either
+    L/W or W/L falls inside it.
+    """
+    from .aspect import aspect_in_band, normalize_band
+
+    role = str(session.constraints.get("ratio_band_role") or "limitation")
+    if role == "preference":
+        return []
+    band = session.constraints.get("ratio_band")
+    if not isinstance(band, (list, tuple)) or len(band) < 2:
+        return []
+    try:
+        lo = float(band[0])
+        hi = float(band[1])
+    except (TypeError, ValueError):
+        return []
+    lo, hi = normalize_band(lo, hi)
+    tol = 0.03 * max(hi - lo, 0.15)
+    checks: list[ValidationCheck] = []
+    for mass in result.masses:
+        if not mass.floors:
+            continue
+        ground = mass.floors[0]
+        width = float(ground.width_ft or 0)
+        length = float(ground.length_ft or 0)
+        if width <= 0:
+            continue
+        aspect = length / width
+        ok = aspect_in_band(aspect, lo, hi, tol=tol)
+        flip = (1.0 / aspect) if aspect > 0 else 0.0
+        checks.append(
+            ValidationCheck(
+                check=f"ratio_band:{mass.id}",
+                passed=ok,
+                message=(
+                    f"{mass.name}: length/width {aspect:.3f} "
+                    f"(transpose {flip:.3f}) vs allowed {lo:g}–{hi:g} "
+                    f"either way"
+                ),
+            )
+        )
+    return checks
+
+
+def check_program_splits(result: MassingStudyResult) -> list[ValidationCheck]:
+    """Hard gate: weird multi-floor program splits are deal-breakers."""
+    from .explore.performance import awkward_split_violations
+
+    checks: list[ValidationCheck] = []
+    for hit in awkward_split_violations(list(result.masses or [])):
+        dept = hit["department"]
+        mass_name = hit["mass_name"]
+        reasons = ", ".join(hit["reasons"])
+        levels = "+".join(f"L{lvl}" for lvl in hit["levels"])
+        checks.append(
+            ValidationCheck(
+                check=f"program_split:{hit['mass_id']}:{dept}",
+                passed=False,
+                message=f"{mass_name} / {dept} ({levels}): {reasons}",
+            )
+        )
+    return checks
+
+
+def check_edge_sum_limits(
+    session: StudySession,
+    result: MassingStudyResult,
+) -> list[ValidationCheck]:
+    """Hard gate: stated sums of long/short edges across named masses."""
+    rules = session.constraints.get("edge_sum_limits") or []
+    if not rules:
+        return []
+    solved_by_id = {m.id: m for m in result.masses}
+    checks: list[ValidationCheck] = []
+    for i, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            continue
+        try:
+            max_ft = float(rule.get("max_ft"))
+        except (TypeError, ValueError):
+            continue
+        if max_ft <= 0:
+            continue
+        parts = rule.get("parts") or []
+        values: list[float] = []
+        labels: list[str] = []
+        missing = False
+        for part in parts:
+            if not isinstance(part, dict):
+                missing = True
+                break
+            solved = _resolve_mass_ref(session, str(part.get("ref") or ""), solved_by_id)
+            edge = str(part.get("edge") or "long")
+            if not solved:
+                missing = True
+                break
+            val = _mass_edge_ft(solved, edge)
+            if val is None:
+                missing = True
+                break
+            values.append(val)
+            labels.append(f"{solved.name} {edge} {val:.1f} ft")
+        if missing or len(values) < 2:
+            checks.append(
+                ValidationCheck(
+                    check=f"edge_sum:{i}",
+                    passed=False,
+                    message=rule.get("note") or f"edge sum rule {i} could not resolve masses",
+                )
+            )
+            continue
+        total = sum(values)
+        ok = total <= max_ft + 1.0
+        checks.append(
+            ValidationCheck(
+                check=f"edge_sum:{i}",
+                passed=ok,
+                message=(
+                    f"{rule.get('note') or 'edge sum'}: combined {total:.1f} ft vs max "
+                    f"{max_ft:g} ft ({'; '.join(labels)})"
+                ),
+            )
+        )
+    return checks
 
 
 def check_pairing_lengths(
@@ -1369,6 +1655,9 @@ def solve_massing_study(
 
     result.resize_suggestions = suggest_resizes(session, result, limits)
     result.validation.extend(check_pairing_lengths(session, result))
+    result.validation.extend(check_ratio_band(session, result))
+    result.validation.extend(check_edge_sum_limits(session, result))
+    result.validation.extend(check_program_splits(result))
 
     max_total = limits.get("max_total_length_ft")
     if max_total is not None and result.masses:

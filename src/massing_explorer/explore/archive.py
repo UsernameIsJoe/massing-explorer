@@ -34,6 +34,14 @@ _CONSTRAINT_SNAPSHOT_KEYS = (
     "cover_envelope",
     "cover_geom_rank",
     "loading_required",
+    "ratio_band",
+    "ratio_band_parts",
+    "ratio_band_role",
+    "edge_sum_limits",
+    "length_over_width",
+    "floor_pins",
+    "floor_pin_kinds",
+    "stack_above",
 )
 
 def empty_archive() -> dict[str, Any]:
@@ -190,6 +198,12 @@ def restore_snapshot(session: Any, snap: dict[str, Any], stories: dict[str, Any]
             session.constraints.pop("cover_geom_rank", None)
     if "pins" in snap:
         session.floor_pins = dict(snap.get("pins") or {})
+    session.floor_steps = {
+        str(k): list(v) for k, v in (snap.get("floor_steps") or {}).items()
+    }
+    session.floor_tapers = {
+        str(k): float(v) for k, v in (snap.get("floor_tapers") or {}).items()
+    }
     for mid, width in (snap.get("widths") or {}).items():
         key = f"{mid}_width_ft"
         if width is None:
@@ -229,6 +243,12 @@ def _snapshot(session: Any) -> dict[str, Any]:
         "cover_envelope": session.constraints.get("cover_envelope"),
         "cover_geom_rank": session.constraints.get("cover_geom_rank"),
         "pins": dict(session.floor_pins or {}),
+        "floor_steps": {
+            str(k): list(v) for k, v in (getattr(session, "floor_steps", None) or {}).items()
+        },
+        "floor_tapers": {
+            str(k): float(v) for k, v in (getattr(session, "floor_tapers", None) or {}).items()
+        },
         "widths": {
             m.id: session.constraints.get(f"{m.id}_width_ft") for m in session.masses
         },

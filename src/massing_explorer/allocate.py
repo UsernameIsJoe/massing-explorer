@@ -21,10 +21,9 @@ from .models import Room
 
 EPS = 1.0  # SF slack, keeps float noise from forcing spurious splits
 
-# A department slice smaller than this is noise on a concept massing drawing, so
-# a floor is left slightly under-filled rather than carrying a token fragment —
-# but only when the area can actually go somewhere else (see allocate_programs).
-MIN_FRAGMENT_SF = 200.0
+# Skip placing a department remnant smaller than the program_split deal-breaker
+# (100 m²) when the area can go elsewhere — keeps illegal thin slices out.
+MIN_FRAGMENT_SF = 100.0 * 10.76391041671  # ≈ 1,076 SF
 MIN_FRAGMENT_FRACTION = 0.03
 
 DEFAULT_GROUND_KEYWORDS = (
@@ -106,23 +105,56 @@ class _Unit:
         return self.forced_level
 
 
-def _level_order(unit: _Unit, story_count: int) -> list[int]:
+def _level_order(
+    unit: _Unit,
+    story_count: int,
+    remaining: list[float] | None = None,
+    placed: list[dict[str, tuple[float, dict[str, int]]]] | None = None,
+    occupied: set[int] | None = None,
+) -> list[int]:
     """
-    Levels to try, best first.
+    Levels to try, best first — always contiguous for a department.
 
-    Everything fills bottom-up. Vertical position is produced by the *order*
-    departments are placed in (see `build_units`), not by each department
-    hunting its own favourite level — that earlier approach left gaps on upper
-    floors which later departments back-filled as meaningless slivers.
+    Once a department occupies any floor, further plates must be adjacent to
+    that block (no L0+L2 gaps). First plate: honor pins, then empty floors
+    near ground / affinity, never jump over a skipped level later.
     """
+    if story_count <= 0:
+        return []
     target = unit.target_level
-    if target is not None:
+    if target is not None and (target < 0 or target >= story_count):
+        target = story_count - 1
+
+    if occupied:
+        lo, hi = min(occupied), max(occupied)
+        allowed = {
+            lvl
+            for lvl in range(story_count)
+            if lvl in occupied or lvl == lo - 1 or lvl == hi + 1
+        }
+    else:
+        allowed = set(range(story_count))
+
+    def sort_key(lvl: int) -> tuple:
+        pin_dist = abs(lvl - target) if target is not None else lvl
+        if remaining is None or placed is None:
+            return (0 if lvl in (occupied or set()) else 1, pin_dist, lvl)
+        if lvl not in allowed or remaining[lvl] <= EPS:
+            return (9, pin_dist, lvl)
+        owners = placed[lvl]
+        already = unit.department in owners
+        empty = not owners
+        # Fill own plates, then empty expand, then unavoidable share.
+        bucket = 0 if already else (1 if empty else 2)
+        return (bucket, pin_dist, -remaining[lvl], lvl)
+
+    if target is not None and not occupied:
         others = sorted(
             (lvl for lvl in range(story_count) if lvl != target),
-            key=lambda lvl: abs(lvl - target),
+            key=sort_key,
         )
         return [target, *others]
-    return list(range(story_count))
+    return sorted(range(story_count), key=sort_key)
 
 
 def build_units(
@@ -239,67 +271,93 @@ def allocate_programs(
     )
 
     for unit in units:
-        order = _level_order(unit, story_count)
         queue = list(unit.rooms)
         need = unit.gsf
         levels_used: list[int] = []
+        occupied: set[int] = set()
 
-        # Pour the department's area over levels in preference order, cutting it
-        # only where a floor runs out. Discrete rooms are not first-fit into
-        # leftover gaps, which is what produced meaningless slivers of one
-        # department stranded on another department's floor.
-        for position, level in enumerate(order):
-            if need <= EPS:
-                break
-            available = remaining[level]
-            if available <= EPS:
-                continue
-
-            # A double-height program owns the ground plate. Do not pour an
-            # upper program into the leftover scrap just to fill the floor.
-            ground_owners = set(ground_required or [])
-            already = placed[level]
-            if (
-                skip_ground_leftover
-                and level == 0
-                and unit.department not in ground_owners
-                and unit.forced_level != 0
-                and any(name in ground_owners for name in already)
-                and unit.affinity <= 0
-            ):
-                capacity_elsewhere = sum(remaining[lvl] for lvl in order[position + 1 :])
-                if capacity_elsewhere + EPS >= need:
+        # Contiguous pour: pick next plate from the adjacency-restricted order,
+        # place as much as fits, expand the occupied block, repeat. Never jump
+        # over a floor (that created L0+L2 "red" gaps).
+        guard = 0
+        while need > EPS and guard < story_count * 4:
+            guard += 1
+            order = _level_order(unit, story_count, remaining, placed, occupied)
+            placed_here = False
+            for position, level in enumerate(order):
+                if need <= EPS:
+                    break
+                available = remaining[level]
+                if available <= EPS:
                     continue
 
-            # Skip a level that could only hold a token fragment of this
-            # department, provided the remaining levels can absorb the area.
-            floor_min = max(
-                MIN_FRAGMENT_SF, floors[level].usable_area_sf * MIN_FRAGMENT_FRACTION
-            )
-            if available < floor_min and need > available:
-                capacity_elsewhere = sum(
-                    remaining[lvl] for lvl in order[position + 1 :]
+                ground_owners = set(ground_required or [])
+                already = placed[level]
+                if (
+                    skip_ground_leftover
+                    and level == 0
+                    and unit.department not in ground_owners
+                    and unit.forced_level != 0
+                    and any(name in ground_owners for name in already)
+                    and unit.affinity <= 0
+                ):
+                    capacity_elsewhere = sum(
+                        remaining[lvl]
+                        for lvl in order[position + 1 :]
+                        if remaining[lvl] > EPS
+                    )
+                    if capacity_elsewhere + EPS >= need:
+                        continue
+
+                floor_min = max(
+                    MIN_FRAGMENT_SF,
+                    floors[level].usable_area_sf * MIN_FRAGMENT_FRACTION,
                 )
-                if capacity_elsewhere >= need - EPS:
-                    continue
+                if available < floor_min and need > available:
+                    capacity_elsewhere = sum(
+                        remaining[lvl]
+                        for lvl in order[position + 1 :]
+                        if remaining[lvl] > EPS
+                    )
+                    if capacity_elsewhere >= need - EPS:
+                        continue
 
-            take = min(need, available)
-            place(level, unit.department, take, _take_rooms(queue, take))
-            need -= take
-            levels_used.append(level)
+                take = min(need, available)
+                place(level, unit.department, take, _take_rooms(queue, take))
+                need -= take
+                levels_used.append(level)
+                occupied.add(level)
+                placed_here = True
+                # Recompute adjacency after each plate so we never skip.
+                break
+            if not placed_here:
+                break
 
         if need > EPS:
-            # No capacity left anywhere: conserve the area on the emptiest floor
-            # and tell the user, rather than silently dropping program.
-            level = max(range(story_count), key=lambda lvl: remaining[lvl])
+            # No contiguous capacity left: park on the best allowed plate.
+            order = _level_order(unit, story_count, remaining, placed, occupied or None)
+            level = next((lvl for lvl in order if remaining[lvl] > -1e9), 0)
+            if occupied:
+                lo, hi = min(occupied), max(occupied)
+                adjacent = [
+                    lvl
+                    for lvl in (lo - 1, hi + 1)
+                    if 0 <= lvl < story_count
+                ]
+                if adjacent:
+                    level = max(adjacent, key=lambda lvl: remaining[lvl])
+                else:
+                    level = max(occupied, key=lambda lvl: remaining[lvl])
+            else:
+                level = max(range(story_count), key=lambda lvl: remaining[lvl])
             place(level, unit.department, need, _take_rooms(queue, need))
             notes.append(
-                f"{unit.department}: {need:,.0f} SF exceeds total usable area; "
+                f"{unit.department}: {need:,.0f} SF exceeds contiguous usable area; "
                 f"parked on L{floors[level].level}"
             )
             levels_used.append(level)
+            occupied.add(level)
 
-        # Flush any indicative room names left over to the last level used
         if queue and levels_used:
             place(levels_used[-1], unit.department, 0.0, [r.name for r in queue])
             queue.clear()

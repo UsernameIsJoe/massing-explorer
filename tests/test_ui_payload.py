@@ -46,6 +46,7 @@ class TestUiPayload(unittest.TestCase):
         self.assertTrue(t["sample_pool"]["schemes"][0]["preview"]["boxes"])
         self.assertEqual(t["sample_pool"]["selected_rank"], 0)
         self.assertEqual(t["process"]["steps"][0]["phase"], "QUICK")
+        self.assertIsNone(t.get("learn_pair"))
 
     def test_transparency_marks_kept_cell_id_string(self) -> None:
         archive = {
@@ -90,6 +91,12 @@ class TestUiPayload(unittest.TestCase):
         self.assertTrue(any(c.get("kept") for c in t["top_candidates"]))
         self.assertTrue(t["top_candidates"][0]["preview"]["boxes"])
         self.assertTrue(t["sample_pool"]["schemes"])
+        kept = next(c for c in t["top_candidates"] if c.get("kept"))
+        self.assertEqual(kept["cell_id"], "c1")
+        self.assertEqual(len(kept["probe_axes"]), 9)
+        self.assertIn("program_organization", kept["probe_axes"])
+        self.assertEqual(len(kept["eval_axes"]), 4)
+        self.assertIn("program_coherence", kept["eval_axes"])
         phases = [s["phase"] for s in t["process"]["steps"]]
         self.assertIn("COVER", phases)
         self.assertIn("BO", phases)
@@ -163,3 +170,72 @@ class TestUiPayload(unittest.TestCase):
         self.assertEqual(t2["sample_pool"]["typology_cells"], 12)
         self.assertEqual(t2["sample_pool"]["count"], 1)
         self.assertEqual(t2["sample_pool"]["drawings_collapsed"], 11)
+
+    def test_learn_pair_surfaces_pending_ab_cards(self) -> None:
+        def cell(cid: str, length: float) -> dict:
+            return {
+                "cell": cid,
+                "partition": "A|B",
+                "fits_limitations": True,
+                "stories": {"m1": 2},
+                "strategy": {
+                    "T": {"kind": "independent_bars"},
+                    "G": {"envelope": "balanced", "loading": "double"},
+                },
+                "performance": {
+                    "feasible": True,
+                    "fits_limitations": True,
+                    "lengths": [length],
+                    "program_coherence": 0.7,
+                    "preference_alignment": 0.5,
+                    "performance_efficiency": 0.6,
+                    "robustness": 0.4,
+                },
+                "plates": [
+                    {
+                        "mass_id": "m1",
+                        "mass_name": "Wing A",
+                        "stories": 2,
+                        "width_ft": 60,
+                        "length_ft": length,
+                    }
+                ],
+            }
+
+        archive = {
+            "attempts": 2,
+            "legal": 2,
+            "cells": {"cA": cell("cA", 110.0), "cB": cell("cB", 140.0)},
+        }
+        session = SimpleNamespace(
+            last_search=[],
+            constraints={
+                "briefing": {"requirements": [], "limitations": [], "preferences": []},
+                "explore": {
+                    "mode": "cover",
+                    "kept_cell": "cA",
+                    "archive": archive,
+                    "learning": {
+                        "weights": {},
+                        "comparisons": [],
+                        "pending_pair": {"a": "cA", "b": "cB", "kind": "contrast"},
+                        "note": "No pairwise taste yet.",
+                    },
+                },
+            },
+            masses=[],
+        )
+        t = transparency_payload(session, full_explore=True)
+        pair = t["learn_pair"]
+        self.assertIsNotNone(pair)
+        assert pair is not None
+        self.assertEqual(pair["kind"], "contrast")
+        self.assertEqual(pair["max_comparisons"], 4)
+        self.assertEqual(pair["a"]["cell_id"], "cA")
+        self.assertEqual(pair["b"]["cell_id"], "cB")
+        self.assertEqual(pair["a"]["side"], "a")
+        self.assertTrue(pair["a"]["preview"]["boxes"])
+        self.assertTrue(pair["b"]["preview"]["boxes"])
+        self.assertIn("program_coherence", pair["a"]["axes"])
+        phases = [s["phase"] for s in t["process"]["steps"]]
+        self.assertIn("LEARN", phases)

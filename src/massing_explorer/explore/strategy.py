@@ -113,6 +113,7 @@ def read_strategy(session: Any) -> dict[str, Any]:
             "stories": {m["id"]: m["stories"] for m in masses},
             "loading": loading,
             "envelope": session.constraints.get("cover_envelope") or "balanced",
+            "plate_profile": _plate_profile_of(session),
         },
         "D": {
             "max_building_length_ft": session.constraints.get("max_building_length_ft"),
@@ -129,12 +130,19 @@ def read_strategy(session: Any) -> dict[str, Any]:
     }
 
 
+def _plate_profile_of(session: Any) -> str:
+    if getattr(session, "floor_tapers", None) or getattr(session, "floor_steps", None):
+        return "step"
+    return "uniform"
+
+
 def cell_key(session: Any) -> str:
     """Behavior cell: organization, story band, loading, topology, envelope, width."""
     loading = session.constraints.get("loading") or "double"
     topo = topology_of(session)
     env = session.constraints.get("cover_envelope") or "balanced"
-    parts = [f"loading:{loading}", f"topo:{topo}", f"env:{env}"]
+    plate = _plate_profile_of(session)
+    parts = [f"loading:{loading}", f"topo:{topo}", f"env:{env}", f"plate:{plate}"]
     geom_rank = session.constraints.get("cover_geom_rank")
     if geom_rank is not None and int(geom_rank) > 0:
         parts.append(f"geom:{int(geom_rank)}")

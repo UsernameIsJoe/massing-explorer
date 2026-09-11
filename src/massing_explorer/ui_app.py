@@ -362,6 +362,43 @@ HTML = r"""<!DOCTYPE html>
     font-size: 10px;
     line-height: 1.4;
   }
+  .pool-card .cell-id {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px;
+    color: var(--faint);
+    word-break: break-all;
+    line-height: 1.35;
+    margin-top: 6px;
+  }
+  .cand-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 14px;
+    margin-top: 10px;
+  }
+  .cand-grid .pool-card canvas {
+    height: 130px;
+  }
+  .cand-radars {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    padding: 0 8px 10px;
+    pointer-events: none;
+  }
+  .cand-radar .radar-title {
+    font-size: 9px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--faint);
+    text-align: center;
+    margin-bottom: 2px;
+  }
+  .cand-radar svg {
+    width: 100%;
+    height: auto;
+    display: block;
+  }
   .pill {
     display: inline-block;
     padding: 1px 6px;
@@ -439,10 +476,74 @@ HTML = r"""<!DOCTYPE html>
     font-size: 11px;
     color: var(--muted);
     line-height: 1.6;
+    pointer-events: auto;
   }
   .hud .meta strong {
     color: var(--text);
     font-weight: 500;
+  }
+  .hud .meta .fail-link {
+    color: #c48888;
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+  }
+  .hud .meta .fail-link:hover { color: #e0a0a0; }
+  .hud .meta .ok-checks { color: #8faf9a; }
+  .checks-panel {
+    position: absolute;
+    left: 18px;
+    bottom: 72px;
+    max-width: min(520px, 92vw);
+    max-height: min(42vh, 360px);
+    overflow: auto;
+    padding: 12px 14px;
+    background: rgba(10,10,10,0.96);
+    border: 1px solid #3a3a3a;
+    box-shadow: 0 8px 28px rgba(0,0,0,0.45);
+    z-index: 8;
+    pointer-events: auto;
+    display: none;
+  }
+  .checks-panel.show { display: block; }
+  .checks-panel h3 {
+    margin: 0 0 8px;
+    font-size: 10px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: #c8c4bc;
+    font-weight: 500;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+  }
+  .checks-panel h3 button {
+    background: none;
+    border: none;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 16px;
+    line-height: 1;
+    padding: 0 2px;
+  }
+  .checks-panel .item {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px;
+    color: #d8d4cc;
+    line-height: 1.4;
+    margin: 8px 0;
+    padding-left: 10px;
+    border-left: 2px solid #c48888;
+  }
+  .checks-panel .item .check-id {
+    color: #c48888;
+    display: block;
+    margin-bottom: 2px;
   }
   .mass-list {
     text-align: right;
@@ -696,6 +797,45 @@ HTML = r"""<!DOCTYPE html>
     border-color: var(--line-strong);
     color: var(--muted);
   }
+  .learn-modal { max-width: min(920px, 96vw); }
+  .learn-pair {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin: 12px 0 4px;
+  }
+  .learn-card {
+    border: 1px solid var(--line-strong);
+    padding: 10px;
+    background: rgba(255,255,255,0.02);
+  }
+  .learn-card canvas {
+    width: 100%;
+    height: 160px;
+    display: block;
+    background: #070707;
+  }
+  .learn-card .side {
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+  .learn-card .label {
+    font-size: 13px;
+    color: var(--text);
+    margin: 8px 0 4px;
+    line-height: 1.35;
+  }
+  .learn-card .axes {
+    font-size: 11px;
+    color: var(--faint);
+    line-height: 1.45;
+  }
+  @media (max-width: 720px) {
+    .learn-pair { grid-template-columns: 1fr; }
+  }
   @media (max-width: 860px) {
     body { grid-template-columns: 1fr; height: auto; }
     aside { min-height: auto; }
@@ -745,6 +885,7 @@ HTML = r"""<!DOCTYPE html>
       <div id="viewport"></div>
       <div class="legend" id="legend"></div>
       <div class="inspect" id="inspect"></div>
+      <div class="checks-panel" id="checksPanel" aria-hidden="true"></div>
       <div class="hud">
         <div>
           <div class="unit-toggle" data-unit-toggle>
@@ -781,6 +922,21 @@ HTML = r"""<!DOCTYPE html>
       <div class="modal-actions">
         <button type="button" class="ghost" id="modalitySkip">Skip for now</button>
         <button type="button" id="modalityApply">Save &amp; generate</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="learnModal" aria-hidden="true">
+    <div class="modal learn-modal" role="dialog" aria-labelledby="learnTitle">
+      <h2 id="learnTitle">Which scheme do you prefer?</h2>
+      <p class="lead" id="learnLead">
+        Pick A or B. Soft taste only — requirements and caps stay locked.
+      </p>
+      <div class="learn-pair" id="learnPair"></div>
+      <div class="modal-actions">
+        <button type="button" class="ghost" id="learnSkip">Skip for now</button>
+        <button type="button" id="learnPickA">Prefer A</button>
+        <button type="button" id="learnPickB">Prefer B</button>
       </div>
     </div>
   </div>
@@ -829,6 +985,117 @@ const modalityModal = document.getElementById("modalityModal");
 const modalityQuestions = document.getElementById("modalityQuestions");
 const modalityApply = document.getElementById("modalityApply");
 const modalitySkip = document.getElementById("modalitySkip");
+const learnModal = document.getElementById("learnModal");
+const learnPairEl = document.getElementById("learnPair");
+const learnLead = document.getElementById("learnLead");
+const learnPickA = document.getElementById("learnPickA");
+const learnPickB = document.getElementById("learnPickB");
+const learnSkip = document.getElementById("learnSkip");
+let pendingLearnPair = null;
+
+function fmtAxis(v) {
+  if (v == null || Number.isNaN(Number(v))) return "—";
+  const n = Number(v);
+  if (n >= 0 && n <= 1.0001) return Math.round(n * 100) + "%";
+  return n.toFixed(2);
+}
+
+function learnCardHtml(side, card) {
+  const axes = card.axes || {};
+  const axisLine = [
+    ["coherence", axes.program_coherence],
+    ["pref", axes.preference_alignment],
+    ["perf", axes.performance_efficiency],
+    ["robust", axes.robustness],
+  ].map(([k, v]) => `${k} ${fmtAxis(v)}`).join(" · ");
+  return `<div class="learn-card" data-side="${side}">
+    <div class="side">Scheme ${side.toUpperCase()}</div>
+    <canvas aria-hidden="true"></canvas>
+    <div class="label">${esc(card.label || card.cell_id || side)}</div>
+    <div class="axes">${esc(axisLine)}</div>
+  </div>`;
+}
+
+function openLearnModal(pair) {
+  pendingLearnPair = pair || null;
+  if (!pendingLearnPair || !pendingLearnPair.a || !pendingLearnPair.b) return;
+  const n = pendingLearnPair.comparisons || 0;
+  const maxN = pendingLearnPair.max_comparisons || 4;
+  const kind = pendingLearnPair.kind ? ` · ${pendingLearnPair.kind}` : "";
+  if (learnLead) {
+    const progress = `Question ${Math.min(n + 1, maxN)} of ${maxN}`;
+    learnLead.textContent = `${progress}${kind}. `
+      + (pendingLearnPair.note || "Which scheme do you prefer? Soft taste only — requirements and caps stay locked.");
+  }
+  learnPairEl.innerHTML = learnCardHtml("a", pendingLearnPair.a) + learnCardHtml("b", pendingLearnPair.b);
+  learnModal.classList.add("show");
+  learnModal.setAttribute("aria-hidden", "false");
+  requestAnimationFrame(() => {
+    for (const card of learnPairEl.querySelectorAll(".learn-card")) {
+      const side = card.dataset.side;
+      const mesh = pendingLearnPair[side]?.preview;
+      const canvas = card.querySelector("canvas");
+      if (canvas && mesh) paintSchemeThumb(canvas, mesh);
+    }
+  });
+}
+
+function closeLearnModal() {
+  learnModal.classList.remove("show");
+  learnModal.setAttribute("aria-hidden", "true");
+  pendingLearnPair = null;
+}
+
+function maybeOpenLearnPair(transparency) {
+  const pair = transparency && transparency.learn_pair;
+  if (pair && pair.a && pair.b) openLearnModal(pair);
+}
+
+async function submitLearnChoice(winner) {
+  if (!studyId) {
+    setStatus("No study loaded.", "warn");
+    return;
+  }
+  learnPickA.disabled = true;
+  learnPickB.disabled = true;
+  setStatus(`Recording preference ${String(winner).toUpperCase()}…`);
+  try {
+    const res = await fetch("/api/learn_choice", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ study_id: studyId, winner }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      setStatus(data.error || "Could not record choice", "warn");
+      return;
+    }
+    closeLearnModal();
+    if (data.mesh) {
+      renderMesh(data.mesh);
+      renderLegend(data.mesh);
+      lastMesh = data.mesh;
+      clearInspect();
+      updateHud(data.mesh);
+    }
+    lastTransparency = data.transparency || lastTransparency;
+    renderProcess(lastTransparency);
+    setStatus(data.note || "Preference recorded.", "ok");
+    maybeOpenLearnPair(lastTransparency);
+  } catch (err) {
+    setStatus(String(err), "bad");
+  } finally {
+    learnPickA.disabled = false;
+    learnPickB.disabled = false;
+  }
+}
+
+learnPickA.addEventListener("click", () => submitLearnChoice("a"));
+learnPickB.addEventListener("click", () => submitLearnChoice("b"));
+learnSkip.addEventListener("click", () => {
+  closeLearnModal();
+  setStatus("Skipped A/B for now. Open Process → steps to see LEARN pending.", "warn");
+});
 
 function openModalityModal(questions) {
   pendingModality = questions || [];
@@ -911,6 +1178,10 @@ processTabs.addEventListener("click", (e) => {
   renderProcess(lastTransparency);
 });
 
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeChecksPanel();
+});
+
 drop.addEventListener("click", () => fileInput.click());
 drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("drag"); });
 drop.addEventListener("dragleave", () => drop.classList.remove("drag"));
@@ -977,12 +1248,17 @@ async function runGenerate(modalityAnswers, skipModalityAsk) {
     selectedSchemeRank = (lastTransparency?.sample_pool?.selected_rank) ?? 0;
     renderProcess(lastTransparency);
     clearInspect();
+    closeChecksPanel();
     const pass = data.mesh.all_checks_passed;
+    const nFail = normalizeFailedChecks(data.mesh.failed_checks).length;
     setStatus(
-      (pass ? "Checks passed. " : "Some checks failed. ") + (data.note || ""),
+      (pass
+        ? "Checks passed. "
+        : `Some checks failed (${nFail}) — click “failed check(s)” in the HUD. `) + (data.note || ""),
       pass ? "ok" : "warn"
     );
     updateHud(data.mesh);
+    maybeOpenLearnPair(lastTransparency);
   } catch (err) {
     setStatus(String(err), "bad");
   } finally {
@@ -1050,18 +1326,78 @@ function setStatus(text, kind) {
   status.className = "status" + (kind ? " " + kind : "");
 }
 
+const checksPanel = document.getElementById("checksPanel");
+
+function normalizeFailedChecks(raw) {
+  return (raw || []).map((item) => {
+    if (item && typeof item === "object") {
+      return {
+        check: String(item.check || item.id || "check"),
+        message: String(item.message || item.msg || item.check || ""),
+      };
+    }
+    return { check: "check", message: String(item ?? "") };
+  }).filter((item) => item.message);
+}
+
+function closeChecksPanel() {
+  if (!checksPanel) return;
+  checksPanel.classList.remove("show");
+  checksPanel.setAttribute("aria-hidden", "true");
+  checksPanel.innerHTML = "";
+}
+
+function openChecksPanel(failed) {
+  if (!checksPanel) return;
+  const items = normalizeFailedChecks(failed);
+  if (!items.length) {
+    closeChecksPanel();
+    return;
+  }
+  checksPanel.innerHTML = `
+    <h3><span>${items.length} failed check${items.length === 1 ? "" : "s"}</span>
+      <button type="button" id="checksClose" aria-label="Close">×</button></h3>
+    ${items.map((item) => `
+      <div class="item">
+        <span class="check-id">${esc(item.check)}</span>
+        ${esc(item.message)}
+      </div>`).join("")}
+  `;
+  checksPanel.classList.add("show");
+  checksPanel.setAttribute("aria-hidden", "false");
+  document.getElementById("checksClose")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    closeChecksPanel();
+  });
+}
+
+function toggleChecksPanel(failed) {
+  if (checksPanel?.classList.contains("show")) closeChecksPanel();
+  else openChecksPanel(failed);
+}
+
 function updateHud(mesh) {
   if (!mesh) return;
   const nBoxes = (mesh.boxes || []).length;
   const nDept = (mesh.legend?.departments || []).length;
+  const failed = normalizeFailedChecks(mesh.failed_checks);
   meta.innerHTML = `<strong>${(mesh.masses || []).length}</strong> masses · ` +
     `<strong>${nBoxes}</strong> program boxes · ` +
     `<strong>${nDept}</strong> depts · ` +
     `story <strong>${fmtLen(mesh.story_height_ft, 1)}</strong>` +
     (mesh.envelope ? ` · <span style="color:#c9a27a">envelope</span>` : "") +
-    (mesh.failed_checks?.length
-      ? ` · <span style="color:#c48888">${mesh.failed_checks.length} failed check(s)</span>`
-      : ` · <span style="color:#8faf9a">checks ok</span>`);
+    (failed.length
+      ? ` · <button type="button" class="fail-link" id="failChecksBtn">${failed.length} failed check(s)</button>`
+      : ` · <span class="ok-checks">checks ok</span>`);
+  const failBtn = document.getElementById("failChecksBtn");
+  if (failBtn) {
+    failBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleChecksPanel(failed);
+    });
+  } else {
+    closeChecksPanel();
+  }
   const totalLen = (mesh.masses || []).reduce((s, m) => s + (m.length_ft || 0), 0);
   const gsf = (mesh.boxes || []).reduce((s, b) => s + (Number(b.gsf) || 0), 0)
     || (mesh.masses || []).reduce((s, m) => s + (Number(m.length_ft) || 0) * (Number(m.width_ft) || 0) * (Number(m.stories) || 1), 0);
@@ -1359,6 +1695,100 @@ function esc(s) {
   ));
 }
 
+const PROBE_AXIS_ORDER = [
+  "program_organization",
+  "mass_count",
+  "distribution_balance",
+  "topology",
+  "loading",
+  "mean_height",
+  "height_articulation",
+  "vertical_organization",
+  "geometric_character",
+];
+const PROBE_AXIS_LABELS = {
+  program_organization: "program organization",
+  mass_count: "mass count",
+  distribution_balance: "distribution balance",
+  topology: "topology",
+  loading: "loading",
+  mean_height: "mean height",
+  height_articulation: "height articulation",
+  vertical_organization: "vertical organization",
+  geometric_character: "geometric character",
+};
+const EVAL_AXIS_ORDER = [
+  "program_coherence",
+  "preference_alignment",
+  "performance_efficiency",
+  "robustness",
+];
+const EVAL_AXIS_LABELS = {
+  program_coherence: "program coherence",
+  preference_alignment: "preference alignment",
+  performance_efficiency: "performance efficiency",
+  robustness: "robustness",
+};
+
+function radarLabelLines(text) {
+  const words = String(text || "").split(/\s+/).filter(Boolean);
+  if (words.length <= 1) return [text || ""];
+  if (text.length <= 14) return [text];
+  const mid = Math.ceil(words.length / 2);
+  return [words.slice(0, mid).join(" "), words.slice(mid).join(" ")];
+}
+
+function radarSvg(axisMap, order, labels, fill) {
+  const size = 260;
+  const cx = size / 2;
+  const cy = size / 2;
+  const r = 72;
+  const n = order.length;
+  if (!n) return "";
+  const vals = order.map((k) => {
+    const v = Number((axisMap || {})[k]);
+    if (Number.isNaN(v)) return 0;
+    return Math.max(0, Math.min(1, v));
+  });
+  const angleAt = (i) => -Math.PI / 2 + (i * 2 * Math.PI) / n;
+  const pt = (i, scale) => {
+    const a = angleAt(i);
+    return [cx + r * scale * Math.cos(a), cy + r * scale * Math.sin(a)];
+  };
+  const poly = (scale) => order.map((_, i) => pt(i, scale).map((x) => x.toFixed(1)).join(",")).join(" ");
+  const dataPoly = vals.map((v, i) => pt(i, v).map((x) => x.toFixed(1)).join(",")).join(" ");
+  const rings = [0.25, 0.5, 0.75, 1].map((s) =>
+    `<polygon points="${poly(s)}" fill="none" stroke="rgba(255,255,255,0.12)" stroke-width="1"/>`
+  ).join("");
+  const spokes = order.map((_, i) => {
+    const [x, y] = pt(i, 1);
+    return `<line x1="${cx}" y1="${cy}" x2="${x.toFixed(1)}" y2="${y.toFixed(1)}" stroke="rgba(255,255,255,0.14)" stroke-width="1"/>`;
+  }).join("");
+  const labelEls = order.map((k, i) => {
+    const [x, y] = pt(i, 1.38);
+    const lines = radarLabelLines(labels[k] || k.replace(/_/g, " "));
+    const startDy = lines.length === 1 ? 0 : -5;
+    const tspans = lines.map((line, li) =>
+      `<tspan x="${x.toFixed(1)}" dy="${li === 0 ? startDy : 10}">${esc(line)}</tspan>`
+    ).join("");
+    return `<text x="${x.toFixed(1)}" y="${y.toFixed(1)}" text-anchor="middle" dominant-baseline="middle" fill="#c8c4bc" font-size="8.5" font-family="IBM Plex Sans, sans-serif">${tspans}</text>`;
+  }).join("");
+  return `<svg viewBox="0 0 ${size} ${size}" role="img" aria-label="radar">
+    ${rings}${spokes}
+    <polygon points="${dataPoly}" fill="${fill}" fill-opacity="0.28" stroke="${fill}" stroke-width="1.5"/>
+    ${labelEls}
+  </svg>`;
+}
+
+function candidateRadarsHtml(c) {
+  const probe = radarSvg(c.probe_axes || {}, PROBE_AXIS_ORDER, PROBE_AXIS_LABELS, "#5a8cc8");
+  const evalm = radarSvg(c.eval_axes || c.traits || {}, EVAL_AXIS_ORDER, EVAL_AXIS_LABELS, "#c8a05a");
+  return `<div class="cand-radars">
+    <div class="cand-radar"><div class="radar-title">9 probe</div>${probe}</div>
+    <div class="cand-radar"><div class="radar-title">4 eval</div>${evalm}</div>
+  </div>`;
+}
+
 function renderProcess(t) {
   if (!t) {
     processBody.innerHTML = `<div class="empty-msg">Generate to see requirements, limitations, preferences, and search steps.</div>`;
@@ -1454,21 +1884,26 @@ function renderProcess(t) {
       return;
     }
     processBody.innerHTML = `
-      <div class="notes-line" style="margin-top:0">${cands.length} top candidate(s) · not a ranking of the whole pool. Search keeps at most three: best stated-fit (or LEARN taste after A/B), one different organization / topology / envelope, and a contrast lineage.</div>
-      <div class="pool-grid">
+      <div class="notes-line" style="margin-top:0">${cands.length} top candidate(s) · not a ranking of the whole pool. Search keeps at most three: best stated-fit (or LEARN taste after A/B), one different organization / topology / envelope, and a contrast lineage. Radars: 9 COVER probe axes (strategy space) and 4 soft eval axes (LEARN).</div>
+      <div class="cand-grid">
         ${cands.map(c => {
           const masses = (c.masses || []).map(m =>
             `${esc(m.mass_name || m.mass_id)} ${m.stories || "?"}fl`
           ).join(" · ");
           const sel = c.selected || c.kept ? "selected" : "";
+          const idLine = c.cell_id
+            ? `<div class="cell-id" title="${esc(c.cell_id)}">id ${esc(c.cell_id)}</div>`
+            : "";
           return `<button type="button" class="pool-card ${sel}" data-cell="${esc(c.cell_id || "")}">
             <canvas></canvas>
             <div class="cap">
               <div class="title">${c.kept ? `<span class="pill kept">kept</span> ` : ""}${esc(c.label)}
                 <span class="pill ${c.fits ? "ok" : "bad"}">${c.fits ? "legal" : "over"}</span>
               </div>
+              ${idLine}
               <div class="sub">${masses || esc(c.reason || "—")}${c.why ? `<br/>${esc(c.why)}` : ""}</div>
             </div>
+            ${candidateRadarsHtml(c)}
           </button>`;
         }).join("")}
       </div>`;
@@ -1690,6 +2125,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._apply_scheme()
             elif path == "/api/apply_cell":
                 self._apply_cell()
+            elif path == "/api/learn_choice":
+                self._learn_choice()
             elif path == "/api/modality_resolve":
                 self._modality_resolve()
             elif path == "/api/clear_program":
@@ -2068,6 +2505,64 @@ class Handler(BaseHTTPRequestHandler):
                 "study_id": session.study_id,
                 "cell_id": cell_id,
                 "mesh": mesh,
+            }
+        )
+
+    def _learn_choice(self) -> None:
+        length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(length)
+        payload = json.loads(raw.decode("utf-8") or "{}")
+        study_id = payload.get("study_id") or _STATE.get("study_id")
+        winner = str(payload.get("winner") or "").strip().lower()
+        if not study_id:
+            self._json({"ok": False, "error": "No study loaded. Generate first."}, 400)
+            return
+        if winner not in {"a", "b"}:
+            self._json({"ok": False, "error": "winner must be 'a' or 'b'."}, 400)
+            return
+
+        from .config import load_project_config
+        from .explore.preference import apply_choice
+        from .explore.ui_payload import transparency_payload
+        from .preview3d import preview_mesh
+        from .session import StudySession
+        from .solver import solve_massing_study
+
+        try:
+            session = StudySession.load(str(study_id))
+        except FileNotFoundError:
+            self._json({"ok": False, "error": f"Study '{study_id}' not found."}, 404)
+            return
+
+        applied = apply_choice(session, winner)
+        if not applied:
+            self._json(
+                {"ok": False, "error": "No pending A/B pair on this study (or pair cells missing)."},
+                400,
+            )
+            return
+
+        config_path = session.config_path or _STATE.get("config_path") or (
+            str(DEFAULT_CONFIG) if DEFAULT_CONFIG.exists() else None
+        )
+        result = solve_massing_study(session, config_path=config_path or None)
+        try:
+            config = load_project_config(config_path) if config_path else {}
+        except FileNotFoundError:
+            config = {}
+        mesh = preview_mesh(result, config=config)
+        session.save()
+        _STATE["study_id"] = session.study_id
+        transparency = transparency_payload(session, full_explore=True)
+        self._json(
+            {
+                "ok": True,
+                "note": applied.get("reply") or f"Recorded preference {winner.upper()}.",
+                "study_id": session.study_id,
+                "winner": winner,
+                "kept_cell": applied.get("kept_cell"),
+                "mesh": mesh,
+                "transparency": transparency,
             }
         )
 

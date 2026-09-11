@@ -191,7 +191,11 @@ def preview_mesh(
         for m in masses
     ]
 
-    failed = [c.message for c in result.validation if not c.passed]
+    failed = [
+        {"check": str(c.check), "message": str(c.message)}
+        for c in result.validation
+        if not c.passed
+    ]
     return {
         "study_id": result.study_id,
         "story_height_ft": height,

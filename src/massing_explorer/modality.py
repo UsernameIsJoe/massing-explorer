@@ -290,6 +290,8 @@ _LEVERS = {
     "mass_count",
     "max_gfa",
     "ratio",
+    "ratio_band",
+    "edge_sum",
 }
 
 
@@ -426,6 +428,24 @@ def accounted_magnitudes(parsed: Any) -> list[float]:
                     for part in parts[:2]:
                         if isinstance(part, (int, float)) and not isinstance(part, bool):
                             known.append(float(part))
+    band = constraints.get("ratio_band")
+    if isinstance(band, (list, tuple)):
+        for part in band[:2]:
+            if isinstance(part, (int, float)) and not isinstance(part, bool):
+                known.append(float(part))
+    band_parts = constraints.get("ratio_band_parts")
+    if isinstance(band_parts, (list, tuple)):
+        for pair in band_parts[:2]:
+            if isinstance(pair, (list, tuple)):
+                for part in pair[:2]:
+                    if isinstance(part, (int, float)) and not isinstance(part, bool):
+                        known.append(float(part))
+    for rule in constraints.get("edge_sum_limits") or []:
+        if isinstance(rule, dict):
+            try:
+                known.append(float(rule.get("max_ft")))
+            except (TypeError, ValueError):
+                pass
     for d in getattr(parsed, "dimensions", None) or []:
         if isinstance(d.get("value"), (int, float)):
             known.append(float(d["value"]))
@@ -537,7 +557,8 @@ def interpret_clause_content(
         "Return one item per number. value must be an Arabic numeral; unit as written "
         "(ft, m, stories, count, sf). Leave unmapped ONLY if truly not a massing size.\n"
         "Levers: max_length, preferred_length, exact_length, max_width, site_length,\n"
-        "max_height, max_stories, preferred_stories, mass_count, max_gfa, ratio.\n"
+        "max_height, max_stories, preferred_stories, mass_count, max_gfa, ratio,\n"
+        "ratio_band, edge_sum.\n"
         "Kind: requirement | limitation | preference "
         "(from modality words: must/needs=requirement; should/under/cannot=limitation; "
         "prefer/around/ideally=preference).\n"
@@ -742,6 +763,22 @@ def apply_content_interpretation(parsed: Any, data: dict[str, Any]) -> bool:
         elif lever == "ratio":
             parsed.length_over_width = float(value)
             applied = True
+        elif lever == "ratio_band":
+            # value may be mid aspect or ignored; parts come from clause text elsewhere.
+            if isinstance(value, (list, tuple)) and len(value) >= 2:
+                constraints["ratio_band"] = [float(value[0]), float(value[1])]
+                applied = True
+        elif lever == "edge_sum":
+            rules = list(constraints.get("edge_sum_limits") or [])
+            rules.append(
+                {
+                    "parts": list(it.get("parts") or []),
+                    "max_ft": round(_to_feet(value, unit), 4),
+                    "note": "edge sum (from clause)",
+                }
+            )
+            constraints["edge_sum_limits"] = rules
+            applied = True
     return applied
 
 
@@ -859,6 +896,19 @@ def _modality_still_needed(clause: str, parsed: Any) -> bool:
         # but do not block when the engine already has the magnitudes.
         return False
     cl = text.lower()
+    constraints = getattr(parsed, "constraints", {}) or {}
+    # Fragments from splitting "long edges of A and B …" on "and".
+    if re.search(
+        r"\b(?:long|short)\s+edges?\b|\bedge\s+from\s+(?:mass|wing)\b|"
+        r"\b(?:mass|wing)\s+[a-d1-4]\b",
+        cl,
+    ) and constraints.get("edge_sum_limits"):
+        return False
+    if (
+        re.search(r"\b(?:ratio|proportion|aspect)\b|\bbetween\s+\d|\b\d+\s*:\s*\d+", cl)
+        and (constraints.get("ratio_band") or getattr(parsed, "length_over_width", None))
+    ):
+        return False
     if re.search(
         r"\b(?:together|same\s+mass|colo(?:cate|cation)|joined|paired|attached)\b",
         cl,
@@ -868,7 +918,7 @@ def _modality_still_needed(clause: str, parsed: Any) -> bool:
         return not bool(getattr(parsed, "double_height_departments", None))
     if re.search(r"\b(?:ground|grade|first\s+floor)\b", cl):
         pins = getattr(parsed, "floor_pins", None) or {}
-        return not bool(pins)
+        return not bool(pins) and not bool(getattr(parsed, "pin_ground", None))
     # No sizes and no known structural act — keep asking for a role.
     return True
 

@@ -242,9 +242,11 @@ def set_floor_steps(
     Step a mass by explicit per-level plate weights, e.g. [1, 0.8, 0.5].
 
     Weights are relative, not areas: the engine scales them so the plates still
-    sum to the mass target GSF. Width stays constant, so each level's length
-    follows its weight.
+    sum to the mass target GSF. Width stays constant (shared edge), plates stack
+    biggest→smallest, and at most two distinct footprints are kept.
     """
+    from .solver import canonicalize_step_weights
+
     mass_id, error = resolve_mass_id(session, mass_id)
     if error:
         return error
@@ -268,6 +270,14 @@ def set_floor_steps(
             f"were given; the list is padded or trimmed to match. Call "
             f"set_story_count first if the height should change."
         )
+
+    canonical = canonicalize_step_weights(values)
+    if canonical != values:
+        extra = (
+            f"Normalized to biggest→smallest with ≤2 plate types: {canonical}."
+        )
+        note = f"{note} {extra}" if note else extra
+    values = canonical
 
     session.floor_steps[mass_id] = values
     session.floor_tapers.pop(mass_id, None)

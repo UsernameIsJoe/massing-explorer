@@ -1454,13 +1454,24 @@ def _extract_min_edge_length(parsed: ParsedBrief, raw: str) -> None:
         return
     compound = re.search(
         rf"lengths?\s+max(?:imum)?(?:\s+of|\s+is|=|:)?\s*{_NUM_OR_WORD}{_LEN_UNIT}"
-        rf"\s+and\s+min(?:imum)?(?:\s+of|\s+is|=|:)?\s*{_NUM_OR_WORD}{_LEN_UNIT}",
+        rf"\s*(?:and|,|;)\s*min(?:imum)?(?:\s+of|\s+is|=|:)?\s*{_NUM_OR_WORD}{_LEN_UNIT}",
         raw,
         flags=re.I,
     )
     if compound:
         _stamp_all_edge_floor(
             parsed, _to_feet(_parse_num(compound.group(3)), compound.group(4))
+        )
+        return
+    compound_gap = re.search(
+        rf"lengths?\s+max(?:imum)?(?:\s+of|\s+is|=|:)?\s*{_NUM_OR_WORD}{_LEN_UNIT}"
+        rf"[\s.,;]{{0,24}}?min(?:imum)?(?:\s+of|\s+is|=|:)?\s*{_NUM_OR_WORD}{_LEN_UNIT}",
+        raw,
+        flags=re.I | re.S,
+    )
+    if compound_gap:
+        _stamp_all_edge_floor(
+            parsed, _to_feet(_parse_num(compound_gap.group(3)), compound_gap.group(4))
         )
         return
     between = re.search(
@@ -2032,49 +2043,70 @@ def parse_brief(text: str, department_names: list[str]) -> ParsedBrief:
             parsed.constraints["exact_building_length_ft"] = round(exact, 4)
             parsed.notes.append(f"length should be {exact:g} ft (exact)")
 
-    ratio = re.search(
+    ratio_band = _extract_ratio_band(raw)
+    if ratio_band:
+        lo, hi = ratio_band["lo"], ratio_band["hi"]
+        role = str(ratio_band.get("role") or "limitation")
+        parsed.constraints["ratio_band"] = [lo, hi]
+        parsed.constraints["ratio_band_parts"] = ratio_band["parts"]
+        parsed.constraints["ratio_band_role"] = role
+        # Soft sizing target at the band midpoint so bars start inside the band.
+        if parsed.length_over_width is None:
+            parsed.length_over_width = (lo + hi) / 2.0
+            parsed.constraints["preferred_ratio"] = [
+                ratio_band["parts"][0][0],
+                ratio_band["parts"][0][1],
+            ]
+            parsed.constraints["ratio_role"] = role if role == "preference" else "preference"
+        parsed.notes.append(
+            f"{'prefer' if role == 'preference' else 'require'} mass length:width between "
+            f"{ratio_band['parts'][0][0]:g}:{ratio_band['parts'][0][1]:g} "
+            f"and {ratio_band['parts'][1][0]:g}:{ratio_band['parts'][1][1]:g}"
+        )
+
+    ratio = None if ratio_band else re.search(
         r"(?:mass\s+)?ratio\b.{0,40}?(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)",
         raw,
         flags=re.I | re.S,
     )
-    if not ratio:
+    if not ratio_band and not ratio:
         ratio = re.search(
             r"(?:mass\s+)?proportion\b.{0,40}?(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)",
             raw,
             flags=re.I | re.S,
         )
-    if not ratio:
+    if not ratio_band and not ratio:
         ratio = re.search(
             r"(?:stay\s+)?close\s+to\s+(?:a\s+)?(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)",
             raw,
             flags=re.I,
         )
-    if not ratio:
+    if not ratio_band and not ratio:
         ratio = re.search(
             r"(?:follow\s+)?roughly\s+(?:a\s+)?(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)",
             raw,
             flags=re.I,
         )
-    if not ratio:
+    if not ratio_band and not ratio:
         ratio = re.search(
             r"(?:around|about|roughly)\s+(?:a\s+)?(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)"
             r"\s*(?:proportion|ratio)?",
             raw,
             flags=re.I,
         )
-    if not ratio:
+    if not ratio_band and not ratio:
         ratio = re.search(
             r"prefer(?:red)?(?:\s+to\s+be|\s+of|\s+as)?\s+(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)",
             raw,
             flags=re.I,
         )
-    if not ratio:
+    if not ratio_band and not ratio:
         ratio = re.search(
             r"(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)\s*(?:proportion|ratio|width-to-length)",
             raw,
             flags=re.I,
         )
-    if not ratio:
+    if not ratio_band and not ratio:
         # "width-to-length ratio" / "1:4 width-to-length"
         ratio = re.search(
             r"(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)\s+width-to-length",
@@ -2156,6 +2188,11 @@ def parse_brief(text: str, department_names: list[str]) -> ParsedBrief:
         parsed.notes.append(
             f"named wings together under {parsed.pair_length_ft:g} ft (cap)"
         )
+    edge_sums = _extract_edge_sum_limits(raw)
+    if edge_sums:
+        parsed.constraints["edge_sum_limits"] = edge_sums
+        for rule in edge_sums:
+            parsed.notes.append(rule.get("note") or "cross-mass edge sum cap")
     _note_unknown_programs(parsed, raw, department_names)
     return parsed
 
@@ -2638,9 +2675,334 @@ def _extract_named_pair_length(text: str) -> float | None:
         rf"(?:mass|wing)\s+one\s+and\s+(?:mass|wing)\s+two\b.{{0,60}}?\bunder\s+{_NUM}{_FT}",
         rf"(?:these|those)\s+two\b.{{0,40}}?\bunder\s+{_NUM}{_FT}",
         rf"together\s+should be\s+under\s+{_NUM}{_FT}",
-        rf"length of (?:these|those) two.{0,20}?\bunder\s+{_NUM}{_FT}",
+        rf"length of (?:these|those) two.{{0,20}}?\bunder\s+{_NUM}{_FT}",
     ]
     return _first_number(patterns, text)
+
+
+_RATIO_PAIR = r"(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)"
+_MASS_REF = (
+    r"(?:one|two|three|four|first|second|third|fourth|[1-4]|[a-dA-D])"
+)
+_EDGE_CAP = (
+    r"(?:less\s+than|under|below|at\s+most|no\s+more\s+than|not\s+exceed(?:ing)?|"
+    r"should\s+(?:be\s+)?(?:under|below)|must\s+(?:be\s+)?(?:under|below))"
+)
+
+
+def _extract_ratio_band(text: str) -> dict[str, Any] | None:
+    """
+    Ratio band for every mass length:width.
+    e.g. "all masses should be between 2:5 and 3:4"
+         "mass ratio prefer to be between 5:8 and 2:5"
+    """
+    patterns = [
+        rf"(?:all\s+)?(?:masses|wings|buildings|bars).{{0,48}}?between\s+{_RATIO_PAIR}\s+and\s+{_RATIO_PAIR}",
+        rf"(?:mass\s+)?(?:ratio|proportion|aspect(?:\s+ratio)?).{{0,48}}?between\s+{_RATIO_PAIR}\s+and\s+{_RATIO_PAIR}",
+        rf"(?:mass\s+)?(?:ratio|proportion|aspect(?:\s+ratio)?).{{0,48}}?prefer.{{0,24}}?between\s+{_RATIO_PAIR}\s+and\s+{_RATIO_PAIR}",
+        rf"prefer.{{0,36}}?(?:mass\s+)?(?:ratio|proportion|aspect).{{0,36}}?between\s+{_RATIO_PAIR}\s+and\s+{_RATIO_PAIR}",
+        rf"between\s+{_RATIO_PAIR}\s+and\s+{_RATIO_PAIR}.{{0,36}}?(?:ratio|proportion|aspect|mass)",
+        rf"(?:ratio|proportion|aspect).{{0,24}}?(?:from|of)\s+{_RATIO_PAIR}\s+(?:to|through|–|-)\s+{_RATIO_PAIR}",
+        rf"from\s+{_RATIO_PAIR}\s+to\s+{_RATIO_PAIR}.{{0,36}}?(?:ratio|proportion|aspect|mass)",
+        rf"(?:stay|keep|remain|sit)\s+between\s+{_RATIO_PAIR}\s+and\s+{_RATIO_PAIR}",
+        rf"(?:each|every)\s+(?:mass|wing|building).{{0,36}}?between\s+{_RATIO_PAIR}\s+and\s+{_RATIO_PAIR}",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text or "", flags=re.I | re.S)
+        if not match:
+            continue
+        a, b, c, d = (float(match.group(i)) for i in range(1, 5))
+        if b <= 0 or d <= 0:
+            continue
+        r1 = a / b
+        r2 = c / d
+        lo, hi = (r1, r2) if r1 <= r2 else (r2, r1)
+        parts = [[a, b], [c, d]] if r1 <= r2 else [[c, d], [a, b]]
+        sentence = _sentence_at(text or "", match.start(), match.end())
+        role = _role_from_words(sentence, default="limitation")
+        if re.search(r"\bprefer", sentence, flags=re.I):
+            role = "preference"
+        if role not in {"requirement", "limitation", "preference"}:
+            role = "limitation"
+        return {
+            "lo": round(lo, 6),
+            "hi": round(hi, 6),
+            "parts": parts,
+            "role": role,
+            "start": match.start(),
+            "end": match.end(),
+        }
+    return None
+
+
+def _normalize_mass_ref(token: str) -> str:
+    raw = str(token or "").strip().lower()
+    mapping = {
+        "one": "1",
+        "first": "1",
+        "a": "1",
+        "two": "2",
+        "second": "2",
+        "b": "2",
+        "three": "3",
+        "third": "3",
+        "c": "3",
+        "four": "4",
+        "fourth": "4",
+        "d": "4",
+    }
+    return mapping.get(raw, raw)
+
+
+def _extract_upper_floor_relations(
+    parsed: ParsedBrief, text: str, names: list[str]
+) -> None:
+    """
+    Prefer/require a program on the top floor and/or above another program.
+    e.g. "media prefer on top floor above admin"
+    """
+    floor_pins = dict(parsed.constraints.get("floor_pins") or {})
+    floor_kinds = dict(parsed.constraints.get("floor_pin_kinds") or {})
+    stacks = list(parsed.constraints.get("stack_above") or [])
+    TOP = -1  # resolve to uppermost occupied level at apply time
+
+    def _role(clause: str, default: str = "preference") -> str:
+        role = _role_from_words(clause, default=default)
+        if re.search(r"\b(?:must|has\s+to|have\s+to|needs?\s+to|required)\b", clause, flags=re.I):
+            role = "requirement"
+        elif role == "limitation":
+            role = "preference"
+        if role not in {"requirement", "limitation", "preference"}:
+            role = default
+        return role
+
+    def _pin_top(dept: str, clause: str) -> None:
+        # Top / upper pins are not ground pins.
+        if dept in parsed.pin_ground:
+            parsed.pin_ground = [d for d in parsed.pin_ground if d != dept]
+            kinds = dict(parsed.constraints.get("pin_ground_kind") or {})
+            kinds.pop(dept, None)
+            parsed.constraints["pin_ground_kind"] = kinds
+        floor_pins[dept] = TOP
+        floor_kinds[dept] = _role(clause)
+
+    def _stack(above: str, below: str, clause: str) -> None:
+        if above == below:
+            return
+        key = (above, below)
+        if any((s.get("above"), s.get("below")) == key for s in stacks):
+            return
+        stacks.append({"above": above, "below": below, "kind": _role(clause)})
+
+    # "media prefer on top floor above admin"
+    for match in re.finditer(
+        r"([A-Za-z][A-Za-z0-9&/' \-]{0,48}?)\s+"
+        r"(?:prefer(?:s|ably|red)?|should|must|needs?\s+to|has\s+to|have\s+to)\s+"
+        r"(?:to\s+be\s+|be\s+|sit\s+|go\s+|stay\s+)?"
+        r"(?:on\s+)?(?:the\s+)?(?:top|upper(?:most)?|highest)\s+(?:floor|level|storey|story)"
+        r"(?:\s+above\s+([A-Za-z][A-Za-z0-9&/']*(?:\s+[A-Za-z][A-Za-z0-9&/']*){0,4}))?",
+        text,
+        flags=re.I,
+    ):
+        clause = match.group(0)
+        uppers = _clause_departments(match.group(1), names)
+        lowers = _clause_departments(match.group(2) or "", names) if match.group(2) else []
+        for dept in uppers:
+            _pin_top(dept, clause)
+            for below in lowers:
+                _stack(dept, below, clause)
+
+    # "prefer media on the top floor"
+    for match in re.finditer(
+        r"(?:prefer(?:s|ably|red)?|ideally)\s+"
+        r"([A-Za-z][A-Za-z0-9&/' \-]{0,48}?)\s+"
+        r"(?:on\s+)?(?:the\s+)?(?:top|upper(?:most)?|highest)\s+(?:floor|level|storey|story)"
+        r"(?:\s+above\s+([A-Za-z][A-Za-z0-9&/']*(?:\s+[A-Za-z][A-Za-z0-9&/']*){0,4}))?",
+        text,
+        flags=re.I,
+    ):
+        clause = match.group(0)
+        uppers = _clause_departments(match.group(1), names)
+        lowers = _clause_departments(match.group(2) or "", names) if match.group(2) else []
+        for dept in uppers:
+            _pin_top(dept, clause)
+            for below in lowers:
+                _stack(dept, below, clause)
+
+    # "media should sit above admin" / "media above administration"
+    for match in re.finditer(
+        r"([A-Za-z][A-Za-z0-9&/' \-]{0,48}?)\s+"
+        r"(?:prefer(?:s|ably|red)?\s+|should\s+|must\s+|needs?\s+to\s+|has\s+to\s+)?"
+        r"(?:to\s+be\s+|be\s+|sit\s+|go\s+|stay\s+|stack(?:ed)?\s+)?"
+        r"above\s+([A-Za-z][A-Za-z0-9&/']*(?:\s+[A-Za-z][A-Za-z0-9&/']*){0,4})"
+        r"(?!\s+(?:grade|ground|level\s*1|the\s+second))",
+        text,
+        flags=re.I,
+    ):
+        clause = match.group(0)
+        # Skip "not above grade/ground" handled elsewhere.
+        if re.search(r"\b(?:not|never|cannot|can't)\b", clause, flags=re.I):
+            continue
+        uppers = _clause_departments(match.group(1), names)
+        lowers = _clause_departments(match.group(2), names)
+        if not uppers or not lowers:
+            continue
+        for above in uppers:
+            for below in lowers:
+                _stack(above, below, clause)
+
+    if floor_pins:
+        parsed.constraints["floor_pins"] = floor_pins
+        parsed.constraints["floor_pin_kinds"] = floor_kinds
+        parsed.notes.append(
+            "upper-floor pins: "
+            + ", ".join(
+                f"{d}→{'top' if lvl < 0 else f'L{lvl}'}" for d, lvl in floor_pins.items()
+            )
+        )
+    if stacks:
+        parsed.constraints["stack_above"] = stacks
+        parsed.notes.append(
+            "stack above: "
+            + ", ".join(f"{s['above']} over {s['below']}" for s in stacks)
+        )
+
+
+def _extract_edge_sum_limits(text: str) -> list[dict[str, Any]]:
+    """
+    Cross-mass edge caps, e.g.
+    - long edge of mass A and short edge of mass B less than 200 ft
+    - long edges of mass A and B should be less than 300 together
+    """
+    raw = text or ""
+    out: list[dict[str, Any]] = []
+    seen: set[tuple] = set()
+
+    def _add(parts: list[dict[str, str]], max_ft: float, note: str) -> None:
+        key = (tuple((p["ref"], p["edge"]) for p in parts), round(max_ft, 3))
+        if key in seen or max_ft <= 0:
+            return
+        seen.add(key)
+        out.append(
+            {
+                "parts": parts,
+                "max_ft": round(max_ft, 4),
+                "note": note,
+            }
+        )
+
+    # long of X + short of Y (either order of long/short)
+    mixed = re.compile(
+        rf"(?:the\s+)?(long|short)\s+edge\s+(?:from|of)\s+(?:mass|wing)\s+({_MASS_REF})"
+        rf"\s+and\s+(?:the\s+)?(long|short)\s+edge\s+(?:from|of)\s+(?:mass|wing)\s+({_MASS_REF})"
+        rf".{{0,48}}?{_EDGE_CAP}\s+{_NUM}{_LEN_UNIT}",
+        flags=re.I | re.S,
+    )
+    for match in mixed.finditer(raw):
+        e1, r1, e2, r2 = match.group(1), match.group(2), match.group(3), match.group(4)
+        max_ft = _to_feet(_parse_num(match.group(5)), match.group(6) if match.lastindex and match.lastindex >= 6 else None)
+        if max_ft is None:
+            continue
+        parts = [
+            {"ref": _normalize_mass_ref(r1), "edge": e1.lower()},
+            {"ref": _normalize_mass_ref(r2), "edge": e2.lower()},
+        ]
+        _add(
+            parts,
+            max_ft,
+            f"{e1} edge mass {parts[0]['ref']} + {e2} edge mass {parts[1]['ref']} under {max_ft:g} ft",
+        )
+
+    # possessive: mass A's long edge and mass B's short edge
+    poss = re.compile(
+        rf"(?:mass|wing)\s+({_MASS_REF})(?:'s)?\s+(long|short)\s+edge\s+and\s+"
+        rf"(?:mass|wing)\s+({_MASS_REF})(?:'s)?\s+(long|short)\s+edge"
+        rf".{{0,48}}?{_EDGE_CAP}\s+{_NUM}{_LEN_UNIT}",
+        flags=re.I | re.S,
+    )
+    for match in poss.finditer(raw):
+        r1, e1, r2, e2 = match.group(1), match.group(2), match.group(3), match.group(4)
+        max_ft = _to_feet(_parse_num(match.group(5)), match.group(6) if match.lastindex and match.lastindex >= 6 else None)
+        if max_ft is None:
+            continue
+        parts = [
+            {"ref": _normalize_mass_ref(r1), "edge": e1.lower()},
+            {"ref": _normalize_mass_ref(r2), "edge": e2.lower()},
+        ]
+        _add(
+            parts,
+            max_ft,
+            f"{e1} edge mass {parts[0]['ref']} + {e2} edge mass {parts[1]['ref']} under {max_ft:g} ft",
+        )
+
+    # same-kind edges together: long edges of A and B ... less than N
+    same = re.compile(
+        rf"(?:the\s+)?(long|short)\s+edges?\s+(?:of\s+)?"
+        rf"(?:mass(?:es)?|wing(?:s)?)?\s*({_MASS_REF})\s+and\s+(?:(?:mass|wing)\s+)?({_MASS_REF})"
+        rf".{{0,48}}?(?:together\s+)?(?:should\s+be\s+|must\s+be\s+|have\s+to\s+(?:be\s+)?)?"
+        rf"{_EDGE_CAP}\s+{_NUM}{_LEN_UNIT}",
+        flags=re.I | re.S,
+    )
+    for match in same.finditer(raw):
+        edge, r1, r2 = match.group(1), match.group(2), match.group(3)
+        max_ft = _to_feet(_parse_num(match.group(4)), match.group(5) if match.lastindex and match.lastindex >= 5 else None)
+        if max_ft is None:
+            continue
+        parts = [
+            {"ref": _normalize_mass_ref(r1), "edge": edge.lower()},
+            {"ref": _normalize_mass_ref(r2), "edge": edge.lower()},
+        ]
+        _add(
+            parts,
+            max_ft,
+            f"{edge} edges of mass {parts[0]['ref']} and {parts[1]['ref']} together under {max_ft:g} ft",
+        )
+
+    # "combined / together long edges of mass A and mass B under N"
+    combined = re.compile(
+        rf"(?:combined|together)\s+(long|short)\s+edges?\s+(?:of\s+)?"
+        rf"(?:mass(?:es)?|wing(?:s)?)?\s*({_MASS_REF})\s+and\s+(?:(?:mass|wing)\s+)?({_MASS_REF})"
+        rf".{{0,36}}?{_EDGE_CAP}\s+{_NUM}{_LEN_UNIT}",
+        flags=re.I | re.S,
+    )
+    for match in combined.finditer(raw):
+        edge, r1, r2 = match.group(1), match.group(2), match.group(3)
+        max_ft = _to_feet(_parse_num(match.group(4)), match.group(5) if match.lastindex and match.lastindex >= 5 else None)
+        if max_ft is None:
+            continue
+        parts = [
+            {"ref": _normalize_mass_ref(r1), "edge": edge.lower()},
+            {"ref": _normalize_mass_ref(r2), "edge": edge.lower()},
+        ]
+        _add(
+            parts,
+            max_ft,
+            f"{edge} edges of mass {parts[0]['ref']} and {parts[1]['ref']} together under {max_ft:g} ft",
+        )
+
+    # "long edges of mass A and B should be less than N together"
+    together_tail = re.compile(
+        rf"(?:the\s+)?(long|short)\s+edges?\s+(?:of\s+)?"
+        rf"(?:mass(?:es)?|wing(?:s)?)?\s*({_MASS_REF})\s+and\s+(?:(?:mass|wing)\s+)?({_MASS_REF})"
+        rf".{{0,36}}?{_EDGE_CAP}\s+{_NUM}{_LEN_UNIT}\s+together",
+        flags=re.I | re.S,
+    )
+    for match in together_tail.finditer(raw):
+        edge, r1, r2 = match.group(1), match.group(2), match.group(3)
+        max_ft = _to_feet(_parse_num(match.group(4)), match.group(5) if match.lastindex and match.lastindex >= 5 else None)
+        if max_ft is None:
+            continue
+        parts = [
+            {"ref": _normalize_mass_ref(r1), "edge": edge.lower()},
+            {"ref": _normalize_mass_ref(r2), "edge": edge.lower()},
+        ]
+        _add(
+            parts,
+            max_ft,
+            f"{edge} edges of mass {parts[0]['ref']} and {parts[1]['ref']} together under {max_ft:g} ft",
+        )
+
+    return out
 
 
 def _apply_counted_masses(
@@ -2831,6 +3193,8 @@ def _apply_counted_masses(
     ):
         for dept in _clause_departments(match.group(1), names):
             _pin(dept, match.group(0))
+
+    _extract_upper_floor_relations(parsed, text, names)
 
     if pin_kinds:
         parsed.constraints["pin_ground_kind"] = pin_kinds
@@ -3476,6 +3840,49 @@ def briefing_from_parsed(parsed: ParsedBrief) -> dict[str, list[dict[str, Any]]]
             "limitation": limitations,
             "preference": preferences,
         }[pin_role].append(entry)
+    floor_pins = parsed.constraints.get("floor_pins") or {}
+    floor_kinds = parsed.constraints.get("floor_pin_kinds") or {}
+    for dept, level in floor_pins.items():
+        pin_role = str(floor_kinds.get(dept) or "preference")
+        if pin_role not in {"requirement", "limitation", "preference"}:
+            pin_role = "preference"
+        try:
+            lvl = int(level)
+        except (TypeError, ValueError):
+            lvl = -1
+        entry = {
+            "kind": pin_role,
+            "lever": "pin_floor",
+            "text": "top floor" if lvl < 0 else f"level {lvl}",
+            "value": lvl,
+            "departments": [dept],
+        }
+        {
+            "requirement": requirements,
+            "limitation": limitations,
+            "preference": preferences,
+        }[pin_role].append(entry)
+    for rel in parsed.constraints.get("stack_above") or []:
+        if not isinstance(rel, dict):
+            continue
+        above = rel.get("above")
+        below = rel.get("below")
+        if not above or not below:
+            continue
+        role = str(rel.get("kind") or "preference")
+        if role not in {"requirement", "limitation", "preference"}:
+            role = "preference"
+        entry = {
+            "kind": role,
+            "lever": "stack_above",
+            "text": f"{above} above {below}",
+            "departments": [above, below],
+        }
+        {
+            "requirement": requirements,
+            "limitation": limitations,
+            "preference": preferences,
+        }[role].append(entry)
     if parsed.preference and parsed.preference != "balanced":
         preferences.append(
             {"kind": "preference", "lever": "scheme_preference", "text": parsed.preference}
@@ -3572,25 +3979,28 @@ def briefing_from_parsed(parsed: ParsedBrief) -> dict[str, list[dict[str, Any]]]
         ratio_role = str(parsed.constraints.get("ratio_role") or "preference")
         if ratio_role not in {"requirement", "limitation", "preference"}:
             ratio_role = "preference"
-        entry = {
-            "kind": ratio_role,
-            "lever": "ratio",
-            "text": (
-                f"{ratio_parts[0]:g}:{ratio_parts[1]:g}"
-                if isinstance(ratio_parts, (list, tuple)) and len(ratio_parts) >= 2
-                else ""
-            ),
-            "value": (
-                list(ratio_parts)
-                if isinstance(ratio_parts, (list, tuple))
-                else parsed.length_over_width
-            ),
-        }
-        {
-            "requirement": requirements,
-            "limitation": limitations,
-            "preference": preferences,
-        }[ratio_role].append(entry)
+        # When a hard ratio band exists, the midpoint soft target stays off the briefing
+        # as a separate preference — the band itself is the limitation.
+        if not parsed.constraints.get("ratio_band"):
+            entry = {
+                "kind": ratio_role,
+                "lever": "ratio",
+                "text": (
+                    f"{ratio_parts[0]:g}:{ratio_parts[1]:g} either way"
+                    if isinstance(ratio_parts, (list, tuple)) and len(ratio_parts) >= 2
+                    else ""
+                ),
+                "value": (
+                    list(ratio_parts)
+                    if isinstance(ratio_parts, (list, tuple))
+                    else parsed.length_over_width
+                ),
+            }
+            {
+                "requirement": requirements,
+                "limitation": limitations,
+                "preference": preferences,
+            }[ratio_role].append(entry)
         if parsed.constraints.get("max_ratio"):
             mr = parsed.constraints["max_ratio"]
             limitations.append(
@@ -3601,6 +4011,48 @@ def briefing_from_parsed(parsed: ParsedBrief) -> dict[str, list[dict[str, Any]]]
                     "value": list(mr),
                 }
             )
+    band = parsed.constraints.get("ratio_band")
+    band_parts = parsed.constraints.get("ratio_band_parts")
+    if isinstance(band, (list, tuple)) and len(band) >= 2:
+        if isinstance(band_parts, (list, tuple)) and len(band_parts) >= 2:
+            text = (
+                f"{band_parts[0][0]:g}:{band_parts[0][1]:g}–"
+                f"{band_parts[1][0]:g}:{band_parts[1][1]:g} either way"
+            )
+        else:
+            text = f"{band[0]:g}–{band[1]:g} length/width either way"
+        band_role = str(parsed.constraints.get("ratio_band_role") or "limitation")
+        if band_role not in {"requirement", "limitation", "preference"}:
+            band_role = "limitation"
+        entry = {
+            "kind": band_role,
+            "lever": "ratio_band",
+            "text": text,
+            "value": [float(band[0]), float(band[1])],
+            "unit": "ratio",
+        }
+        {
+            "requirement": requirements,
+            "limitation": limitations,
+            "preference": preferences,
+        }[band_role].append(entry)
+    for rule in parsed.constraints.get("edge_sum_limits") or []:
+        if not isinstance(rule, dict):
+            continue
+        parts = rule.get("parts") or []
+        label = " + ".join(
+            f"{p.get('edge')} edge mass {p.get('ref')}" for p in parts if isinstance(p, dict)
+        )
+        limitations.append(
+            {
+                "kind": "limitation",
+                "lever": "edge_sum",
+                "text": rule.get("note") or label,
+                "value": rule.get("max_ft"),
+                "unit": "ft",
+                "parts": list(parts),
+            }
+        )
     for clause in parsed.dimensions:
         entry = {
             "kind": clause.get("kind")
@@ -4133,6 +4585,28 @@ def apply_parsed_brief(
         for dept in parsed.pin_ground:
             pin_department_to_floor(session, dept, 0)
             reading_notes.append(f"pinned {dept} to ground")
+    floor_pins = dict(parsed.constraints.get("floor_pins") or {})
+    if floor_pins:
+        from .tools import pin_department_to_floor
+
+        pref_stories = parsed.constraints.get("preferred_stories")
+        if pref_stories is not None:
+            top_level = max(0, int(round(float(pref_stories))) - 1)
+        elif parsed.max_stories is not None:
+            top_level = max(0, int(parsed.max_stories) - 1)
+        else:
+            top_level = 2
+        for dept, level in floor_pins.items():
+            try:
+                lvl = int(level)
+            except (TypeError, ValueError):
+                lvl = -1
+            if lvl < 0:
+                lvl = int(top_level)
+            pin_department_to_floor(session, dept, lvl)
+            reading_notes.append(f"pinned {dept} to level {lvl}")
+    if parsed.constraints.get("stack_above"):
+        session.constraints["stack_above"] = list(parsed.constraints["stack_above"])
     story_lock: dict[str, int] = {}
     dh = set(parsed.double_height_departments)
     preferred_stories = parsed.constraints.get("preferred_stories")

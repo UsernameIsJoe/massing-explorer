@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from massing_explorer.explore.preference import MAX_LEARN_COMPARISONS
+
 
 def _clause_label(clause: dict[str, Any]) -> str:
     lever = str(clause.get("lever") or "clause")
@@ -57,6 +59,32 @@ def _cell_label(entry: dict[str, Any]) -> str:
     if short_p:
         bits.append(short_p)
     return " · ".join(bits)
+
+
+def _probe_axes_for_entry(entry: dict[str, Any]) -> dict[str, float]:
+    """Nine COVER strategy coordinates for radar / BO (not LEARN taste)."""
+    from massing_explorer.explore.axes import encode_named
+
+    strategy = dict(entry.get("strategy") or {})
+    geom = dict(strategy.get("G") or {})
+    if not geom.get("stories") and entry.get("stories"):
+        geom["stories"] = dict(entry["stories"])
+        strategy["G"] = geom
+    return encode_named(strategy)
+
+
+def _eval_axes_for_entry(entry: dict[str, Any]) -> dict[str, float]:
+    """Four soft LEARN/eval composites in [0, 1]."""
+    from massing_explorer.explore.performance import EVAL_AXIS_NAMES
+
+    perf = entry.get("performance") or {}
+    out: dict[str, float] = {}
+    for name in EVAL_AXIS_NAMES:
+        try:
+            out[name] = round(float(perf.get(name) or 0.0), 4)
+        except (TypeError, ValueError):
+            out[name] = 0.0
+    return out
 
 
 def _slim_performance(perf: dict[str, Any] | None) -> dict[str, Any]:
@@ -129,6 +157,8 @@ def _slim_candidate(entry: dict[str, Any], *, kept: bool = False, story_height_f
         "reason": entry.get("reason") or "",
         "stories": entry.get("stories") or {},
         "traits": _slim_performance(entry.get("performance")),
+        "probe_axes": _probe_axes_for_entry(entry),
+        "eval_axes": _eval_axes_for_entry(entry),
         "kept": kept,
         "topology": topo.get("kind") or "",
         "envelope": geom.get("envelope") or "",
@@ -591,9 +621,40 @@ def transparency_payload(
         "note": store.get("note") or "",
     }
 
+    learn_pair: dict[str, Any] | None = None
+    learning = store.get("learning") or {}
+    pending = learning.get("pending_pair") or {}
+    if pending.get("a") and pending.get("b") and archive:
+        cells = archive.get("cells") or {}
+        entry_a = cells.get(pending["a"])
+        entry_b = cells.get(pending["b"])
+        if entry_a and entry_b:
+            learn_pair = {
+                "kind": pending.get("kind") or "pair",
+                "note": learning.get("note") or "Which scheme do you prefer?",
+                "comparisons": len(learning.get("comparisons") or []),
+                "max_comparisons": int(learning.get("max_comparisons") or MAX_LEARN_COMPARISONS),
+                "a": _slim_candidate(
+                    entry_a, kept=(entry_a.get("cell") == kept_id), story_height_ft=story_h
+                ),
+                "b": _slim_candidate(
+                    entry_b, kept=(entry_b.get("cell") == kept_id), story_height_ft=story_h
+                ),
+            }
+            for side, card in (("a", learn_pair["a"]), ("b", learn_pair["b"])):
+                card["side"] = side
+                traits = card.get("traits") or {}
+                card["axes"] = {
+                    "program_coherence": traits.get("program_coherence"),
+                    "preference_alignment": traits.get("preference_alignment"),
+                    "performance_efficiency": traits.get("performance_efficiency"),
+                    "robustness": traits.get("robustness"),
+                }
+
     return {
         "interpreted": interpreted,
         "sample_pool": sample_pool,
         "top_candidates": top_candidates,
+        "learn_pair": learn_pair,
         "process": process,
     }

@@ -33,6 +33,9 @@ COVER_GEOM_RANKS = 20
 ENVELOPES = ("balanced", "compact", "elongated")  # elongated → search low_rise
 LOADINGS = ("double", "single")
 TOPOLOGIES = ("independent", "paired")
+# Floor-plate profiles COVER will try. "step" = ≤2 types, biggest→smallest.
+PLATE_PROFILES = ("uniform", "step")
+STEP_PLATE_TAPER = 0.80
 
 
 @dataclass
@@ -44,6 +47,7 @@ class CoverSample:
     topology: str = "independent"
     loading: str = "double"
     envelope: str = "balanced"
+    plate_profile: str = "uniform"  # uniform | step
     geom_rank: int = 0  # 0 = best under envelope preference; 1.. = next widths
     label: str = ""
 
@@ -56,6 +60,7 @@ class CoverPlan:
     topologies: list[str] = field(default_factory=list)
     loadings: list[str] = field(default_factory=list)
     envelopes: list[str] = field(default_factory=list)
+    plate_profiles: list[str] = field(default_factory=list)
     samples: list[CoverSample] = field(default_factory=list)
 
 
@@ -179,6 +184,7 @@ def build_cover_plan(session: Any, *, pool_size: int = COVER_MAX) -> CoverPlan:
         plan.loadings = list(LOADINGS)
 
     plan.envelopes = list(ENVELOPES)
+    plan.plate_profiles = list(PLATE_PROFILES)
 
     plan.samples = list(_stratified_samples(plan, pool_size=pool_size, session=session))
     return plan
@@ -193,21 +199,32 @@ def _stratified_samples(
     t_n = max(1, len(plan.topologies))
     l_n = max(1, len(plan.loadings))
     e_n = max(1, len(plan.envelopes))
+    profiles = list(plan.plate_profiles or PLATE_PROFILES)
+    pl_n = max(1, len(profiles))
 
     def make(
-        i_p: int, i_s: int, i_t: int, i_l: int, i_e: int, geom_rank: int = 0
+        i_p: int,
+        i_s: int,
+        i_t: int,
+        i_l: int,
+        i_e: int,
+        i_pl: int = 0,
+        geom_rank: int = 0,
     ) -> CoverSample:
         stories = plan.story_patterns[i_s % s_n]
+        profile = profiles[i_pl % pl_n]
         return CoverSample(
             partition_index=i_p % p_n,
             stories=stories,
             topology=plan.topologies[i_t % t_n],
             loading=plan.loadings[i_l % l_n],
             envelope=plan.envelopes[i_e % e_n],
+            plate_profile=profile,
             geom_rank=int(geom_rank),
             label=(
                 f"P{i_p % p_n}+S{i_s % s_n}+T{plan.topologies[i_t % t_n]}"
                 f"+L{plan.loadings[i_l % l_n]}+G{plan.envelopes[i_e % e_n]}"
+                f"+PL{profile}"
                 + (f"+W{geom_rank}" if geom_rank else "")
             ),
         )
@@ -222,6 +239,7 @@ def _stratified_samples(
             sample.topology,
             sample.loading,
             sample.envelope,
+            sample.plate_profile,
             int(sample.geom_rank),
         )
         if key in seen:
@@ -229,8 +247,15 @@ def _stratified_samples(
         seen.add(key)
         ordered.append(sample)
 
-    # 1) Stated organization + mid stories + current loading + independent + balanced
     stated_stories = tuple(int(m.story_count) for m in session.masses) or plan.story_patterns[0]
+    pref = session.constraints.get("preferred_stories")
+    if pref is not None:
+        want = max(1, int(round(float(pref))))
+        locks = dict(session.constraints.get("story_lock") or {})
+        stated_stories = tuple(
+            int(locks[m.id]) if m.id in locks else max(int(m.story_count), want)
+            for m in session.masses
+        ) or stated_stories
     push(
         CoverSample(
             partition_index=0,
@@ -238,46 +263,50 @@ def _stratified_samples(
             topology="paired" if session.pairings else "independent",
             loading=str(session.constraints.get("loading") or "double"),
             envelope="balanced",
+            plate_profile="uniform",
             label="stated",
         )
     )
+    push(
+        CoverSample(
+            partition_index=0,
+            stories=stated_stories,
+            topology="paired" if session.pairings else "independent",
+            loading=str(session.constraints.get("loading") or "double"),
+            envelope="balanced",
+            plate_profile="step",
+            label="stated+step",
+        )
+    )
 
-    # 2) Cover each axis level at least once against stated others.
-    #    Do small axes before the story library so a large S does not
-    #    consume the whole pool before L/G appear.
     for i_p in range(p_n):
-        push(make(i_p, 0, 0, 0, 0))
+        push(make(i_p, 0, 0, 0, 0, 0))
     for i_t in range(t_n):
-        push(make(0, 0, i_t, 0, 0))
+        push(make(0, 0, i_t, 0, 0, 0))
     for i_l in range(l_n):
-        push(make(0, 0, 0, i_l, 0))
+        push(make(0, 0, 0, i_l, 0, 0))
     for i_e in range(e_n):
-        push(make(0, 0, 0, 0, i_e))
-    story_axis_cap = min(s_n, max(8, pool_size // max(1, e_n * l_n)))
+        push(make(0, 0, 0, 0, i_e, 0))
+    for i_pl in range(pl_n):
+        push(make(0, 0, 0, 0, 0, i_pl))
+    story_axis_cap = min(s_n, max(8, pool_size // max(1, e_n * l_n * pl_n)))
     for i_s in range(story_axis_cap):
-        push(make(0, i_s, 0, 0, 0))
+        push(make(0, i_s, 0, 0, 0, 0))
 
-    # 3) Exhaust the Cartesian product up to pool_size. Outer axes = envelope
-    #    / loading so a truncated pool still mixes G and L.
     if len(ordered) < pool_size:
         for i_e in range(e_n):
             for i_l in range(l_n):
-                for i_t in range(t_n):
-                    for i_p in range(p_n):
-                        for i_s in range(s_n):
-                            if len(ordered) >= pool_size:
-                                return iter(ordered[:pool_size])
-                            push(make(i_p, i_s, i_t, i_l, i_e))
+                for i_pl in range(pl_n):
+                    for i_t in range(t_n):
+                        for i_p in range(p_n):
+                            for i_s in range(s_n):
+                                if len(ordered) >= pool_size:
+                                    return iter(ordered[:pool_size])
+                                push(make(i_p, i_s, i_t, i_l, i_e, i_pl))
 
-    # 4) Locked briefs often exhaust the typology product well below COVER_MAX
-    #    (e.g. 9 stories × 2 L × 3 E = 54). Keep filling with alternate width
-    #    schemes from site search so the pool actually uses the budget.
     if len(ordered) < pool_size and ordered:
         base = [s for s in ordered if int(s.geom_rank) == 0] or list(ordered)
-        ranks_needed = max(
-            2,
-            (pool_size + len(base) - 1) // max(len(base), 1),
-        )
+        ranks_needed = max(2, (pool_size + len(base) - 1) // max(len(base), 1))
         ranks_needed = min(COVER_GEOM_RANKS, ranks_needed)
         for rank in range(1, ranks_needed):
             if len(ordered) >= pool_size:
@@ -292,12 +321,29 @@ def _stratified_samples(
                         topology=sample.topology,
                         loading=sample.loading,
                         envelope=sample.envelope,
+                        plate_profile=sample.plate_profile,
                         geom_rank=rank,
                         label=(sample.label or "cover") + f"+W{rank}",
                     )
                 )
 
     return iter(ordered[:pool_size])
+
+
+
+def _apply_plate_profile(session: Any, profile: str) -> None:
+    """uniform = equal plates; step = ≤2-type setback on multi-story masses."""
+    from ..tools import clear_floor_steps, set_floor_taper
+
+    profile = str(profile or "uniform").strip().lower()
+    clear_floor_steps(session)
+    if profile != "step":
+        return
+    for mass in session.masses:
+        if int(mass.story_count) < 2:
+            continue
+        set_floor_taper(session, mass.id, STEP_PLATE_TAPER)
+
 
 
 def apply_cover_sample(
@@ -340,6 +386,7 @@ def apply_cover_sample(
         session.constraints["loading"] = sample.loading
     session.constraints["cover_envelope"] = sample.envelope
     session.constraints["cover_geom_rank"] = int(sample.geom_rank)
+    _apply_plate_profile(session, getattr(sample, "plate_profile", None) or "uniform")
 
     if topology_is_required(session):
         # Keep the brief's pairing. COVER must not rewrite a required T.

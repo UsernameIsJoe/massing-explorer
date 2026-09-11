@@ -96,27 +96,35 @@ def search_reward(performance: dict[str, Any] | None, weights: dict[str, float] 
     efficiency = float(performance.get("performance_efficiency") or 0.0)
     robust = float(performance.get("robustness") or 0.0)
     novelty = min(1.0, max(0.0, float(performance.get("novelty") or 0.0)))
+    awkward = min(1.0, max(0.0, float(performance.get("awkward_splits") or 0.0)))
+    awkward_factor = max(0.05, (1.0 - awkward) ** 2)
     tasted = bool(weights and any(abs(float(v)) > 1e-9 for v in weights.values()))
     if not tasted:
         return round(
-            0.45 * feasible
-            + 0.20 * pref
-            + 0.15 * coherence
-            + 0.10 * efficiency
-            + 0.05 * robust
-            + 0.05 * novelty,
+            (
+                0.45 * feasible
+                + 0.20 * pref
+                + 0.15 * coherence
+                + 0.10 * efficiency
+                + 0.05 * robust
+                + 0.05 * novelty
+            )
+            * awkward_factor,
             4,
         )
     from .preference import utility
 
     taste = 1.0 / (1.0 + math.exp(-utility(weights, performance)))
     return round(
-        0.40 * feasible
-        + 0.15 * pref
-        + 0.10 * coherence
-        + 0.08 * efficiency
-        + 0.07 * robust
-        + 0.05 * novelty
-        + 0.15 * taste,
+        (
+            0.40 * feasible
+            + 0.15 * pref
+            + 0.10 * coherence
+            + 0.08 * efficiency
+            + 0.07 * robust
+            + 0.05 * novelty
+            + 0.15 * taste
+        )
+        * awkward_factor,
         4,
     )

@@ -446,17 +446,18 @@ def _ingest_site_search(session: Any, archive: dict[str, Any]) -> None:
 
 
 def _prepare_learn(archive: dict[str, Any], learning: dict[str, Any]) -> dict[str, Any]:
+    from .preference import MAX_LEARN_COMPARISONS, describe_weights, next_pair, schemes_from_archive
+
     learning = dict(learning or {})
     weights = learning.get("weights") or {}
     comparisons = list(learning.get("comparisons") or [])
     schemes = schemes_from_archive(archive)
     learning["pending_pair"] = next_pair(schemes, weights, comparisons)
     if not learning.get("note"):
-        from .preference import describe_weights
-
         learning["note"] = describe_weights(weights)
     learning.setdefault("weights", weights)
     learning.setdefault("comparisons", comparisons)
+    learning["max_comparisons"] = MAX_LEARN_COMPARISONS
     return learning
 
 
@@ -494,8 +495,14 @@ def select_elites_explained(
     archive: dict[str, Any], weights: dict[str, float] | None = None
 ) -> list[dict[str, Any]]:
     """Same elites as select_elites, with a why-string for the UI."""
-    legal = archive_mod.legal_cells(archive)
+    from .performance import prefer_clean_splits
+
+    legal_raw = archive_mod.legal_cells(archive)
+    legal = prefer_clean_splits(legal_raw)
     if not legal:
+        # Never promote awkward splits into top candidates.
+        if legal_raw:
+            return []
         cells = list((archive.get("cells") or {}).values())
         if not cells:
             return []
@@ -510,9 +517,9 @@ def select_elites_explained(
     tasted = bool(weights and any(abs(float(v)) > 1e-9 for v in weights.values()))
     ranked = sorted(legal, key=lambda e: taste_weight(e, weights), reverse=True)
     best_why = (
-        "Highest LEARN taste among legal cells."
+        "Highest LEARN taste among legal cells (weird program splits are illegal)."
         if tasted
-        else "Best stated-fit among legal cells (no A/B taste yet)."
+        else "Best stated-fit among legal cells — weird program splits are deal-breakers."
     )
     picked: list[dict[str, Any]] = [{"entry": ranked[0], "why": best_why}]
 
@@ -685,17 +692,21 @@ def _pick_kept(
     weights: dict[str, float] | None,
     preferred_partition: str | None = None,
 ) -> dict[str, Any]:
+    from .performance import prefer_clean_splits
+
     tasted = bool(weights and any(abs(float(v)) > 1e-9 for v in (weights or {}).values()))
     if not tasted:
-        stated = [
-            e
-            for e in (archive.get("cells") or {}).values()
-            if str(e.get("reason") or "").startswith("COVER: stated")
-            and e.get("fits_limitations")
-        ]
+        stated = prefer_clean_splits(
+            [
+                e
+                for e in (archive.get("cells") or {}).values()
+                if str(e.get("reason") or "").startswith("COVER: stated")
+                and e.get("fits_limitations")
+            ]
+        )
         if stated:
-            return stated[0]
-    legal = archive_mod.legal_cells(archive)
+            return max(stated, key=lambda e: taste_weight(e, weights))
+    legal = prefer_clean_splits(archive_mod.legal_cells(archive))
     if legal:
         if not tasted and preferred_partition:
             same = [e for e in legal if e.get("partition") == preferred_partition]

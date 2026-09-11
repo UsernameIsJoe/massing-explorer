@@ -28,9 +28,16 @@ TRAIT_KEYS = EVAL_AXIS_NAMES
 
 PUBLIC_TOKENS = ("health", "physical", "dining", "food", "art", "music", "gym")
 
+# Deal-breaker for multi-floor departments: every floor slice of that
+# department must be at least this large. Stated in m²; engine stores SF.
+# Shared floors with other programs are allowed. No ratio remnant rule.
+MIN_SPLIT_PART_SQM = 100.0
+_SQM_TO_SF = 10.76391041671
+MIN_SPLIT_PART_SF = MIN_SPLIT_PART_SQM * _SQM_TO_SF
+
 
 def _is_hard_gate_check(check: str) -> bool:
-    """Site caps and exact requirements both block the legal archive."""
+    """Site caps, exact requirements, and program-split deal-breakers."""
     name = str(check or "")
     if name.startswith("site_length") or name.startswith("site_width"):
         return True
@@ -38,7 +45,52 @@ def _is_hard_gate_check(check: str) -> bool:
         return True
     if name.startswith("required_width") or name.startswith("min_edge"):
         return True
+    if name.startswith("ratio_band") or name.startswith("edge_sum"):
+        return True
+    if name.startswith("program_split"):
+        return True
+    if name.startswith("step_align") or name.startswith("step_stack"):
+        return True
+    if name.startswith("step_plate_types") or name.startswith("step_void"):
+        return True
+    if name.startswith("step_cantilever"):
+        return True
     return False
+
+
+def entry_has_awkward_split(entry: dict[str, Any] | None) -> bool:
+    """True when performance recorded any awkward multi-floor dept split."""
+    if not entry:
+        return False
+    try:
+        return float((entry.get("performance") or {}).get("awkward_splits") or 0.0) > 1e-9
+    except (TypeError, ValueError):
+        return False
+
+
+def entry_fragmentation(entry: dict[str, Any] | None) -> float:
+    if not entry:
+        return 0.0
+    try:
+        return float((entry.get("performance") or {}).get("fragmentation") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def prefer_clean_splits(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Weird program splits are a deal-breaker — never promote them.
+
+    Prefer zero multi-floor fragmentation among clean cells. If every cell is
+    awkward, return an empty list (callers show "no legal clean scheme").
+    """
+    if not entries:
+        return entries
+    clean = [e for e in entries if not entry_has_awkward_split(e)]
+    if not clean:
+        return []
+    no_frag = [e for e in clean if entry_fragmentation(e) <= 1e-9]
+    return no_frag if no_frag else clean
 
 
 def measure(result: Any, session: Any = None, archive: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -61,12 +113,17 @@ def measure(result: Any, session: Any = None, archive: dict[str, Any] | None = N
         aspects.append(length / width if width else 0.0)
         lengths.append(length)
 
-    feasible = len(limit_fails) == 0 and not any(
-        str(c.check).startswith("anchor") and not c.passed for c in failed
-    )
     leftover = _leftover(masses)
     fragmentation = _fragmentation(masses)
     awkward = _awkward_floor_splits(masses)
+    # Deal breaker: any awkward program split is illegal, even if an older
+    # solve path omitted the program_split validation row.
+    awkward_fail = awkward > 1e-9
+    split_in_limits = any(str(c.check).startswith("program_split") for c in limit_fails)
+    effective_limit_fails = len(limit_fails) + (0 if split_in_limits or not awkward_fail else 1)
+    feasible = effective_limit_fails == 0 and not any(
+        str(c.check).startswith("anchor") and not c.passed for c in failed
+    )
     likeness = _likeness(aspects)
     anchor = _anchor_fit(failed, getattr(result, "validation", None) or [])
     pref_dist = preference_distance(result, session)
@@ -74,11 +131,14 @@ def measure(result: Any, session: Any = None, archive: dict[str, Any] | None = N
     public = _public_on_grade(masses)
 
     vector: dict[str, Any] = {
-        "feasible": bool(feasible and not failed),
-        "fits_limitations": len(limit_fails) == 0,
-        "failed_checks": len(failed),
-        "limit_fails": len(limit_fails),
-        "failed_kinds": sorted({str(c.check).split(":")[0] for c in failed}),
+        "feasible": bool(feasible and not failed and not awkward_fail),
+        "fits_limitations": effective_limit_fails == 0,
+        "failed_checks": len(failed) + (0 if split_in_limits or not awkward_fail else 1),
+        "limit_fails": effective_limit_fails,
+        "failed_kinds": sorted(
+            {str(c.check).split(":")[0] for c in failed}
+            | ({"program_split"} if awkward_fail else set())
+        ),
         # Diagnostic / composite inputs (not LEARN axes).
         "spread": _spread(areas),
         "height_variance": float(pstdev(stories)) if len(stories) > 1 else 0.0,
@@ -108,10 +168,10 @@ def eval_composites(vector: dict[str, Any], session: Any = None) -> dict[str, fl
     public_score = float(public) if public is not None else 0.7
     anchor = float(vector.get("anchor_fit") if vector.get("anchor_fit") is not None else 1.0)
     program_coherence = (
-        0.40 * (1.0 - frag)
-        + 0.25 * (1.0 - awkward)
-        + 0.20 * public_score
-        + 0.15 * anchor
+        0.28 * (1.0 - frag)
+        + 0.50 * (1.0 - awkward)
+        + 0.12 * public_score
+        + 0.10 * anchor
     )
 
     pref_dist = float(vector.get("preference_distance") or 0.0)
@@ -151,6 +211,8 @@ def preference_distance(result: Any, session: Any = None) -> float:
             scores.append(1.0)
         else:
             scores.append(0.0 if int(got) == int(want) else min(1.0, abs(int(got) - int(want)) / 3.0))
+    from ..aspect import aspect_band_distance, aspect_target_distance
+
     ratio = session.constraints.get("length_over_width")
     if ratio:
         want = float(ratio)
@@ -159,7 +221,34 @@ def preference_distance(result: Any, session: Any = None) -> float:
             if not floors or not floors[0].width_ft:
                 continue
             actual = float(floors[0].length_ft) / float(floors[0].width_ft)
-            scores.append(min(1.0, abs(actual - want) / max(want, 0.15)))
+            # 3:5 and 5:3 score the same.
+            scores.append(aspect_target_distance(actual, want))
+    band = session.constraints.get("ratio_band")
+    band_role = str(session.constraints.get("ratio_band_role") or "limitation")
+    if isinstance(band, (list, tuple)) and len(band) >= 2 and band_role == "preference":
+        try:
+            lo = float(band[0])
+            hi = float(band[1])
+        except (TypeError, ValueError):
+            lo = hi = None
+        if lo is not None and hi is not None:
+            for mass in getattr(result, "masses", None) or []:
+                floors = list(getattr(mass, "floors", None) or [])
+                if not floors or not floors[0].width_ft:
+                    continue
+                actual = float(floors[0].length_ft) / float(floors[0].width_ft)
+                scores.append(aspect_band_distance(actual, lo, hi))
+    for rel in session.constraints.get("stack_above") or []:
+        if not isinstance(rel, dict):
+            continue
+        above = levels.get(str(rel.get("above") or ""))
+        below = levels.get(str(rel.get("below") or ""))
+        if above is None or below is None:
+            scores.append(1.0)
+        elif int(above) > int(below):
+            scores.append(0.0)
+        else:
+            scores.append(min(1.0, (int(below) - int(above) + 1) / 3.0))
     preferred_stories = session.constraints.get("preferred_stories")
     if preferred_stories is not None:
         want = max(1, int(round(float(preferred_stories))))
@@ -284,31 +373,97 @@ def _fragmentation(masses: list[Any]) -> float:
 
 def _awkward_floor_splits(masses: list[Any]) -> float:
     """
-    Share of departments with a thin remnant on another floor (e.g. ~90/10).
+    Share of multi-floor departments with a deal-breaking vertical split.
 
-    0 = no awkward splits. 1 = every multi-floor dept is badly unbalanced.
+    0 = clean. 1 = every multi-floor dept is illegal.
+
+    Deal-breakers:
+    - non-contiguous floors (program on L0 and L2 with nothing on L1)
+    - any floor slice of the department below MIN_SPLIT_PART_SF (~100 m²)
+
+    Sharing a floor with another program is allowed. No %-of-program remnant rule.
     """
-    by_dept: dict[str, list[float]] = {}
-    for mass in masses:
-        for floor in getattr(mass, "floors", None) or []:
-            for alloc in getattr(floor, "allocations", None) or []:
-                by_dept.setdefault(str(alloc.department), []).append(float(alloc.gsf or 0))
-    if not by_dept:
-        return 0.0
     awkward = 0
     multi = 0
-    for shares in by_dept.values():
-        if len(shares) < 2:
-            continue
-        multi += 1
-        total = sum(shares) or 1.0
-        largest = max(shares) / total
-        # Remnant under 15% of the department on a separate floor.
-        if largest >= 0.85:
-            awkward += 1
+    for mass in masses:
+        by_dept: dict[str, dict[int, float]] = {}
+        for floor in getattr(mass, "floors", None) or []:
+            level = int(getattr(floor, "level", 0) or 0)
+            for alloc in getattr(floor, "allocations", None) or []:
+                dept = str(alloc.department)
+                gsf = float(alloc.gsf or 0)
+                if gsf <= 0:
+                    continue
+                by_dept.setdefault(dept, {})[level] = (
+                    by_dept.setdefault(dept, {}).get(level, 0.0) + gsf
+                )
+        for dept, levels in by_dept.items():
+            if len(levels) < 2:
+                continue
+            multi += 1
+            ordered = sorted(levels)
+            contiguous = ordered[-1] - ordered[0] + 1 == len(ordered)
+            thin = any(gsf + 1e-6 < MIN_SPLIT_PART_SF for gsf in levels.values())
+            if not contiguous or thin:
+                awkward += 1
     if multi == 0:
         return 0.0
     return awkward / multi
+
+
+def awkward_split_violations(masses: list[Any]) -> list[dict[str, Any]]:
+    """Per-department deal-breaker details for validation / UI."""
+    out: list[dict[str, Any]] = []
+    for mass in masses:
+        mass_id = str(getattr(mass, "id", "") or "")
+        mass_name = str(getattr(mass, "name", "") or mass_id or "Mass")
+        by_dept: dict[str, dict[int, float]] = {}
+        for floor in getattr(mass, "floors", None) or []:
+            level = int(getattr(floor, "level", 0) or 0)
+            for alloc in getattr(floor, "allocations", None) or []:
+                dept = str(alloc.department)
+                gsf = float(alloc.gsf or 0)
+                if gsf <= 0:
+                    continue
+                by_dept.setdefault(dept, {})[level] = (
+                    by_dept.setdefault(dept, {}).get(level, 0.0) + gsf
+                )
+        for dept, levels in by_dept.items():
+            if len(levels) < 2:
+                continue
+            ordered = sorted(levels)
+            contiguous = ordered[-1] - ordered[0] + 1 == len(ordered)
+            reasons: list[str] = []
+            if not contiguous:
+                reasons.append(
+                    "non-contiguous floors "
+                    + "+".join(f"L{lvl}" for lvl in ordered)
+                )
+            thin_levels = [
+                (lvl, gsf)
+                for lvl, gsf in sorted(levels.items())
+                if gsf + 1e-6 < MIN_SPLIT_PART_SF
+            ]
+            if thin_levels:
+                bits = ", ".join(
+                    f"L{lvl}={gsf:,.0f} SF ({gsf / _SQM_TO_SF:.0f} m²)"
+                    for lvl, gsf in thin_levels
+                )
+                reasons.append(
+                    f"split slice under {MIN_SPLIT_PART_SQM:g} m² ({bits})"
+                )
+            if not reasons:
+                continue
+            out.append(
+                {
+                    "mass_id": mass_id,
+                    "mass_name": mass_name,
+                    "department": dept,
+                    "levels": ordered,
+                    "reasons": reasons,
+                }
+            )
+    return out
 
 
 def _public_on_grade(masses: list[Any]) -> float | None:

@@ -486,6 +486,12 @@ class TestPreference(unittest.TestCase):
                 "legal-1": {
                     "cell": "legal-1",
                     "fits_limitations": True,
+                    "partition": "p-a",
+                    "stories": {"m1": 2, "m2": 3},
+                    "strategy": {
+                        "T": {"kind": "independent_bars"},
+                        "G": {"envelope": "balanced", "loading": "double", "stories": {"m1": 2, "m2": 3}},
+                    },
                     "performance": {
                         "feasible": True,
                         "failed_checks": 0,
@@ -498,6 +504,12 @@ class TestPreference(unittest.TestCase):
                 "legal-2": {
                     "cell": "legal-2",
                     "fits_limitations": True,
+                    "partition": "p-b",
+                    "stories": {"m1": 2, "m2": 2},
+                    "strategy": {
+                        "T": {"kind": "paired_bars"},
+                        "G": {"envelope": "elongated", "loading": "single", "stories": {"m1": 2, "m2": 2}},
+                    },
                     "performance": {
                         "feasible": True,
                         "failed_checks": 0,
@@ -538,7 +550,15 @@ class TestPreference(unittest.TestCase):
                 "traits": dict(traits),
                 "entry": {
                     "partition": "p-core",
-                    "strategy": {"T": {"kind": "independent"}, "G": {"envelope": "balanced", "loading": "double"}},
+                    "stories": {"m1": 2, "m2": 2},
+                    "strategy": {
+                        "T": {"kind": "independent"},
+                        "G": {"envelope": "balanced", "loading": "double", "stories": {"m1": 2, "m2": 2}},
+                    },
+                    "plates": [
+                        {"mass_id": "m1", "stories": 2, "width_ft": 60, "length_ft": 100},
+                        {"mass_id": "m2", "stories": 2, "width_ft": 60, "length_ft": 100},
+                    ],
                 },
             },
             {
@@ -547,7 +567,15 @@ class TestPreference(unittest.TestCase):
                 "traits": dict(traits),
                 "entry": {
                     "partition": "p-core",
-                    "strategy": {"T": {"kind": "independent"}, "G": {"envelope": "compact", "loading": "double"}},
+                    "stories": {"m1": 2, "m2": 2},
+                    "strategy": {
+                        "T": {"kind": "independent"},
+                        "G": {"envelope": "compact", "loading": "double", "stories": {"m1": 2, "m2": 2}},
+                    },
+                    "plates": [
+                        {"mass_id": "m1", "stories": 2, "width_ft": 60, "length_ft": 100},
+                        {"mass_id": "m2", "stories": 2, "width_ft": 60, "length_ft": 100},
+                    ],
                 },
             },
             {
@@ -556,13 +584,91 @@ class TestPreference(unittest.TestCase):
                 "traits": dict(traits),
                 "entry": {
                     "partition": "p-split",
-                    "strategy": {"T": {"kind": "paired_bars"}, "G": {"envelope": "elongated", "loading": "single"}},
+                    "stories": {"m1": 3, "m2": 2, "m3": 2},
+                    "strategy": {
+                        "T": {"kind": "paired_bars"},
+                        "G": {
+                            "envelope": "elongated",
+                            "loading": "single",
+                            "stories": {"m1": 3, "m2": 2, "m3": 2},
+                        },
+                    },
+                    "plates": [
+                        {"mass_id": "m1", "stories": 3, "width_ft": 50, "length_ft": 160},
+                        {"mass_id": "m2", "stories": 2, "width_ft": 70, "length_ft": 80},
+                        {"mass_id": "m3", "stories": 2, "width_ft": 70, "length_ft": 90},
+                    ],
                 },
             },
         ]
         pair = next_pair(schemes, {}, [])
         self.assertIsNotNone(pair)
         self.assertIn("other-p", {pair["a"], pair["b"]})
+        # Envelope-only twins must not be offered against each other.
+        twin = next_pair(schemes[:2], {}, [])
+        self.assertIsNone(twin)
+
+    def test_next_pair_stops_before_five_comparisons(self) -> None:
+        from massing_explorer.explore.preference import MAX_LEARN_COMPARISONS
+
+        traits = {
+            "program_coherence": 0.5,
+            "preference_alignment": 0.2,
+            "performance_efficiency": 0.5,
+            "robustness": 0.2,
+        }
+
+        def scheme(cid: str, partition: str, topo: str, stories: dict, plates: list) -> dict:
+            return {
+                "id": cid,
+                "fits": True,
+                "traits": dict(traits),
+                "entry": {
+                    "partition": partition,
+                    "stories": stories,
+                    "strategy": {
+                        "T": {"kind": topo},
+                        "G": {"envelope": "balanced", "loading": "double", "stories": stories},
+                    },
+                    "plates": plates,
+                },
+            }
+
+        schemes = [
+            scheme("c1", "p1", "independent_bars", {"a": 2, "b": 2}, [
+                {"mass_id": "a", "stories": 2, "width_ft": 60, "length_ft": 100},
+                {"mass_id": "b", "stories": 2, "width_ft": 60, "length_ft": 110},
+            ]),
+            scheme("c2", "p2", "paired_bars", {"a": 3, "b": 2}, [
+                {"mass_id": "a", "stories": 3, "width_ft": 50, "length_ft": 140},
+                {"mass_id": "b", "stories": 2, "width_ft": 80, "length_ft": 90},
+            ]),
+            scheme("c3", "p3", "independent_bars", {"a": 2, "b": 3, "c": 2}, [
+                {"mass_id": "a", "stories": 2, "width_ft": 55, "length_ft": 80},
+                {"mass_id": "b", "stories": 3, "width_ft": 55, "length_ft": 120},
+                {"mass_id": "c", "stories": 2, "width_ft": 70, "length_ft": 70},
+            ]),
+            scheme("c4", "p4", "paired_bars", {"a": 2, "b": 2, "c": 3}, [
+                {"mass_id": "a", "stories": 2, "width_ft": 40, "length_ft": 160},
+                {"mass_id": "b", "stories": 2, "width_ft": 40, "length_ft": 150},
+                {"mass_id": "c", "stories": 3, "width_ft": 90, "length_ft": 80},
+            ]),
+            scheme("c5", "p5", "independent_bars", {"a": 3, "b": 3}, [
+                {"mass_id": "a", "stories": 3, "width_ft": 70, "length_ft": 90},
+                {"mass_id": "b", "stories": 3, "width_ft": 70, "length_ft": 100},
+            ]),
+        ]
+        comparisons: list[dict] = []
+        seen_pairs = 0
+        for _ in range(10):
+            pair = next_pair(schemes, {}, comparisons)
+            if pair is None:
+                break
+            seen_pairs += 1
+            comparisons.append({"a": pair["a"], "b": pair["b"], "winner": "a"})
+        self.assertEqual(MAX_LEARN_COMPARISONS, 4)
+        self.assertLessEqual(seen_pairs, MAX_LEARN_COMPARISONS)
+        self.assertIsNone(next_pair(schemes, {}, comparisons))
 
 
 class TestRefineAllocation(unittest.TestCase):

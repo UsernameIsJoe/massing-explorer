@@ -236,12 +236,62 @@ class TestAllocator(unittest.TestCase):
             rooms=rooms,
             multiplier=1.0,
         )
-        self.assertTrue(any("exceeds total usable area" in n for n in notes))
+        self.assertTrue(
+            any(
+                "exceeds" in n and "usable area" in n
+                for n in notes
+            )
+        )
         # Area is never silently dropped
         self.assertAlmostEqual(floors[0].allocated_gsf, 4000.0, delta=1)
 
     def test_no_floors_is_safe(self) -> None:
         self.assertEqual(allocate_programs([], [], {}, [], 1.0), [])
+
+    def test_pin_above_story_count_clamps_not_crash(self) -> None:
+        """COVER may shrink to 1 story while a top-floor pin still says L1."""
+        floors = _floors(1, 8000)
+        allocate_programs(
+            floors=floors,
+            departments=["ADMIN", "MEDIA"],
+            dept_gsf={"ADMIN": 3000.0, "MEDIA": 4000.0},
+            rooms=[
+                Room("Office", 1, 3000, "ADMIN"),
+                Room("Library", 1, 4000, "MEDIA"),
+            ],
+            multiplier=1.0,
+            pins={"ADMIN": 0, "MEDIA": 1},
+        )
+        self.assertAlmostEqual(floors[0].allocated_gsf, 7000.0, delta=1)
+        depts = {a.department for a in floors[0].allocations}
+        self.assertEqual(depts, {"ADMIN", "MEDIA"})
+
+    def test_allocate_stays_contiguous_no_floor_gaps(self) -> None:
+        """A department must not occupy L0 and L2 while skipping L1."""
+        floors = _floors(3, 1000)
+        allocate_programs(
+            floors=floors,
+            departments=["RED", "PURPLE"],
+            dept_gsf={"RED": 1500.0, "PURPLE": 1000.0},
+            rooms=[
+                Room("R", 1, 1500, "RED"),
+                Room("P", 1, 1000, "PURPLE"),
+            ],
+            multiplier=1.0,
+        )
+        by_dept: dict[str, list[int]] = {}
+        for floor in floors:
+            for alloc in floor.allocations:
+                if alloc.gsf <= 0:
+                    continue
+                by_dept.setdefault(alloc.department, []).append(floor.level)
+        for dept, levels in by_dept.items():
+            ordered = sorted(set(levels))
+            self.assertEqual(
+                ordered[-1] - ordered[0] + 1,
+                len(ordered),
+                msg=f"{dept} has gap floors {ordered}",
+            )
 
     def test_utilization_property(self) -> None:
         floor = FloorPlate(level=0, width_ft=80, length_ft=100, area_sf=8000)

@@ -62,6 +62,145 @@ class TestEvalAxes(unittest.TestCase):
         self.assertEqual(TRAIT_NAMES, EVAL_AXIS_NAMES)
         self.assertEqual(len(TRAIT_NAMES), 4)
 
+    def test_awkward_split_min_area_100_sqm(self) -> None:
+        from types import SimpleNamespace
+
+        from massing_explorer.explore.performance import (
+            MIN_SPLIT_PART_SF,
+            MIN_SPLIT_PART_SQM,
+            _awkward_floor_splits,
+            awkward_split_violations,
+            eval_composites,
+            measure,
+            prefer_clean_splits,
+        )
+
+        self.assertEqual(MIN_SPLIT_PART_SQM, 100.0)
+        self.assertAlmostEqual(MIN_SPLIT_PART_SF, 100.0 * 10.76391041671, places=3)
+
+        def mass_with_floors(floor_allocs: list[list[tuple[str, float]]]) -> list:
+            floors = []
+            for i, allocs in enumerate(floor_allocs):
+                floors.append(
+                    SimpleNamespace(
+                        level=i,
+                        width_ft=100.0,
+                        length_ft=100.0,
+                        allocations=[
+                            SimpleNamespace(department=d, gsf=g) for d, g in allocs
+                        ],
+                    )
+                )
+            return [SimpleNamespace(id="m1", name="Mass 1", floors=floors)]
+
+        # Thin split slice under 100 m² (~1076 SF) — fail
+        self.assertEqual(
+            _awkward_floor_splits(
+                mass_with_floors([[("CORE", 5000.0)], [("CORE", 500.0)]])
+            ),
+            1.0,
+        )
+        # Both slices large enough — pass (even if unbalanced by %)
+        self.assertEqual(
+            _awkward_floor_splits(
+                mass_with_floors([[("CORE", 8000.0)], [("CORE", 1200.0)]])
+            ),
+            0.0,
+        )
+        # Shared floor with another program is allowed when slices are big enough
+        self.assertEqual(
+            _awkward_floor_splits(
+                mass_with_floors(
+                    [
+                        [("CORE", 2000.0)],
+                        [("CORE", 1500.0), ("MEDIA", 1500.0)],
+                    ]
+                )
+            ),
+            0.0,
+        )
+        # Gap: L0 + L2, skip L1 — still a deal breaker
+        gap = mass_with_floors(
+            [[("CORE", 2000.0)], [("MEDIA", 2000.0)], [("CORE", 1500.0)]]
+        )
+        self.assertEqual(_awkward_floor_splits(gap), 1.0)
+        hits = awkward_split_violations(gap)
+        self.assertTrue(any("non-contiguous" in r for h in hits for r in h["reasons"]))
+
+        thin = mass_with_floors([[("CORE", 5000.0)], [("CORE", 400.0), ("MEDIA", 800.0)]])
+        thin_hits = awkward_split_violations(thin)
+        self.assertTrue(
+            any("split slice under" in r for h in thin_hits for r in h["reasons"])
+        )
+
+        result = SimpleNamespace(masses=thin, validation=[])
+        perf = measure(result)
+        self.assertFalse(perf["fits_limitations"])
+        self.assertIn("program_split", perf["failed_kinds"])
+
+        pool = prefer_clean_splits(
+            [
+                {
+                    "cell": "clean",
+                    "performance": {"awkward_splits": 0.0, "fragmentation": 0.0},
+                },
+                {
+                    "cell": "weird",
+                    "performance": {"awkward_splits": 1.0, "fragmentation": 0.2},
+                },
+            ]
+        )
+        self.assertEqual([e["cell"] for e in pool], ["clean"])
+        only_weird = prefer_clean_splits(
+            [{"cell": "w1", "performance": {"awkward_splits": 0.8, "fragmentation": 0.5}}]
+        )
+        self.assertEqual(only_weird, [])
+
+        clean = eval_composites(
+            {
+                "fragmentation": 0.0,
+                "awkward_splits": 0.0,
+                "public_on_grade": 1.0,
+                "anchor_fit": 1.0,
+                "preference_distance": 0.0,
+                "leftover_area": 0.0,
+                "footprint_likeness": 0.5,
+            }
+        )
+        weird = eval_composites(
+            {
+                "fragmentation": 0.0,
+                "awkward_splits": 1.0,
+                "public_on_grade": 1.0,
+                "anchor_fit": 1.0,
+                "preference_distance": 0.0,
+                "leftover_area": 0.0,
+                "footprint_likeness": 0.5,
+            }
+        )
+        self.assertGreater(clean["program_coherence"] - weird["program_coherence"], 0.4)
+
+    def test_stated_weight_penalizes_awkward_splits(self) -> None:
+        from massing_explorer.explore.preference import stated_weight
+
+        clean = {
+            "performance": {
+                "failed_checks": 0,
+                "preference_distance": 0.1,
+                "awkward_splits": 0.0,
+                "program_coherence": 0.9,
+            }
+        }
+        weird = {
+            "performance": {
+                "failed_checks": 0,
+                "preference_distance": 0.1,
+                "awkward_splits": 1.0,
+                "program_coherence": 0.4,
+            }
+        }
+        self.assertGreater(stated_weight(clean), stated_weight(weird) * 4)
+
     def test_composites_from_diagnostics(self) -> None:
         vector = {
             "fits_limitations": True,
