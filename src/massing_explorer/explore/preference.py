@@ -19,8 +19,11 @@ TRAIT_NAMES = (
     "robustness",
 )
 
-# Cap A/B questions so LEARN stays short (under 5).
-MAX_LEARN_COMPARISONS = 4
+# Cap A/B questions; stop earlier when weights stabilize or remaining pairs are uninformative.
+MAX_LEARN_COMPARISONS = 8
+MIN_LEARN_COMPARISONS = 3
+LEARN_INFO_FLOOR = 0.12
+WEIGHT_STABLE_L1 = 0.08
 
 # Reject near-twin drawings: need a clear architectural difference to choose.
 MIN_PAIR_DIVERSITY = 4.0
@@ -36,27 +39,17 @@ def chance_a_beats_b(traits_a: dict[str, Any], traits_b: dict[str, Any], weights
 
 
 def stated_weight(entry: dict[str, Any]) -> float:
-    """Pre-LEARN ranking among legal cells. Awkward floor splits are heavily down-ranked."""
-    perf = entry.get("performance") or {}
-    fail = 1.0 / (1.0 + float(perf.get("failed_checks") or 0.0))
-    pref = 1.0 - min(1.0, max(0.0, float(perf.get("preference_distance") or 0.0)))
-    awkward = min(1.0, max(0.0, float(perf.get("awkward_splits") or 0.0)))
-    frag = min(1.0, max(0.0, float(perf.get("fragmentation") or 0.0)))
-    raw_coh = perf.get("program_coherence")
-    try:
-        coherence = float(raw_coh) if raw_coh is not None else (1.0 - awkward)
-    except (TypeError, ValueError):
-        coherence = 1.0 - awkward
-    # Squared drop so even a partial awkward share tanks "best fit".
-    awkward_factor = max(0.05, (1.0 - awkward) ** 2)
-    # Prefer schemes that keep departments on single floors when scores tie.
-    frag_factor = max(0.55, 1.0 - 0.45 * frag)
-    return fail * (0.45 * pref + 0.35 * coherence + 0.20) * awkward_factor * frag_factor
+    """Pre-LEARN ranking among legal cells — same objective as search/realize."""
+    from .saturate import architectural_reward
+
+    return architectural_reward(entry.get("performance") or {}, None)
 
 
 def taste_weight(entry: dict[str, Any], weights: dict[str, float] | None) -> float:
     if weights and any(abs(float(v)) > 1e-9 for v in weights.values()):
-        return utility(weights, entry.get("performance") or {})
+        from .saturate import architectural_reward
+
+        return architectural_reward(entry.get("performance") or {}, weights)
     return stated_weight(entry)
 
 
@@ -102,12 +95,35 @@ def next_pair(
     schemes: list[dict[str, Any]],
     weights: dict[str, float],
     comparisons: list[dict[str, Any]],
+    *,
+    prev_weights: dict[str, float] | None = None,
 ) -> dict[str, Any] | None:
     if len(comparisons) >= MAX_LEARN_COMPARISONS:
         return None
     legal = [s for s in schemes if s.get("fits") and s.get("traits")]
     if len(legal) < 2:
         return None
+
+    # Adaptive stop: enough evidence and either stable weights or no informative pair.
+    if len(comparisons) >= MIN_LEARN_COMPARISONS:
+        best_info = 0.0
+        for i, left in enumerate(legal):
+            for right in legal[i + 1 :]:
+                if _already(comparisons, left["id"], right["id"]):
+                    continue
+                if _pair_diversity(left, right) < MIN_PAIR_DIVERSITY:
+                    continue
+                pa = chance_a_beats_b(left["traits"], right["traits"], weights)
+                best_info = max(best_info, information(pa))
+        stable = False
+        if prev_weights is not None:
+            drift = sum(
+                abs(float(weights.get(n, 0.0) or 0.0) - float(prev_weights.get(n, 0.0) or 0.0))
+                for n in TRAIT_NAMES
+            )
+            stable = drift < WEIGHT_STABLE_L1
+        if best_info < LEARN_INFO_FLOOR and (stable or len(comparisons) >= MIN_LEARN_COMPARISONS + 1):
+            return None
     compared = {item.get("a") for item in comparisons} | {item.get("b") for item in comparisons}
     unseen = [s for s in legal if s["id"] not in compared]
     seen = [s for s in legal if s["id"] in compared]
@@ -255,11 +271,14 @@ def apply_choice(session: Any, side: str) -> dict[str, Any] | None:
         return None
     comparisons = list(learning.get("comparisons") or [])
     comparisons.append({"a": pair["a"], "b": pair["b"], "winner": side})
+    prev_weights = dict(learning.get("weights") or {})
     weights = fit_weights(comparisons, by_id)
-    nxt = next_pair(schemes, weights, comparisons)
+    nxt = next_pair(schemes, weights, comparisons, prev_weights=prev_weights)
     note = describe_weights(weights)
-    if nxt is None and len(comparisons) >= MAX_LEARN_COMPARISONS:
-        note = f"{note} LEARN complete ({len(comparisons)}/{MAX_LEARN_COMPARISONS} comparisons)."
+    if nxt is None:
+        note = (
+            f"{note} LEARN complete ({len(comparisons)}/{MAX_LEARN_COMPARISONS} comparisons)."
+        )
     learning = {
         "weights": weights,
         "comparisons": comparisons,

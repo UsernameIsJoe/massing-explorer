@@ -115,7 +115,7 @@ class TestProbeAxes(unittest.TestCase):
         named = encode_named(base)
         self.assertEqual(named["topology"], 1.0)
         self.assertEqual(named["loading"], 0.0)
-        self.assertEqual(named["geometric_character"], 1.0)
+        self.assertEqual(named["geometric_character"], 0.7)  # elongated + uniform plate
         self.assertGreater(named["height_articulation"], 0.0)
 
 
@@ -227,10 +227,10 @@ class TestEvalAxes(unittest.TestCase):
                 "footprint_likeness": 0.5,
             }
         )
-        weird = eval_composites(
+        fraggy = eval_composites(
             {
-                "fragmentation": 0.0,
-                "awkward_splits": 1.0,
+                "fragmentation": 1.0,
+                "awkward_splits": 0.0,
                 "public_on_grade": 1.0,
                 "anchor_fit": 1.0,
                 "preference_distance": 0.0,
@@ -238,28 +238,39 @@ class TestEvalAxes(unittest.TestCase):
                 "footprint_likeness": 0.5,
             }
         )
-        self.assertGreater(clean["program_coherence"] - weird["program_coherence"], 0.4)
+        # Awkward splits are a gate, not a soft coherence ingredient.
+        self.assertGreater(clean["program_coherence"], fraggy["program_coherence"])
 
     def test_stated_weight_penalizes_awkward_splits(self) -> None:
         from massing_explorer.explore.preference import stated_weight
 
         clean = {
             "performance": {
+                "fits_limitations": True,
+                "feasible": True,
                 "failed_checks": 0,
                 "preference_distance": 0.1,
+                "preference_alignment": 0.9,
                 "awkward_splits": 0.0,
                 "program_coherence": 0.9,
+                "performance_efficiency": 0.7,
+                "robustness": 0.5,
             }
         }
         weird = {
             "performance": {
+                "fits_limitations": True,
+                "feasible": True,
                 "failed_checks": 0,
                 "preference_distance": 0.1,
+                "preference_alignment": 0.9,
                 "awkward_splits": 1.0,
                 "program_coherence": 0.4,
+                "performance_efficiency": 0.3,
+                "robustness": 0.5,
             }
         }
-        self.assertGreater(stated_weight(clean), stated_weight(weird) * 4)
+        self.assertGreater(stated_weight(clean), stated_weight(weird))
 
     def test_composites_from_diagnostics(self) -> None:
         vector = {
@@ -295,6 +306,66 @@ class TestEvalAxes(unittest.TestCase):
         }
         out = eval_composites(vector)
         self.assertAlmostEqual(out["robustness"], 0.25)
+
+    def test_encoding_keeps_story_pin_and_plate_ownership(self) -> None:
+        def base(**g_extra):
+            g = {
+                "stories": {"academic": 3, "gym": 1},
+                "loading": "double",
+                "envelope": "balanced",
+                "plate_profile": "uniform",
+            }
+            g.update(g_extra)
+            return {
+                "P": {
+                    "mass_count": 2,
+                    "partition": {"academic": ["CORE"], "gym": ["GYM"]},
+                },
+                "T": {"kind": "independent_bars"},
+                "V": {"pins": {}, "double_height": []},
+                "G": g,
+            }
+
+        a = encode_strategy(base())
+        swapped = encode_strategy(
+            base(**{"stories": {"academic": 1, "gym": 3}})
+        )
+        stepped = encode_strategy(base(plate_profile="step"))
+        pinned_ground = encode_strategy(
+            {
+                "P": {
+                    "mass_count": 2,
+                    "partition": {"academic": ["CORE"], "gym": ["GYM"]},
+                },
+                "T": {"kind": "independent_bars"},
+                "V": {"pins": {"CORE": 0}, "double_height": []},
+                "G": {
+                    "stories": {"academic": 3, "gym": 1},
+                    "loading": "double",
+                    "envelope": "balanced",
+                    "plate_profile": "uniform",
+                },
+            }
+        )
+        pinned_top = encode_strategy(
+            {
+                "P": {
+                    "mass_count": 2,
+                    "partition": {"academic": ["CORE"], "gym": ["GYM"]},
+                },
+                "T": {"kind": "independent_bars"},
+                "V": {"pins": {"CORE": 2}, "double_height": []},
+                "G": {
+                    "stories": {"academic": 3, "gym": 1},
+                    "loading": "double",
+                    "envelope": "balanced",
+                    "plate_profile": "uniform",
+                },
+            }
+        )
+        self.assertNotEqual(a, swapped)
+        self.assertNotEqual(a, stepped)
+        self.assertNotEqual(pinned_ground, pinned_top)
 
 
 if __name__ == "__main__":

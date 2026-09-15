@@ -83,12 +83,18 @@ def encodings_from_archive(archive: dict[str, Any]) -> list[list[float]]:
     return out
 
 
-def search_reward(performance: dict[str, Any] | None, weights: dict[str, float] | None = None) -> float:
-    """Feasibility first. LEARN taste steers among legal schemes; it cannot rescue a miss."""
+def architectural_reward(
+    performance: dict[str, Any] | None,
+    weights: dict[str, float] | None = None,
+) -> float:
+    """
+    Quality among accepted schemes. No archive-novelty term — that changes as
+    the archive grows and must not poison BO / elite replacement history.
+    """
     performance = performance or {}
-    if not performance.get("fits_limitations"):
+    if not performance.get("fits_limitations") and not performance.get("feasible"):
         return 0.0
-    feasible = 1.0 if performance.get("feasible") else 0.4
+    feasible = 1.0 if (performance.get("feasible") or performance.get("fits_limitations")) else 0.4
     coherence = float(performance.get("program_coherence") or 0.0)
     pref = float(
         performance.get("preference_alignment")
@@ -97,36 +103,50 @@ def search_reward(performance: dict[str, Any] | None, weights: dict[str, float] 
     )
     efficiency = float(performance.get("performance_efficiency") or 0.0)
     robust = float(performance.get("robustness") or 0.0)
-    novelty = min(1.0, max(0.0, float(performance.get("novelty") or 0.0)))
-    awkward = min(1.0, max(0.0, float(performance.get("awkward_splits") or 0.0)))
-    awkward_factor = max(0.05, (1.0 - awkward) ** 2)
     tasted = bool(weights and any(abs(float(v)) > 1e-9 for v in weights.values()))
     if not tasted:
         return round(
-            (
-                0.45 * feasible
-                + 0.20 * pref
-                + 0.15 * coherence
-                + 0.10 * efficiency
-                + 0.05 * robust
-                + 0.05 * novelty
-            )
-            * awkward_factor,
+            0.40 * feasible
+            + 0.25 * pref
+            + 0.15 * coherence
+            + 0.12 * efficiency
+            + 0.08 * robust,
             4,
         )
     from .preference import utility
 
     taste = 1.0 / (1.0 + math.exp(-utility(weights, performance)))
     return round(
-        (
-            0.40 * feasible
-            + 0.15 * pref
-            + 0.10 * coherence
-            + 0.08 * efficiency
-            + 0.07 * robust
-            + 0.05 * novelty
-            + 0.15 * taste
-        )
-        * awkward_factor,
+        0.35 * feasible
+        + 0.15 * pref
+        + 0.12 * coherence
+        + 0.10 * efficiency
+        + 0.08 * robust
+        + 0.20 * taste,
         4,
     )
+
+
+def search_reward(performance: dict[str, Any] | None, weights: dict[str, float] | None = None) -> float:
+    """
+    Feasibility first. Illegal schemes get a graded near-feasible signal so
+    MCTS/REPAIR can improve distance; accepted schemes use architectural_reward.
+    """
+    performance = performance or {}
+    accepted = bool(performance.get("fits_limitations") or performance.get("feasible"))
+    if not accepted:
+        raw = performance.get("feasibility_distance")
+        if raw is None:
+            try:
+                from .feasibility import feasibility_distance
+
+                raw = feasibility_distance(performance.get("violations") or {})
+            except Exception:
+                raw = 1.0
+        try:
+            dist = float(raw)
+        except (TypeError, ValueError):
+            dist = 1.0
+        # Strictly below any accepted reward (accepted floor ~0.4).
+        return round(0.25 * max(0.0, 1.0 - dist / 3.0), 4)
+    return architectural_reward(performance, weights)

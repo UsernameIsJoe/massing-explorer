@@ -14,11 +14,11 @@ from typing import Any
 from .massing_models import MassingStudyResult, SolvedMass
 from .rhino_export import (
     MASS_GAP_FT,
-    _align_pieces_to_side,
+    _aligned_floor_programs,
     _aligned_voids,
     _double_height_department,
+    _mass_shared_shift_x,
     _place_order,
-    _program_rects,
     _punch_voids,
     story_height_from_config,
 )
@@ -75,13 +75,14 @@ def preview_mesh(
         ground = mass.floors[0] if mass.floors else None
         span = float(ground.length_ft) if ground else 0.0
         align_length = span
-        voids = _aligned_voids(mass, align_length)
+        shared_x = _mass_shared_shift_x(mass) if mass.floors else 0.0
+        voids = _aligned_voids(mass, align_length, shift_x=shared_x)
         void_dept = _double_height_department(mass)
         mass_top = 0.0
 
         for floor in mass.floors:
             z0 = floor.level * height
-            pieces = _align_pieces_to_side(_program_rects(floor), align_length)
+            pieces = _aligned_floor_programs(floor, align_length, shift_x=shared_x)
             double_height = {
                 a.department: a.double_height for a in floor.allocations
             }

@@ -55,6 +55,8 @@ def _is_hard_gate_check(check: str) -> bool:
         return True
     if name.startswith("step_cantilever"):
         return True
+    if name.startswith("volume_collision"):
+        return True
     return False
 
 
@@ -81,16 +83,13 @@ def prefer_clean_splits(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
     Weird program splits are a deal-breaker — never promote them.
 
-    Prefer zero multi-floor fragmentation among clean cells. If every cell is
-    awkward, return an empty list (callers show "no legal clean scheme").
+    Contiguous multi-floor stacking is allowed. If every cell is awkward,
+    return an empty list (callers show "no legal clean scheme").
     """
     if not entries:
         return entries
     clean = [e for e in entries if not entry_has_awkward_split(e)]
-    if not clean:
-        return []
-    no_frag = [e for e in clean if entry_fragmentation(e) <= 1e-9]
-    return no_frag if no_frag else clean
+    return clean if clean else []
 
 
 def measure(result: Any, session: Any = None, archive: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -121,9 +120,10 @@ def measure(result: Any, session: Any = None, archive: dict[str, Any] | None = N
     awkward_fail = awkward > 1e-9
     split_in_limits = any(str(c.check).startswith("program_split") for c in limit_fails)
     effective_limit_fails = len(limit_fails) + (0 if split_in_limits or not awkward_fail else 1)
-    feasible = effective_limit_fails == 0 and not any(
-        str(c.check).startswith("anchor") and not c.passed for c in failed
-    )
+    anchor_fail = any(str(c.check).startswith("anchor") and not c.passed for c in failed)
+    hard_ok = effective_limit_fails == 0
+    # One acceptance gate: hard limits + anchors + no remaining validation fails.
+    accepted = bool(hard_ok and not anchor_fail and not failed and not awkward_fail)
     likeness = _likeness(aspects)
     anchor = _anchor_fit(failed, getattr(result, "validation", None) or [])
     pref_dist = preference_distance(result, session)
@@ -131,8 +131,11 @@ def measure(result: Any, session: Any = None, archive: dict[str, Any] | None = N
     public = _public_on_grade(masses)
 
     vector: dict[str, Any] = {
-        "feasible": bool(feasible and not failed and not awkward_fail),
-        "fits_limitations": effective_limit_fails == 0,
+        "feasible": accepted,
+        "accepted": accepted,
+        "hard_limits_ok": hard_ok,
+        # Archive / search "legal" means fully accepted — not hard-limits alone.
+        "fits_limitations": accepted,
         "failed_checks": len(failed) + (0 if split_in_limits or not awkward_fail else 1),
         "limit_fails": effective_limit_fails,
         "failed_kinds": sorted(
@@ -151,7 +154,9 @@ def measure(result: Any, session: Any = None, archive: dict[str, Any] | None = N
         "anchor_fit": anchor,
     }
     if edge is not None:
+        # Diagnostic only — a length/frontage cap is not a fill target.
         vector["street_edge"] = edge
+        vector["street_edge_role"] = "diagnostic"
     if public is not None:
         vector["public_on_grade"] = public
 
@@ -164,32 +169,20 @@ def measure(result: Any, session: Any = None, archive: dict[str, Any] | None = N
 
 
 def eval_composites(vector: dict[str, Any], session: Any = None) -> dict[str, float]:
-    """Four soft evaluation axes in [0, 1]. Hard gate is separate."""
+    """Four soft evaluation axes in [0, 1]. Hard gate is separate — do not re-score it."""
+    # Fragmentation here means disrupted (non-contiguous) stacks only.
     frag = float(vector.get("fragmentation") or 0.0)
-    awkward = float(vector.get("awkward_splits") or 0.0)
     public = vector.get("public_on_grade")
     public_score = float(public) if public is not None else 0.7
-    anchor = float(vector.get("anchor_fit") if vector.get("anchor_fit") is not None else 1.0)
-    program_coherence = (
-        0.28 * (1.0 - frag)
-        + 0.50 * (1.0 - awkward)
-        + 0.12 * public_score
-        + 0.10 * anchor
-    )
+    program_coherence = 0.40 * (1.0 - min(1.0, frag)) + 0.60 * public_score
 
     pref_dist = float(vector.get("preference_distance") or 0.0)
     preference_alignment = 1.0 - min(1.0, max(0.0, pref_dist))
 
     leftover = float(vector.get("leftover_area") or 0.0)
     likeness = float(vector.get("footprint_likeness") if vector.get("footprint_likeness") is not None else 0.5)
-    edge = vector.get("street_edge")
-    edge_score = float(edge) if edge is not None else 0.5
-    performance_efficiency = (
-        0.35 * (1.0 - leftover)
-        + 0.25 * likeness
-        + 0.20 * edge_score
-        + 0.20 * anchor
-    )
+    # Frontage fill is diagnostic only — a length cap is not a target.
+    performance_efficiency = 0.65 * (1.0 - leftover) + 0.35 * likeness
 
     robustness = _robustness_score(vector, session)
 
@@ -329,19 +322,14 @@ def _euclid(a: tuple[float, ...], b: tuple[float, ...]) -> float:
 
 
 def _robustness_score(vector: dict[str, Any], session: Any) -> float:
-    """Prefer an explicit probe score; else a structural proxy (not regrouping)."""
+    """Explicit probe when present; otherwise a neutral headroom proxy — never 1.0 untested."""
     if vector.get("_robustness_probe") is not None:
         return float(vector["_robustness_probe"])
-    if session is not None:
-        explore = (getattr(session, "constraints", None) or {}).get("explore") or {}
-        report = explore.get("robustness") or {}
-        if report.get("ran") and report.get("score") is not None:
-            return float(report["score"])
+    # Do not reuse another candidate's explore.robustness report here — that
+    # conflates probes across schemes. Untested → mid headroom from leftover only.
     leftover = float(vector.get("leftover_area") or 0.0)
-    anchor = float(vector.get("anchor_fit") if vector.get("anchor_fit") is not None else 1.0)
-    fits = 1.0 if vector.get("fits_limitations") else 0.0
-    # Headroom proxy: low leftover + anchor fit + legal.
-    return 0.45 * fits + 0.30 * (1.0 - leftover) + 0.25 * anchor
+    # 0.5 baseline (unknown) ± leftover headroom. Full utilization ≠ proven robust.
+    return max(0.0, min(1.0, 0.50 + 0.25 * (1.0 - leftover) - 0.15 * leftover))
 
 
 def _spread(areas: list[float]) -> float:
@@ -389,7 +377,12 @@ def _leftover(masses: list[Any]) -> float:
 
 
 def _fragmentation(masses: list[Any]) -> float:
-    """Share of departments that occupy more than one floor."""
+    """
+    Share of departments with a *disrupted* multi-floor presence.
+
+    Contiguous stacking (L0–L1–L2) is legitimate and scores 0. Only gaps
+    (L0+L2 with nothing on L1) count here; thin-slice awkwardness is separate.
+    """
     floors_of: dict[str, set[int]] = {}
     for mass in masses:
         for floor in getattr(mass, "floors", None) or []:
@@ -398,8 +391,14 @@ def _fragmentation(masses: list[Any]) -> float:
                 floors_of.setdefault(str(alloc.department), set()).add(level)
     if not floors_of:
         return 0.0
-    split = sum(1 for levels in floors_of.values() if len(levels) > 1)
-    return split / len(floors_of)
+    disrupted = 0
+    for levels in floors_of.values():
+        if len(levels) <= 1:
+            continue
+        ordered = sorted(levels)
+        if ordered[-1] - ordered[0] + 1 != len(ordered):
+            disrupted += 1
+    return disrupted / len(floors_of)
 
 
 def _awkward_floor_splits(masses: list[Any]) -> float:

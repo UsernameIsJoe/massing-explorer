@@ -498,11 +498,11 @@ def pin_department_to_floor(
             }
         department = matches[0]
 
-    if level < 0:
-        return {"ok": False, "error": "level must be >= 0 (0 = ground floor)"}
+    if level < -1:
+        return {"ok": False, "error": "level must be >= -1 (-1 = top floor, 0 = ground)"}
 
     mass = next((m for m in session.masses if department in m.departments), None)
-    if mass and level >= mass.story_count:
+    if mass and level >= 0 and level >= mass.story_count:
         return {
             "ok": False,
             "error": (
@@ -516,8 +516,30 @@ def pin_department_to_floor(
     return {
         "ok": True,
         "floor_pins": session.floor_pins,
-        "note": "Call solve_dimensions to re-allocate with this pin applied.",
+        "note": (
+            "Top-floor pin (-1) resolves to the mass's uppermost level at allocate time."
+            if int(level) < 0
+            else "Call solve_dimensions to re-allocate with this pin applied."
+        ),
     }
+
+
+def resolved_floor_pins(session: StudySession) -> dict[str, int]:
+    """Absolute levels for allocate/solve. Relational 'top' (-1) follows mass height."""
+    kinds = (session.constraints or {}).get("floor_pin_kinds") or {}
+    out: dict[str, int] = {}
+    for dept, raw in (session.floor_pins or {}).items():
+        try:
+            lvl = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if lvl < 0 or str(kinds.get(dept) or "") == "top":
+            mass = next((m for m in session.masses if dept in m.departments), None)
+            stories = int(getattr(mass, "story_count", 1) or 1) if mass else 1
+            out[dept] = max(0, stories - 1)
+        else:
+            out[dept] = lvl
+    return out
 
 
 def unpin_department(session: StudySession, department: str) -> dict[str, Any]:

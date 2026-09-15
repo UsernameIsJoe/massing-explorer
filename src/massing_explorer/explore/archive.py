@@ -87,18 +87,12 @@ def insert(
     }
     cells = archive.setdefault("cells", {})
     current = cells.get(key)
-    if current and str(current.get("reason") or "").startswith("COVER: stated"):
-        # Keep the brief's drawing as the elite for this cell.
-        if legal and not current.get("fits_limitations"):
-            archive["legal"] = int(archive.get("legal") or 0) + 1
-            current["fits_limitations"] = True
-            current["performance"] = performance
-            current["idea"] = entry["idea"]
-        refresh_frontier(archive)
-        return current
     if legal:
-        archive["legal"] = int(archive.get("legal") or 0) + (0 if current and current.get("fits_limitations") else 1)
+        archive["legal"] = int(archive.get("legal") or 0) + (
+            0 if current and current.get("fits_limitations") else 1
+        )
         if current is None or not current.get("fits_limitations"):
+            # Illegal → legal (including stated COVER) replaces atomically.
             cells[key] = entry
         elif _better(performance, current.get("performance") or {}):
             cells[key] = entry
@@ -146,12 +140,26 @@ def explain(archive: dict[str, Any], grouping_locked: bool) -> str:
             f"{' (stopped: stagnant)' if cover.get('stagnant') else ''}"
             f"{' (map incomplete at cap)' if cover.get('incomplete') else ''}."
         )
+        if cover.get("csp_truncated"):
+            bits.append("CSP partition enumeration was truncated.")
+        cov = cover.get("partition_coverage")
+        if isinstance(cov, (int, float)) and cov > 0:
+            bits.append(
+                f"COVER searched {int((archive.get('cover_plan') or {}).get('partitions') or 0)} "
+                f"of ~{int(cover.get('csp_feasible') or 0)} feasible organizations."
+            )
     return " ".join(bits)
 
 
 def _better(new: dict[str, Any], old: dict[str, Any]) -> bool:
-    """Prefer fewer failed checks. Not a quality score."""
-    return int(new.get("failed_checks") or 0) < int(old.get("failed_checks") or 0)
+    """Among accepted elites, prefer higher architectural reward; else fewer fails."""
+    from .saturate import architectural_reward
+
+    new_fail = int(new.get("failed_checks") or 0)
+    old_fail = int(old.get("failed_checks") or 0)
+    if new_fail != old_fail:
+        return new_fail < old_fail
+    return architectural_reward(new) > architectural_reward(old) + 1e-9
 
 
 def _closer_illegal(new_entry: dict[str, Any], old_entry: dict[str, Any]) -> bool:

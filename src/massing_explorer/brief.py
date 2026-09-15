@@ -4644,22 +4644,24 @@ def apply_parsed_brief(
     if floor_pins:
         from .tools import pin_department_to_floor
 
-        pref_stories = parsed.constraints.get("preferred_stories")
-        if pref_stories is not None:
-            top_level = max(0, int(round(float(pref_stories))) - 1)
-        elif parsed.max_stories is not None:
-            top_level = max(0, int(parsed.max_stories) - 1)
-        else:
-            top_level = 2
+        kinds = dict(session.constraints.get("floor_pin_kinds") or {})
+        kinds.update(dict(parsed.constraints.get("floor_pin_kinds") or {}))
         for dept, level in floor_pins.items():
             try:
                 lvl = int(level)
             except (TypeError, ValueError):
                 lvl = -1
+            # Keep relational "top" as sentinel -1; resolve per candidate height later.
             if lvl < 0:
-                lvl = int(top_level)
-            pin_department_to_floor(session, dept, lvl)
-            reading_notes.append(f"pinned {dept} to level {lvl}")
+                kinds[str(dept)] = "top"
+                pin_department_to_floor(session, dept, -1)
+                reading_notes.append(f"pinned {dept} to top (relational)")
+            else:
+                kinds[str(dept)] = str(kinds.get(dept) or "fixed")
+                pin_department_to_floor(session, dept, lvl)
+                reading_notes.append(f"pinned {dept} to level {lvl}")
+        if kinds:
+            session.constraints["floor_pin_kinds"] = kinds
     if parsed.constraints.get("stack_above"):
         session.constraints["stack_above"] = list(parsed.constraints["stack_above"])
     # Seed COVER envelope from stated scheme preference (search may still sample others).

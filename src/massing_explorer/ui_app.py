@@ -2582,7 +2582,15 @@ class Handler(BaseHTTPRequestHandler):
                 400,
             )
             return
-        out = apply_parsed_brief(session, parsed)
+        # Same orchestration as terminal chat: optional LLM planner into search.
+        client = None
+        try:
+            from .ollama_client import OllamaClient
+
+            client = OllamaClient()
+        except Exception:
+            client = None
+        out = apply_parsed_brief(session, parsed, client=client)
         if out.get("skipped"):
             self._json(
                 {
@@ -2862,6 +2870,20 @@ class Handler(BaseHTTPRequestHandler):
                 400,
             )
             return
+        # Preference feedback retargets local search under the new taste weights.
+        try:
+            from .explore.controller import run_search
+
+            refined = run_search(session, mode="refine")
+            if refined:
+                applied = dict(applied)
+                applied["reply"] = (
+                    str(applied.get("reply") or "")
+                    + " REFINE reran under updated taste."
+                )
+                session.save()
+        except Exception:
+            pass
 
         config_path = session.config_path or _STATE.get("config_path") or (
             str(DEFAULT_CONFIG) if DEFAULT_CONFIG.exists() else None

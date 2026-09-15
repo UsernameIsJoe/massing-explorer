@@ -65,18 +65,34 @@ class TestViolationDistance(unittest.TestCase):
         self.assertGreater(far["edge_overrun"], 0.3)
         self.assertEqual(far["split"], 1.0)
 
-    def test_search_reward_stays_zero_for_near_feasible(self) -> None:
-        self.assertEqual(
-            search_reward(
-                {
-                    "fits_limitations": False,
-                    "feasibility_distance": 0.01,
-                    "program_coherence": 1.0,
-                    "preference_alignment": 1.0,
-                }
-            ),
-            0.0,
+    def test_search_reward_grades_near_feasible(self) -> None:
+        near = search_reward(
+            {
+                "fits_limitations": False,
+                "feasibility_distance": 0.01,
+                "program_coherence": 1.0,
+                "preference_alignment": 1.0,
+            }
         )
+        far = search_reward(
+            {
+                "fits_limitations": False,
+                "feasibility_distance": 0.9,
+                "program_coherence": 1.0,
+            }
+        )
+        legal = search_reward(
+            {
+                "fits_limitations": True,
+                "feasible": True,
+                "program_coherence": 0.8,
+                "preference_alignment": 0.8,
+                "performance_efficiency": 0.5,
+                "robustness": 0.5,
+            }
+        )
+        self.assertGreater(near, far)
+        self.assertGreater(legal, near)
 
 
 class TestArchiveFrontier(unittest.TestCase):

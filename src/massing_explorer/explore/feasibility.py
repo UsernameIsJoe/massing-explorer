@@ -2,8 +2,8 @@
 Distance-to-feasibility for illegal COVER samples.
 
 Hard limitations only. Soft prefs (preferred stories / preferred ratio) do
-not enter this vector. search_reward stays 0 for illegal schemes; this score
-ranks a near-feasible frontier for REPAIR / MCTS roots.
+not enter this vector. Illegal search_reward is graded by this distance;
+accepted schemes use architectural_reward.
 """
 
 from __future__ import annotations
@@ -245,6 +245,37 @@ def attach_feasibility(
     viol = violations_from_result(result, session, awkward=awkward)
     if awkward:
         viol["split"] = 1.0
+    owners: dict[str, list[str]] = {}
+    for check in getattr(result, "validation", None) or []:
+        if getattr(check, "passed", True):
+            continue
+        raw = str(getattr(check, "check", "") or "")
+        kind = _kind(raw)
+        parts = raw.split(":")
+        mass_id = parts[1] if len(parts) > 1 else ""
+        if not mass_id and session is not None:
+            msg = str(getattr(check, "message", "") or "")
+            for mass in getattr(session, "masses", None) or []:
+                if mass.id in msg or (mass.name and mass.name in msg):
+                    mass_id = mass.id
+                    break
+        bucket = None
+        if kind in _EDGE_KINDS or kind.startswith("site_"):
+            bucket = "edge_overrun"
+        elif kind.startswith("program_split"):
+            bucket = "split"
+        elif kind.startswith("max_stories") or kind == "stories":
+            bucket = "stories"
+        elif kind.startswith("ratio_band"):
+            bucket = "ratio_hard"
+        elif kind.startswith("min_edge"):
+            bucket = "min_edge_short"
+        if bucket and mass_id:
+            owners.setdefault(bucket, [])
+            if mass_id not in owners[bucket]:
+                owners[bucket].append(mass_id)
+    if owners:
+        viol["owners"] = owners
     vector["violations"] = viol
     vector["feasibility_distance"] = feasibility_distance(viol)
     return vector

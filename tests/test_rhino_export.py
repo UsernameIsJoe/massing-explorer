@@ -321,3 +321,99 @@ class TestRhinoExport(unittest.TestCase):
                         and min(a.Max.Z, b.Max.Z) - max(a.Min.Z, b.Min.Z) > 0.5
                     )
                     self.assertFalse(overlap, f"{name_a} overlaps {name_b}")
+
+    def test_void_and_ground_share_width_frame(self) -> None:
+        """Art beside a void must not flush onto the DH column."""
+        from massing_explorer.rhino_export import (
+            colliding_solid_pairs,
+            iter_study_solid_boxes,
+        )
+
+        hpe = "HEALTH & PHYSICAL EDUCATION"
+        art = "ART & MUSIC"
+        # Ground only has Art at x=60 — gym is represented by the void column.
+        # Without a shared width flush, Art alone would slide to x=0 onto the void.
+        ground = FloorPlate(
+            level=0,
+            width_ft=100,
+            length_ft=100,
+            area_sf=10000,
+            programs=[hpe, art],
+            allocations=[
+                ProgramAllocation(
+                    department=hpe,
+                    gsf=6000,
+                    double_height=True,
+                    footprints=[],
+                ),
+                ProgramAllocation(
+                    department=art,
+                    gsf=4000,
+                    footprints=[FootprintRect(60, 0, 40, 100)],
+                ),
+            ],
+        )
+        upper = FloorPlate(
+            level=1,
+            width_ft=100,
+            length_ft=100,
+            area_sf=10000,
+            programs=[art],
+            voids=[VoidRegion(hpe, 60, 100, 6000, x_ft=0, y_ft=0)],
+            allocations=[
+                ProgramAllocation(
+                    department=art,
+                    gsf=4000,
+                    footprints=[FootprintRect(60, 0, 40, 100)],
+                )
+            ],
+        )
+        result = MassingStudyResult(
+            study_id="shared_frame",
+            masses=[_mass("athletics", "Athletics", [ground, upper])],
+        )
+        boxes = iter_study_solid_boxes(result, 14.0)
+        hits = colliding_solid_pairs(boxes)
+        self.assertEqual(hits, [], f"unexpected overlaps: {hits[:3]}")
+        arts = [b for b in boxes if b["department"] == art and b["level"] == 0]
+        voids = [b for b in boxes if b["role"] == "void_column"]
+        self.assertTrue(arts and voids)
+        # Art stays on the far side of the width; void keeps the near side.
+        self.assertGreater(min(b["y0"] for b in arts), 50)
+        self.assertLess(max(b["y1"] for b in voids), 65)
+
+    def test_volume_collision_check_rejects_overlapping_solids(self) -> None:
+        from massing_explorer.explore.performance import measure
+        from massing_explorer.solver import check_volume_collisions
+
+        # Two full-plate programs on the same floor → clear AABB collision.
+        plate = FloorPlate(
+            level=0,
+            width_ft=40,
+            length_ft=80,
+            area_sf=3200,
+            programs=["A", "B"],
+            allocations=[
+                ProgramAllocation(
+                    department="A",
+                    gsf=3200,
+                    footprints=[FootprintRect(0, 0, 40, 80)],
+                ),
+                ProgramAllocation(
+                    department="B",
+                    gsf=3200,
+                    footprints=[FootprintRect(0, 0, 40, 80)],
+                ),
+            ],
+        )
+        result = MassingStudyResult(
+            study_id="collide",
+            masses=[_mass("m1", "Mass 1", [plate])],
+        )
+        result.validation.extend(check_volume_collisions(result, story_height_ft=14))
+        failed = [c for c in result.validation if not c.passed]
+        self.assertTrue(failed)
+        self.assertTrue(all(str(c.check).startswith("volume_collision") for c in failed))
+        perf = measure(result)
+        self.assertFalse(perf["fits_limitations"])
+        self.assertFalse(perf["feasible"])

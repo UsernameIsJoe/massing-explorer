@@ -252,6 +252,28 @@ class TestEnvelopeWidths(unittest.TestCase):
         self.assertLess(min(long), min(compact))
 
 
+class TestContiguousStacking(unittest.TestCase):
+    def test_contiguous_multi_floor_is_not_fragmentation(self) -> None:
+        from massing_explorer.explore.performance import _fragmentation
+
+        floor = lambda level, dept: SimpleNamespace(
+            level=level,
+            allocations=[SimpleNamespace(department=dept)],
+        )
+        masses = [
+            SimpleNamespace(
+                floors=[floor(0, "CORE"), floor(1, "CORE"), floor(2, "CORE")]
+            )
+        ]
+        self.assertEqual(_fragmentation(masses), 0.0)
+        gap = [
+            SimpleNamespace(
+                floors=[floor(0, "CORE"), floor(2, "CORE")]
+            )
+        ]
+        self.assertGreater(_fragmentation(gap), 0.0)
+
+
 class TestStoryDistance(unittest.TestCase):
     def test_story_violation_adds_distance(self) -> None:
         story = violations_from_checks(
@@ -261,12 +283,22 @@ class TestStoryDistance(unittest.TestCase):
         self.assertEqual(story["stories"], 1.0)
         self.assertGreater(feasibility_distance(story), feasibility_distance(none))
 
-    def test_split_nudge_bumps_stories(self) -> None:
+    def test_split_nudge_prefers_envelope_not_stories(self) -> None:
         session = SimpleNamespace(
             constraints={"max_stories": 4, "cover_envelope": "balanced", "story_lock": {}},
             masses=[_mass("a", ["Art", "Admin"], 1)],
         )
         label = _nudge_for_violations(session, {"split": 1.0})
+        self.assertEqual(label, "envelope")
+        self.assertEqual(session.constraints["cover_envelope"], "compact")
+        self.assertEqual(session.masses[0].story_count, 1)
+
+    def test_edge_overrun_nudge_bumps_stories(self) -> None:
+        session = SimpleNamespace(
+            constraints={"max_stories": 4, "cover_envelope": "balanced", "story_lock": {}},
+            masses=[_mass("a", ["Art", "Admin"], 1)],
+        )
+        label = _nudge_for_violations(session, {"edge_overrun": 0.2})
         self.assertEqual(label, "stories+1")
         self.assertEqual(session.masses[0].story_count, 2)
 
@@ -353,6 +385,19 @@ class TestCoverPartitionBudget(unittest.TestCase):
         found = cover_partition_candidates(session, limit=4)
         self.assertEqual(len(found), 3)
         self.assertEqual([f["reason"] for f in found], ["stated", "alt", "alt2"])
+
+    def test_local_partition_moves_extend_beyond_shortlist(self) -> None:
+        from massing_explorer.explore.partitions import local_partition_candidates
+
+        session = self._session(n_atoms=4, k_min=2, k_max=3)
+        found = local_partition_candidates(session, limit=6)
+        self.assertGreaterEqual(len(found), 1)
+        for item in found:
+            n = len(item["groups"])
+            self.assertGreaterEqual(n, 2)
+            self.assertLessEqual(n, 3)
+            depts = [d for g in item["groups"] for d in g["departments"]]
+            self.assertEqual(len(depts), len(set(depts)))
 
 
 if __name__ == "__main__":

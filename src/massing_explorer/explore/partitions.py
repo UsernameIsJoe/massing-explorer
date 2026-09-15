@@ -97,6 +97,172 @@ def cover_partition_candidates(session: Any, *, limit: int = 4) -> list[dict[str
     return out
 
 
+def local_partition_candidates(session: Any, *, limit: int = 4) -> list[dict[str, Any]]:
+    """
+    Nearby legal regroupings: move or swap unlocked departments.
+
+    Extends search past the early COVER shortlist without re-enumerating Bell.
+    Preserves keep-together glue, keep-apart, alone, and mass-count bounds.
+    """
+    if grouping_is_required(session):
+        return []
+    from .strategy import (
+        required_alone,
+        required_apart,
+        required_mass_bounds,
+        required_together,
+    )
+
+    masses = list(session.masses or [])
+    if len(masses) < 2:
+        return []
+    home: dict[str, int] = {}
+    blocks: list[list[str]] = []
+    stories: list[int] = []
+    for i, mass in enumerate(masses):
+        depts = [str(d) for d in (mass.departments or []) if d]
+        blocks.append(depts)
+        stories.append(int(mass.story_count or 2))
+        for d in depts:
+            home[d] = i
+    if len(home) < 2:
+        return []
+
+    # Glue keep-together into moveable units.
+    parent = {d: d for d in home}
+
+    def find(d: str) -> str:
+        while parent[d] != d:
+            parent[d] = parent[parent[d]]
+            d = parent[d]
+        return d
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for pair in required_together(session):
+        members = [d for d in pair if d in home]
+        for a, b in zip(members, members[1:]):
+            union(a, b)
+    alone = set(required_alone(session))
+    units: dict[str, list[str]] = {}
+    for d in home:
+        units.setdefault(find(d), []).append(d)
+    unit_list = list(units.values())
+
+    apart_pairs = [frozenset(p) for p in required_apart(session)]
+    for dept in alone:
+        for other in home:
+            if other != dept:
+                apart_pairs.append(frozenset({dept, other}))
+    bounds = required_mass_bounds(session)
+
+    def legal(blocks_now: list[list[str]]) -> bool:
+        nonempty = [b for b in blocks_now if b]
+        if bounds:
+            k_min, k_max = int(bounds[0]), int(bounds[1])
+            if not (k_min <= len(nonempty) <= k_max):
+                return False
+        homes: dict[str, int] = {}
+        for i, b in enumerate(nonempty):
+            for d in b:
+                homes[d] = i
+        for pair in apart_pairs:
+            members = [d for d in pair if d in homes]
+            if len(members) >= 2 and len({homes[d] for d in members}) == 1:
+                return False
+        return True
+
+    def to_groups(blocks_now: list[list[str]]) -> list[dict[str, Any]]:
+        out = []
+        for i, depts in enumerate(blocks_now):
+            if not depts:
+                continue
+            if i < len(masses) and set(depts) & set(masses[i].departments or []):
+                mid = masses[i].id
+                name = masses[i].name
+                st = stories[i]
+            else:
+                mid = f"m{len(out)}"
+                name = f"Mass {len(out) + 1}"
+                st = 2
+            out.append(
+                {
+                    "id": mid,
+                    "name": name,
+                    "departments": list(depts),
+                    "story_count": st,
+                }
+            )
+        used: set[str] = set()
+        for g in out:
+            base = str(g["id"])
+            nid = base
+            n = 2
+            while nid in used:
+                nid = f"{base}_{n}"
+                n += 1
+            used.add(nid)
+            g["id"] = nid
+        return out
+
+    stated = partition_signature(blocks)
+    proposals: list[dict[str, Any]] = []
+    seen: set[frozenset[frozenset[str]]] = set()
+
+    def push(blocks_now: list[list[str]], reason: str) -> None:
+        if not legal(blocks_now):
+            return
+        groups = to_groups(blocks_now)
+        sig = partition_signature(groups)
+        if sig == stated or sig in seen:
+            return
+        seen.add(sig)
+        proposals.append({"groups": groups, "reason": reason})
+
+    # Moves: relocate a glued unit onto another mass (or open a new mass if bounds allow).
+    for unit in unit_list:
+        src = home[unit[0]]
+        for dst in range(len(blocks)):
+            if dst == src:
+                continue
+            nxt = [list(b) for b in blocks]
+            for d in unit:
+                if d in nxt[src]:
+                    nxt[src].remove(d)
+            nxt[dst].extend(unit)
+            push(nxt, f"move {','.join(unit)} → mass {dst}")
+        # Open a new mass when allowed.
+        if bounds is None or len([b for b in blocks if b]) < int(bounds[1]):
+            nxt = [list(b) for b in blocks]
+            for d in unit:
+                if d in nxt[src]:
+                    nxt[src].remove(d)
+            nxt.append(list(unit))
+            push(nxt, f"extract {','.join(unit)}")
+
+    # Swaps: exchange two units on different masses.
+    for i, left in enumerate(unit_list):
+        for right in unit_list[i + 1 :]:
+            a, b = home[left[0]], home[right[0]]
+            if a == b:
+                continue
+            nxt = [list(x) for x in blocks]
+            for d in left:
+                if d in nxt[a]:
+                    nxt[a].remove(d)
+            for d in right:
+                if d in nxt[b]:
+                    nxt[b].remove(d)
+            nxt[a].extend(right)
+            nxt[b].extend(left)
+            push(nxt, f"swap {','.join(left)} ↔ {','.join(right)}")
+
+    return proposals[: max(0, int(limit))]
+
+
 def apply_partition(session: Any, groups: list[dict[str, Any]]) -> None:
     """Write one partition onto the study. Drops widths and pairings for vanished masses."""
     from ..tools import set_grouping

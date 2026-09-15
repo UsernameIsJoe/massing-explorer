@@ -186,10 +186,27 @@ def _simulate_tree(
         node = root
         while (
             node.children
-            and all(child.visits > 0 for child in node.children)
             and len(path) < depth
             and node.kind not in {"illegal", "unsupported"}
         ):
+            # Prefer depth: descend into any child with visits; expand waiting
+            # siblings only when no unvisited remain under PUCT among visited.
+            waiting = [c for c in node.children if c.visits == 0]
+            if waiting and not all(c.visits > 0 for c in node.children):
+                # Allow deepening before every sibling is probed once.
+                visited = [c for c in node.children if c.visits > 0]
+                if visited and len(path) + 1 < depth:
+                    deep = max(visited, key=lambda child: _puct(child, node.visits))
+                    if deep.visits >= 2 or len(waiting) == 0:
+                        node = deep
+                        _play(session, node)
+                        path.append(node)
+                        if node.kind in {"illegal", "unsupported"}:
+                            break
+                        continue
+                break
+            if not all(child.visits > 0 for child in node.children):
+                break
             node = max(node.children, key=lambda child: _puct(child, node.visits))
             _play(session, node)
             path.append(node)
@@ -202,7 +219,7 @@ def _simulate_tree(
                     node,
                     session,
                     prior_actions if node is root else [],
-                    probe_unsupported=node is root,
+                    probe_unsupported=False,
                 )
                 node.expanded = True
             waiting = [child for child in node.children if child.visits == 0]
@@ -315,7 +332,8 @@ def cover_roots(
     return picked or [current]
 
 
-def catalog_actions(session: Any, include_unsupported: bool = True) -> list[dict[str, Any]]:
+def catalog_actions(session: Any, include_unsupported: bool = False) -> list[dict[str, Any]]:
+    """Typed search actions. Unsupported courtyard is opt-in only (tests / diagnose)."""
     """Local typed neighbors. Width is filled by realize, not by catalog steps."""
     from .topology import pairing_proposals, stated_frontage_ft, topology_is_required
 
@@ -354,10 +372,14 @@ def catalog_actions(session: Any, include_unsupported: bool = True) -> list[dict
             actions.append({"op": "CLEAR_PAIRINGS"})
     if not grouping_is_required(session):
         try:
-            from .partitions import cover_partition_candidates
+            from .partitions import cover_partition_candidates, local_partition_candidates
 
-            # Prefer the COVER 12–20 pool (not the UI CSP 5 / old cap=3).
-            for item in cover_partition_candidates(session, limit=4):
+            # COVER pool for long-range jumps; local moves extend past the shortlist.
+            for item in cover_partition_candidates(session, limit=3):
+                groups = item.get("groups") or []
+                if groups:
+                    actions.append({"op": "APPLY_PARTITION", "groups": groups})
+            for item in local_partition_candidates(session, limit=3):
                 groups = item.get("groups") or []
                 if groups:
                     actions.append({"op": "APPLY_PARTITION", "groups": groups})
@@ -392,7 +414,13 @@ def action_key(action: dict[str, Any] | None) -> str:
     if action.get("masses") or action.get("mass_ids"):
         bits.append("m=" + ",".join(str(x) for x in (action.get("masses") or action.get("mass_ids") or [])))
     if action.get("groups"):
-        bits.append("g=" + "|".join(",".join(str(x) for x in g) for g in action.get("groups") or []))
+        parts = []
+        for g in action.get("groups") or []:
+            if isinstance(g, dict):
+                parts.append(",".join(sorted(str(x) for x in (g.get("departments") or []))))
+            else:
+                parts.append(",".join(str(x) for x in g))
+        bits.append("g=" + "|".join(parts))
     return "|".join(bits)
 
 
@@ -469,14 +497,17 @@ def _play(session: Any, node: _Node) -> None:
 
 
 def _score(session: Any, archive: dict[str, Any], node: _Node, weights: dict[str, float] | None = None) -> float:
-    if node.kind in {"illegal", "unsupported", "pending"}:
+    if node.kind in {"unsupported", "pending"}:
+        return 0.0
+    if node.kind == "illegal":
+        # Graded signal from violation distance when the action itself failed.
         return 0.0
     if getattr(session, "program", None) is None:
         return 0.6 if node.kind in {"applied", "root", "cover_root"} else 0.0
     from .realize import realize
     from .saturate import search_reward
 
-    result, performance = realize(session)
+    result, performance = realize(session, weights=weights)
     archive_mod.insert(
         archive,
         session,

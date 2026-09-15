@@ -2,15 +2,11 @@
 COVER probe encoding — the strategy feature space for novelty and BO.
 
 Product language still names nine axes. Internally, program organization is a
-pairwise same-mass block (not a SHA scalar), followed by the other eight
-scalars. Exact feet are not coordinates; they are filled by realize(s).
+pairwise same-mass block (not a SHA scalar), followed by normalized scalars.
+Exact feet are not coordinates; they are filled by realize(s).
 
-Courtyard / podium / perpendicular wings stay unsupported and are not sample
-targets; topology only encodes drawable kinds (independent / paired, plus
-L-leftover when the void layout already exists).
-
-Distance today is isotropic RBF (shared ℓ). Per-axis length scales (ARD) can
-plug in later without renaming these axes.
+Heights keep mass ownership (order by mass id). Pins keep department + level.
+Plate profile is part of geometric character.
 """
 
 from __future__ import annotations
@@ -40,7 +36,8 @@ def encode_strategy(strategy: dict[str, Any] | None) -> list[float]:
     """
     Strategy vector: pairwise P-block + eight normalized scalars.
 
-    No invented feet. No unsupported courtyard code path.
+    Story and pin axes are ownership-sensitive so swapping which mass is tall,
+    or which department is pinned where, changes the encoding.
     """
     strategy = strategy or {}
     program = strategy.get("P") or {}
@@ -53,27 +50,34 @@ def encode_strategy(strategy: dict[str, Any] | None) -> list[float]:
             str(m.get("id") or i): list(m.get("departments") or [])
             for i, m in enumerate(strategy["masses"])
         }
-    stories = [float(v) for v in (geom.get("stories") or {}).values()]
-    if not stories and strategy.get("masses"):
-        stories = [float(m.get("stories") or 0) for m in strategy["masses"]]
-
-    mean_st = sum(stories) / max(len(stories), 1)
-    artic = 0.0
-    if len(stories) > 1:
-        artic = (sum((s - mean_st) ** 2 for s in stories) / len(stories)) ** 0.5
+    story_map = dict(geom.get("stories") or {})
+    if not story_map and strategy.get("masses"):
+        story_map = {
+            str(m.get("id") or i): float(m.get("stories") or 0)
+            for i, m in enumerate(strategy["masses"])
+        }
+    # Ownership-sensitive story signatures (sorted mass ids).
+    mass_ids = sorted(str(k) for k in story_map.keys())
+    stories_ord = [float(story_map.get(mid) or 0.0) for mid in mass_ids]
+    if not stories_ord and strategy.get("masses"):
+        stories_ord = [float(m.get("stories") or 0) for m in strategy["masses"]]
+    n_st = max(len(stories_ord), 1)
+    # Weighted moments distinguish [3,1] from [1,3] for the same mass order.
+    weight_sum = sum(range(1, n_st + 1)) or 1
+    mean_st = sum(s * (i + 1) for i, s in enumerate(stories_ord)) / weight_sum
+    artic = sum(s * ((i + 1) ** 2) for i, s in enumerate(stories_ord)) / (n_st * 25.0)
 
     sizes = [len(depts or []) for depts in partition.values()]
     if not sizes and strategy.get("masses"):
         sizes = [len(m.get("departments") or []) for m in strategy["masses"]]
     total = sum(sizes) or 1
-    # Even distribution → 1; one mass holds everything → 0.
     balance = 1.0 - (max(sizes) / total if sizes else 0.0)
 
     kind = str(topo.get("kind") or "independent_bars")
     if kind == "paired_bars":
         topology = 1.0
     elif topo.get("l_leftover"):
-        topology = 0.35  # drawable L around a void, not a courtyard
+        topology = 0.35
     else:
         topology = 0.0
 
@@ -81,21 +85,27 @@ def encode_strategy(strategy: dict[str, Any] | None) -> list[float]:
 
     env = str(geom.get("envelope") or "balanced")
     if env == "compact":
-        geometric = 0.0
+        env_v = 0.0
     elif env == "elongated":
-        geometric = 1.0
+        env_v = 1.0
     else:
-        geometric = 0.5
+        env_v = 0.5
+    plate = 1.0 if str(geom.get("plate_profile") or "uniform") == "step" else 0.0
+    geometric = 0.7 * env_v + 0.3 * plate
 
     pins = vertical.get("pins") or {}
     dh = vertical.get("double_height") or []
-    vertical_org = min(
-        1.0,
-        0.65 * min(1.0, float(len(pins)) / 6.0)
-        + 0.35 * (1.0 if dh else 0.0),
-    )
+    pin_items = sorted((str(k), int(v)) for k, v in pins.items())
+    vertical_org = 0.0
+    for i, (dept, lvl) in enumerate(pin_items[:6]):
+        h = (sum(ord(c) for c in dept) % 97) / 97.0
+        # -1 / top sentinel encodes as uppermost cue (1.0), not ground.
+        lvl_n = 1.0 if int(lvl) < 0 else min(1.0, (int(lvl) + 1) / 5.0)
+        vertical_org += (0.55 * h + 0.45 * lvl_n) / 6.0
+    if dh:
+        vertical_org = min(1.0, vertical_org + 0.12)
 
-    n_mass = float(program.get("mass_count") or len(sizes) or len(stories) or 0)
+    n_mass = float(program.get("mass_count") or len(sizes) or len(stories_ord) or 0)
 
     return pairwise_partition_block(partition) + [
         min(1.0, n_mass / 8.0),
@@ -103,8 +113,8 @@ def encode_strategy(strategy: dict[str, Any] | None) -> list[float]:
         topology,
         loading,
         min(1.0, mean_st / 5.0),
-        min(1.0, artic / 3.0),
-        vertical_org,
+        min(1.0, artic),
+        min(1.0, vertical_org),
         geometric,
     ]
 

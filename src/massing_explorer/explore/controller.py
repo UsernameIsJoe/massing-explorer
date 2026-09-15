@@ -69,6 +69,11 @@ def run_search(session: Any, mode: str = "cover", client: Any = None, plan: Any 
         if should_diagnose(archive):
             diagnose_report = diagnose(session, archive, evaluate=_evaluate)
         learning = _prepare_learn(archive, learning)
+        # After preference evidence exists, refine under the updated taste.
+        if archive_mod.legal_cells(archive) and any(
+            abs(float(v or 0)) > 1e-9 for v in (learning.get("weights") or {}).values()
+        ):
+            refine_report = _refine(session, archive)
     else:
         if not archive.get("attempts"):
             _cover(session, archive)
@@ -125,21 +130,36 @@ def run_search(session: Any, mode: str = "cover", client: Any = None, plan: Any 
 
     weights = (learning.get("weights") or {}) if learning else {}
     preferred = archive.get("stated_partition")
-    kept = _pick_kept(archive, weights, preferred)
-    tasted = bool(weights and any(abs(float(v)) > 1e-9 for v in weights.values()))
-    if session.constraints.get("keep_stated_drawing") and preferred and not tasted:
-        stated_cells = [
-            e
-            for e in (archive.get("cells") or {}).values()
-            if e.get("partition") == preferred
-        ]
-        if stated_cells:
-            legal_stated = [e for e in stated_cells if e.get("fits_limitations")]
-            kept = (
-                max(legal_stated, key=lambda e: taste_weight(e, weights))
-                if legal_stated
-                else min(stated_cells, key=_cell_badness)
-            )
+    # Probe a few leading elites so robustness enters the same objective as search.
+    from .performance import eval_composites
+
+    held_before_probe = archive_mod.capture(session)
+    for entry in sorted(
+        archive_mod.legal_cells(archive),
+        key=lambda e: taste_weight(e, weights),
+        reverse=True,
+    )[:3]:
+        try:
+            archive_mod.restore_entry(session, entry)
+            probe = probe_strategy(session)
+            if probe.get("ran") and probe.get("score") is not None:
+                perf = dict(entry.get("performance") or {})
+                perf["_robustness_probe"] = float(probe["score"])
+                perf.update(eval_composites(perf, session))
+                entry["performance"] = perf
+                cell_id = entry.get("cell")
+                if cell_id and cell_id in (archive.get("cells") or {}):
+                    archive["cells"][cell_id]["performance"] = perf
+        except Exception:
+            continue
+    archive_mod.restore_snapshot(session, held_before_probe)
+
+    kept = _pick_kept(
+        archive,
+        weights,
+        preferred,
+        keep_stated=bool(session.constraints.get("keep_stated_drawing")),
+    )
     if kept:
         archive_mod.restore_entry(session, kept)
     robust_report = {"ran": False}
@@ -151,8 +171,6 @@ def run_search(session: Any, mode: str = "cover", client: Any = None, plan: Any 
             score = float(robust_report["score"])
             perf = dict(kept.get("performance") or {})
             perf["_robustness_probe"] = score
-            from .performance import eval_composites
-
             perf.update(eval_composites(perf, session))
             kept["performance"] = perf
             cells = archive.get("cells") or {}
@@ -677,6 +695,21 @@ def _refine(session: Any, archive: dict[str, Any]) -> dict[str, Any]:
             continue
         archive_mod.restore_entry(session, elite)
         actions = catalog_actions(session, include_unsupported=False)
+        # Prefer structural moves before story bumps so a small budget can regroup.
+        priority = {
+            "APPLY_PARTITION": 0,
+            "PAIR_MASSES": 1,
+            "CLEAR_PAIRINGS": 1,
+            "PIN_GROUND": 2,
+            "SET_LOADING": 3,
+            "SET_ENVELOPE": 3,
+            "SET_PLATE_PROFILE": 3,
+            "SET_STORIES": 4,
+        }
+        actions = sorted(
+            actions,
+            key=lambda a: (priority.get(str(a.get("op") or ""), 5), str(a.get("op") or "")),
+        )
         taken = 0
         for action in actions:
             if taken >= allowed or tuned >= remaining or sat.stop():
@@ -752,34 +785,24 @@ def _pick_kept(
     archive: dict[str, Any],
     weights: dict[str, float] | None,
     preferred_partition: str | None = None,
+    *,
+    keep_stated: bool = False,
 ) -> dict[str, Any]:
     from .performance import prefer_clean_splits
 
-    tasted = bool(weights and any(abs(float(v)) > 1e-9 for v in (weights or {}).values()))
-    if not tasted:
-        stated = prefer_clean_splits(
-            [
-                e
-                for e in (archive.get("cells") or {}).values()
-                if str(e.get("reason") or "").startswith("COVER: stated")
-                and e.get("fits_limitations")
-            ]
-        )
-        if stated:
-            return max(stated, key=lambda e: taste_weight(e, weights))
     legal = prefer_clean_splits(archive_mod.legal_cells(archive))
     if legal:
-        if not tasted and preferred_partition:
+        # Generated starting scheme does not override better discoveries unless
+        # the brief asked to keep the stated drawing.
+        if keep_stated and preferred_partition:
             same = [e for e in legal if e.get("partition") == preferred_partition]
             if same:
                 return max(same, key=lambda e: taste_weight(e, weights))
         return max(legal, key=lambda e: taste_weight(e, weights))
-    # No legal cell: keep the stated organization if we have it. A closer
-    # illegal regroup is still in the archive; it should not replace the brief.
     cells = list((archive.get("cells") or {}).values())
     if not cells:
         return {}
-    if preferred_partition and not tasted:
+    if keep_stated and preferred_partition:
         stated = [e for e in cells if e.get("partition") == preferred_partition]
         if stated:
             return min(stated, key=_cell_badness)

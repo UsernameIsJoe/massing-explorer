@@ -1023,6 +1023,63 @@ def check_program_splits(result: MassingStudyResult) -> list[ValidationCheck]:
     return checks
 
 
+def check_volume_collisions(
+    result: MassingStudyResult,
+    *,
+    story_height_ft: float | None = None,
+    config: dict[str, Any] | None = None,
+) -> list[ValidationCheck]:
+    """
+    Hard gate: extruded program/void boxes must not intersect in 3D.
+
+    Catches void-wrap misalignment (DH column on another ground program) and
+    stacked solids that occupy the same volume.
+    """
+    from .rhino_export import (
+        colliding_solid_pairs,
+        iter_study_solid_boxes,
+        story_height_from_config,
+    )
+
+    height = (
+        float(story_height_ft)
+        if story_height_ft
+        else story_height_from_config(config)
+    )
+    boxes = iter_study_solid_boxes(result, height)
+    hits = colliding_solid_pairs(boxes)
+    if not hits:
+        return [
+            ValidationCheck(
+                check="volume_collision",
+                passed=True,
+                message="Program and void volumes do not intersect",
+            )
+        ]
+
+    checks: list[ValidationCheck] = []
+    # Cap noise: one check per pair, but stop listing after a handful.
+    for i, (a, b) in enumerate(hits[:8]):
+        a_label = f"{a.get('department')} ({a.get('mass')} L{a.get('level')})"
+        b_label = f"{b.get('department')} ({b.get('mass')} L{b.get('level')})"
+        checks.append(
+            ValidationCheck(
+                check=f"volume_collision:{i + 1}",
+                passed=False,
+                message=f"{a_label} intersects {b_label}",
+            )
+        )
+    if len(hits) > 8:
+        checks.append(
+            ValidationCheck(
+                check="volume_collision:more",
+                passed=False,
+                message=f"{len(hits) - 8} more intersecting volume pair(s)",
+            )
+        )
+    return checks
+
+
 def check_edge_sum_limits(
     session: StudySession,
     result: MassingStudyResult,
@@ -1658,6 +1715,7 @@ def solve_massing_study(
     result.validation.extend(check_ratio_band(session, result))
     result.validation.extend(check_edge_sum_limits(session, result))
     result.validation.extend(check_program_splits(result))
+    result.validation.extend(check_volume_collisions(result, config=config))
 
     max_total = limits.get("max_total_length_ft")
     if max_total is not None and result.masses:

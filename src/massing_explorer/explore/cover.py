@@ -485,9 +485,9 @@ def run_cover(
     """
     Adaptive COVER loop.
 
-    Generate `start` samples, then while new cells or novel feature
+    Generate `start` samples, then while new *legal* regions or novel feature
     encodings appear add `step_small` or `step_large`, until stagnant
-    or `max_attempts`. Zero legal regions is not a stop condition.
+    or `max_attempts`. New illegal cell labels alone do not extend COVER.
     """
     from . import archive as archive_mod
     from .bayes import encode_strategy
@@ -507,7 +507,25 @@ def run_cover(
         "envelopes": list(plan.envelopes),
         "plate_profiles": list(plan.plate_profiles),
         "pool": len(plan.samples),
+        "csp_feasible": int(
+            (session.constraints.get("explore") or {}).get("csp", {}).get("feasible")
+            or 0
+        ),
     }
+    # Fresh CSP stats for honesty: shortlist vs full feasible / truncated enum.
+    try:
+        from .csp import describe_csp
+
+        csp_meta = describe_csp(session, cap=1)
+        archive["cover_plan"]["csp_feasible"] = int(csp_meta.get("feasible_count") or 0)
+        archive["cover_plan"]["csp_truncated"] = bool(csp_meta.get("truncated"))
+        feas = max(1, int(csp_meta.get("feasible_count") or 1))
+        archive["cover_plan"]["partition_coverage"] = round(
+            len(plan.partitions) / feas, 4
+        )
+    except Exception:
+        archive["cover_plan"]["csp_truncated"] = False
+        archive["cover_plan"]["partition_coverage"] = None
 
     legal_regions: set[str] = set()
     all_regions: set[str] = set()
@@ -585,14 +603,14 @@ def run_cover(
         frac = new_r / ran
         cell_frac = new_cells / ran
         feat_frac = new_f / ran
-        # Illegal cells still count as samples. Stop only when the map is
-        # no longer adding cells or encodings.
-        if new_cells == 0 and feat_frac < COVER_STAGNANT_FRAC:
+        # Stop when the batch adds neither legal regions nor feature novelty.
+        # Bare new cell labels alone are not progress.
+        if new_r == 0 and feat_frac < COVER_STAGNANT_FRAC:
             stagnant = True
             break
         step = (
             step_large
-            if frac >= 0.25 or feat_frac >= 0.25 or cell_frac >= 0.25
+            if frac >= 0.25 or feat_frac >= 0.25 or (new_r > 0 and cell_frac >= 0.25)
             else step_small
         )
         remaining = max_attempts - int(archive.get("attempts") or 0)
@@ -620,6 +638,18 @@ def run_cover(
         "pool_exhausted": pool_exhausted,
         "samples_planned": len(plan.samples),
         "samples_used": cursor,
+        "csp_truncated": bool((archive.get("cover_plan") or {}).get("csp_truncated")),
+        "csp_feasible": (archive.get("cover_plan") or {}).get("csp_feasible"),
+        "partition_coverage": (archive.get("cover_plan") or {}).get("partition_coverage"),
+        "note": (
+            "COVER samples a stratified subset of the strategy product; "
+            "incomplete means the adaptive budget stopped before saturation."
+            + (
+                " CSP enumeration was truncated."
+                if (archive.get("cover_plan") or {}).get("csp_truncated")
+                else ""
+            )
+        ),
     }
     archive["cover"] = report
     if incomplete:

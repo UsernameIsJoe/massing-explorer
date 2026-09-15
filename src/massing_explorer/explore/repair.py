@@ -118,19 +118,37 @@ def _distance(perf: dict[str, Any] | None) -> float:
 
 
 def _nudge_for_violations(session: Any, violations: dict[str, Any]) -> str | None:
-    """One strategic move chosen from the remaining violation. No regrouping."""
-    vec = {str(k): float(v or 0.0) for k, v in (violations or {}).items()}
+    """One strategic move owned by the remaining violation. No regrouping."""
+    vec = {
+        str(k): float(v or 0.0)
+        for k, v in (violations or {}).items()
+        if k != "owners" and isinstance(v, (int, float)) and not isinstance(v, bool)
+    }
+    owners = violations.get("owners") if isinstance(violations, dict) else None
+    owner_ids = []
+    if isinstance(owners, dict):
+        for key in ("edge_overrun", "split", "stories", "ratio_hard", "min_edge_short"):
+            raw = owners.get(key)
+            if isinstance(raw, (list, tuple)):
+                owner_ids.extend(str(x) for x in raw)
+            elif raw:
+                owner_ids.append(str(raw))
     if vec.get("stories", 0.0) >= 0.5:
         if _clamp_stories_to_cap(session):
             return "stories→cap"
-    if vec.get("split", 0.0) >= 0.5 or vec.get("edge_overrun", 0.0) >= 0.05:
+    # Awkward/program splits: prefer envelope over +1 story (which can worsen splits).
+    if vec.get("split", 0.0) >= 0.5:
+        if _flip_envelope(session):
+            return "envelope"
+        return None
+    if vec.get("edge_overrun", 0.0) >= 0.05:
+        if _bump_stories(session, +1, prefer_ids=owner_ids):
+            return "stories+1"
         if _bump_stories(session, +1):
             return "stories+1"
     if vec.get("ratio_hard", 0.0) >= 0.05 or vec.get("min_edge_short", 0.0) >= 0.05:
         if _flip_envelope(session):
             return "envelope"
-    if vec.get("split", 0.0) >= 0.5:
-        return None
     return None
 
 
@@ -149,17 +167,33 @@ def _clamp_stories_to_cap(session: Any) -> bool:
     return changed
 
 
-def _bump_stories(session: Any, delta: int) -> bool:
+def _bump_stories(
+    session: Any,
+    delta: int,
+    *,
+    prefer_ids: list[str] | None = None,
+) -> bool:
+    """Raise/lower stories on the violating mass when known; else try each unlocked mass."""
     cap = max(1, int((session.constraints or {}).get("max_stories") or 4))
     masses = _unlocked_masses(session)
     if not masses:
         return False
-    mass = max(masses, key=lambda m: (len(m.departments or []), int(m.story_count or 1)))
-    nxt = int(mass.story_count or 1) + int(delta)
-    if nxt < 1 or nxt > cap or nxt == int(mass.story_count or 1):
-        return False
-    mass.story_count = nxt
-    return True
+    prefer = {str(x) for x in (prefer_ids or []) if x}
+    ordered = sorted(
+        masses,
+        key=lambda m: (
+            0 if m.id in prefer else 1,
+            -len(m.departments or []),
+            -int(m.story_count or 1),
+        ),
+    )
+    for mass in ordered:
+        nxt = int(mass.story_count or 1) + int(delta)
+        if nxt < 1 or nxt > cap or nxt == int(mass.story_count or 1):
+            continue
+        mass.story_count = nxt
+        return True
+    return False
 
 
 def _flip_envelope(session: Any) -> bool:

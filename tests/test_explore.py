@@ -1043,8 +1043,9 @@ class TestTopology(unittest.TestCase):
 class TestMcts(unittest.TestCase):
     def test_planner_is_the_expansion_prior_and_courtyard_is_dead(self) -> None:
         session = _tiny_session()
-        catalog = catalog_actions(session)
+        catalog = catalog_actions(session, include_unsupported=True)
         self.assertTrue(any(a.get("op") == "COURTYARD" for a in catalog))
+        self.assertFalse(any(a.get("op") == "COURTYARD" for a in catalog_actions(session)))
         self.assertFalse(any("width_ft" in a for a in catalog))
         self.assertFalse(any(a.get("op") == "SET_WIDTH" for a in catalog))
         self.assertTrue(any(a.get("op") == "SET_ENVELOPE" for a in catalog))

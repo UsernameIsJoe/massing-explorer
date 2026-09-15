@@ -19,25 +19,35 @@ from ..solver import (
 )
 from .feasibility import feasibility_distance_of
 from .performance import measure
-from .saturate import search_reward
 from .strategy import partition_id
 
-SOLVE_CAP = 8
+SOLVE_CAP = 16
 WIDTH_MARGIN_FT = 0.25
 MIN_WIDTH_FT = 45.0
 
 
-def realize(session: Any) -> tuple[Any, dict[str, Any]]:
+def realize(
+    session: Any,
+    *,
+    weights: dict[str, float] | None = None,
+) -> tuple[Any, dict[str, Any]]:
     """
     Mutate session widths, solve, return (result, performance).
 
     Stories, partition, and topology stay as they arrived. Among legal `d`,
-    maximize search_reward (envelope is a preference among those). Otherwise
-    minimize feasibility distance.
+    maximize architectural reward under optional LEARN weights (envelope is a
+    preference among those). Otherwise minimize feasibility distance.
     """
     if not getattr(session, "masses", None):
         result = solve_massing_study(session)
         return result, measure(result, session)
+
+    if weights is None:
+        explore = (getattr(session, "constraints", None) or {}).get("explore") or {}
+        learning = explore.get("learning") or {}
+        raw = learning.get("weights") or {}
+        if isinstance(raw, dict) and any(abs(float(v or 0)) > 1e-9 for v in raw.values()):
+            weights = {str(k): float(v) for k, v in raw.items()}
 
     held_stories = {m.id: int(m.story_count) for m in session.masses}
     held_partition = partition_id(session)
@@ -67,11 +77,18 @@ def realize(session: Any) -> tuple[Any, dict[str, Any]]:
             if follow not in combos and len(combos) < SOLVE_CAP:
                 combos.append(follow)
         if perf.get("fits_limitations"):
-            reward = float(search_reward(perf))
+            from .saturate import architectural_reward
+
+            reward = float(architectural_reward(perf, weights))
             env = _envelope_fit(session, result)
-            key = (reward, env)
+            env_label = str((session.constraints or {}).get("cover_envelope") or "balanced")
+            # Preserve envelope identity: compact/elongated rank fit first.
+            if env_label in {"compact", "elongated"}:
+                key = (env, reward)
+            else:
+                key = (reward, env)
             if best_legal is None or key > (best_legal[0], best_legal[1]):
-                best_legal = (reward, env, dict(combo), result, perf)
+                best_legal = (key[0], key[1], dict(combo), result, perf)
         else:
             dist = _distance(perf)
             if best_illegal is None or dist < best_illegal[0]:

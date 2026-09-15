@@ -31,7 +31,7 @@ from .strategy import (
 
 PARTITION_CAP = 5  # back-compat alias for UI presentation
 UI_PARTITION_CAP = 5  # human-facing CSP board / report shortlist
-MAX_ENUM = 8000
+MAX_ENUM = 25000  # practical ceiling; truncated=True when hit
 
 
 def describe_csp(session: Any, cap: int = UI_PARTITION_CAP) -> dict[str, Any]:

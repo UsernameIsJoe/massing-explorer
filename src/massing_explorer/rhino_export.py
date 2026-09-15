@@ -170,28 +170,76 @@ def _program_rects(
     return out
 
 
-def _align_pieces_to_side(
+def _alignment_deltas(
     pieces: list[tuple[str, tuple[float, float, float, float], float]],
     align_length_ft: float,
-) -> list[tuple[str, tuple[float, float, float, float], float]]:
-    """
-    Flush every floor to the same two faces.
-
-    Length stacks against the far end of the mass so a shorter story only
-    steps back from the other end. Width stacks against local x = 0.
-    """
+) -> tuple[float, float]:
+    """Return (shift_x, shift_y) that flushes pieces to width=0 and far length."""
     if not pieces or align_length_ft <= 0:
-        return pieces
+        return 0.0, 0.0
     min_x = min(rect[0] for _, rect, _ in pieces)
     max_y = max(rect[1] + rect[3] for _, rect, _ in pieces)
-    shift_x = -min_x
-    shift_y = align_length_ft - max_y
+    return -min_x, align_length_ft - max_y
+
+
+def _apply_alignment(
+    pieces: list[tuple[str, tuple[float, float, float, float], float]],
+    shift_x: float,
+    shift_y: float,
+) -> list[tuple[str, tuple[float, float, float, float], float]]:
     if abs(shift_x) < 1e-6 and abs(shift_y) < 1e-6:
         return pieces
     aligned: list[tuple[str, tuple[float, float, float, float], float]] = []
     for dept, (x, y, w, h), gsf in pieces:
         aligned.append((dept, (x + shift_x, y + shift_y, w, h), gsf))
     return aligned
+
+
+def _align_pieces_to_side(
+    pieces: list[tuple[str, tuple[float, float, float, float], float]],
+    align_length_ft: float,
+    *,
+    shift_x: float | None = None,
+) -> list[tuple[str, tuple[float, float, float, float], float]]:
+    """
+    Flush every floor to the same two faces.
+
+    Length stacks against the far end of the mass so a shorter story only
+    steps back from the other end. Width stacks against local x = 0.
+
+    When shift_x is supplied (mass-wide shared width flush), only length is
+    computed from this piece set — programs and voids stay in one frame.
+    """
+    if not pieces or align_length_ft <= 0:
+        return pieces
+    dx, dy = _alignment_deltas(pieces, align_length_ft)
+    if shift_x is not None:
+        dx = float(shift_x)
+    return _apply_alignment(pieces, dx, dy)
+
+
+def _mass_shared_shift_x(mass: SolvedMass) -> float:
+    """One width flush for every program and void in the mass."""
+    xs: list[float] = []
+    for floor in mass.floors:
+        for _dept, rect, _gsf in _program_rects(floor):
+            xs.append(float(rect[0]))
+        for void in floor.voids:
+            if float(void.width_ft or 0) > 0 and float(void.length_ft or 0) > 0:
+                xs.append(float(void.x_ft or 0))
+    if not xs:
+        return 0.0
+    return -min(xs)
+
+
+def _void_dummies(
+    floor: FloorPlate,
+) -> list[tuple[str, tuple[float, float, float, float], float]]:
+    return [
+        ("void", (float(v.x_ft), float(v.y_ft), float(v.width_ft), float(v.length_ft)), 0.0)
+        for v in floor.voids
+        if float(v.width_ft or 0) > 0 and float(v.length_ft or 0) > 0
+    ]
 
 
 def _split_bar(
@@ -296,13 +344,16 @@ def _write_mass(
     written = 0
     fallback = _PALETTE[0]
     align_length = mass.floors[0].length_ft
+    # One width flush for programs and voids so the DH column lands in the
+    # punched hole instead of on a neighboring ground program.
+    shared_x = _mass_shared_shift_x(mass)
     # A double-height room is the void the upper floor wraps, not the whole
     # ground plate. Extruding the whole plate fills the L and they intersect.
-    voids = _aligned_voids(mass, align_length)
+    voids = _aligned_voids(mass, align_length, shift_x=shared_x)
     void_dept = _double_height_department(mass)
     for floor in mass.floors:
         z0 = floor.level * height
-        pieces = _align_pieces_to_side(_program_rects(floor), align_length)
+        pieces = _aligned_floor_programs(floor, align_length, shift_x=shared_x)
         double_height = {
             a.department: a.double_height for a in floor.allocations
         }
@@ -373,25 +424,182 @@ def _double_height_department(mass: SolvedMass) -> str:
 
 
 def _aligned_voids(
-    mass: SolvedMass, align_length: float
+    mass: SolvedMass,
+    align_length: float,
+    *,
+    shift_x: float | None = None,
 ) -> list[tuple[float, float, float, float]]:
-    """Void rectangles in the same frame as the floor that wraps them."""
+    """
+    Void rectangles for the DH column and ground punch.
+
+    Width uses the mass-wide shared flush. Length stays in the ground plate's
+    frame so a shorter wrapping story's end-flush cannot slide the void onto
+    a neighboring ground program (Art/Media beside the gym).
+    """
+    shared_x = _mass_shared_shift_x(mass) if shift_x is None else float(shift_x)
+    shift_y = 0.0
+    if mass.floors:
+        ground_pieces = _program_rects(mass.floors[0])
+        if ground_pieces:
+            _ignored_x, shift_y = _alignment_deltas(ground_pieces, align_length)
     out: list[tuple[float, float, float, float]] = []
     for floor in mass.floors:
         if floor.level == 0 or not floor.voids:
             continue
-        dummies = [
-            ("void", (v.x_ft, v.y_ft, v.width_ft, v.length_ft), 0.0)
-            for v in floor.voids
-            if v.width_ft > 0 and v.length_ft > 0
-        ]
-        if not dummies:
-            continue
-        aligned = _align_pieces_to_side(
-            _program_rects(floor) + dummies, align_length
-        )
-        out.extend(rect for dept, rect, _gsf in aligned if dept == "void")
+        for void in floor.voids:
+            w = float(void.width_ft or 0)
+            h = float(void.length_ft or 0)
+            if w <= 0 or h <= 0:
+                continue
+            out.append(
+                (
+                    float(void.x_ft or 0) + shared_x,
+                    float(void.y_ft or 0) + shift_y,
+                    w,
+                    h,
+                )
+            )
     return out
+
+
+def _aligned_floor_programs(
+    floor: FloorPlate,
+    align_length: float,
+    *,
+    shift_x: float,
+) -> list[tuple[str, tuple[float, float, float, float], float]]:
+    """
+    Align one floor's programs.
+
+    Floors that wrap a void include void dummies so the leftover L keeps its
+    relative hole; void dummies are dropped from the returned program list.
+    """
+    pieces = _program_rects(floor)
+    dummies = _void_dummies(floor)
+    if dummies:
+        aligned = _align_pieces_to_side(pieces + dummies, align_length, shift_x=shift_x)
+        return [(dept, rect, gsf) for dept, rect, gsf in aligned if dept != "void"]
+    return _align_pieces_to_side(pieces, align_length, shift_x=shift_x)
+
+
+def iter_mass_solid_boxes(
+    mass: SolvedMass,
+    origin_x: float,
+    story_height_ft: float,
+) -> list[dict[str, Any]]:
+    """
+    Axis-aligned program/void solids for one mass (world X length, Y width, Z up).
+
+    Same placement rules as Rhino export and the browser preview.
+    Each box: x0,y0,z0,x1,y1,z1 plus mass/department/level metadata.
+    """
+    if not mass.floors:
+        return []
+    height = float(story_height_ft)
+    align_length = float(mass.floors[0].length_ft or 0)
+    shared_x = _mass_shared_shift_x(mass)
+    voids = _aligned_voids(mass, align_length, shift_x=shared_x)
+    void_dept = _double_height_department(mass)
+    boxes: list[dict[str, Any]] = []
+
+    def _add_box(
+        *,
+        dept: str,
+        rect: tuple[float, float, float, float],
+        z0: float,
+        dz: float,
+        level: int,
+        role: str,
+        part: int = 0,
+    ) -> None:
+        local_x, local_y, w, h = rect
+        if w <= 0 or h <= 0 or dz <= 0:
+            return
+        # Local x/width -> world Y; local y/length -> world X.
+        boxes.append(
+            {
+                "id": f"{mass.id}_L{level}_{dept}_{role}_{part}",
+                "mass_id": mass.id,
+                "mass": mass.name,
+                "department": dept,
+                "level": level,
+                "role": role,
+                "x0": origin_x + local_y,
+                "y0": local_x,
+                "z0": z0,
+                "x1": origin_x + local_y + h,
+                "y1": local_x + w,
+                "z1": z0 + dz,
+            }
+        )
+
+    for floor in mass.floors:
+        z0 = floor.level * height
+        pieces = _aligned_floor_programs(floor, align_length, shift_x=shared_x)
+        double_height = {a.department: a.double_height for a in floor.allocations}
+        if floor.level == 0 and voids and void_dept:
+            pieces = _punch_voids(pieces, voids, void_dept)
+        for i, (dept, rect, _gsf) in enumerate(pieces):
+            stories = 1
+            if double_height.get(dept) and floor.level == 0 and not voids:
+                stories = 2
+            _add_box(
+                dept=dept,
+                rect=rect,
+                z0=z0,
+                dz=height * stories,
+                level=floor.level,
+                role="program",
+                part=i + 1,
+            )
+
+    if voids and void_dept:
+        for i, rect in enumerate(voids):
+            _add_box(
+                dept=void_dept,
+                rect=rect,
+                z0=0.0,
+                dz=height * 2,
+                level=0,
+                role="void_column",
+                part=i + 1,
+            )
+    return boxes
+
+
+def iter_study_solid_boxes(
+    result: MassingStudyResult,
+    story_height_ft: float,
+) -> list[dict[str, Any]]:
+    """All program/void solids for a study, masses laid in a row with gaps."""
+    boxes: list[dict[str, Any]] = []
+    origin_x = 0.0
+    masses = _place_order(result)
+    for i, mass in enumerate(masses):
+        boxes.extend(iter_mass_solid_boxes(mass, origin_x, story_height_ft))
+        if mass.floors:
+            origin_x += float(mass.floors[0].length_ft or 0)
+            if i < len(masses) - 1:
+                origin_x += MASS_GAP_FT
+    return boxes
+
+
+def colliding_solid_pairs(
+    boxes: list[dict[str, Any]],
+    *,
+    eps: float = 0.05,
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """Pairs of solids whose AABBs overlap by more than eps on every axis."""
+    hits: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for i, a in enumerate(boxes):
+        for b in boxes[i + 1 :]:
+            if (
+                min(float(a["x1"]), float(b["x1"])) - max(float(a["x0"]), float(b["x0"])) > eps
+                and min(float(a["y1"]), float(b["y1"])) - max(float(a["y0"]), float(b["y0"])) > eps
+                and min(float(a["z1"]), float(b["z1"])) - max(float(a["z0"]), float(b["z0"])) > eps
+            ):
+                hits.append((a, b))
+    return hits
 
 
 def _punch_voids(

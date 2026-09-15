@@ -123,6 +123,9 @@ def build_allocated_mass(
         alloc_notes.append(
             "double-height program is two stories; programs above sit on its roof"
         )
+    from .tools import resolved_floor_pins
+
+    resolved = resolved_floor_pins(session)
     alloc_notes.extend(
         allocate_programs(
             floors=floors,
@@ -133,7 +136,7 @@ def build_allocated_mass(
             config=config,
             pins={
                 d: lvl
-                for d, lvl in session.floor_pins.items()
+                for d, lvl in resolved.items()
                 if d in mass_def.departments
             },
             ground_required=ground_required,

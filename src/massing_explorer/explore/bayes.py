@@ -167,6 +167,16 @@ def run_bayes(
         )
         spent += 1
         sat.observe(gained)
+        # Grow the candidate pool around discoveries instead of a one-shot catalog.
+        if gained and out.get("ok"):
+            disc_snap = archive_mod.capture(session)
+            used_keys = {c["key"] for c in candidates} | {p.get("key") for p in picked}
+            for extra in _candidates_from_snap(
+                session, disc_snap, tag=f"disc{spent}", origin_restore=origin
+            ):
+                if extra["key"] not in used_keys:
+                    candidates.append(extra)
+                    used_keys.add(extra["key"])
         if sat.stop():
             break
 
@@ -211,36 +221,58 @@ def _candidates(
         snap = meta.get("snapshot")
         if snap:
             starts.append({"snap": snap, "stories": meta.get("stories"), "tag": meta.get("label") or "elite"})
-    out = []
+    out: list[dict[str, Any]] = []
     seen: set[str] = set()
     for start in starts:
-        archive_mod.restore_snapshot(session, start["snap"], start.get("stories"))
-        actions = [a for a in catalog_actions(session, include_unsupported=False) if a.get("op") != "COURTYARD"]
-        held = archive_mod.capture(session)
-        for action in actions:
-            key = f"{start['tag']}|{action_key(action)}"
-            if key in seen:
+        for item in _candidates_from_snap(
+            session,
+            start["snap"],
+            tag=start["tag"],
+            stories=start.get("stories"),
+            origin_restore=origin,
+        ):
+            if item["key"] in seen:
                 continue
-            seen.add(key)
-            archive_mod.restore_snapshot(session, held)
-            try:
-                applied = apply_action(session, action)
-            except Exception:
-                continue
-            if not applied.get("ok"):
-                continue
-            feat = encode_strategy(read_strategy(session))
-            out.append(
-                {
-                    "action": action,
-                    "x": feat,
-                    "label": _label(action),
-                    "key": key,
-                    "origin": start["snap"],
-                }
-            )
-        archive_mod.restore_snapshot(session, origin)
+            seen.add(item["key"])
+            out.append(item)
     archive_mod.restore_snapshot(session, origin)
+    return out
+
+
+def _candidates_from_snap(
+    session: Any,
+    snap: dict[str, Any],
+    *,
+    tag: str,
+    stories: dict[str, Any] | None = None,
+    origin_restore: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Catalog neighbors from one restored snapshot."""
+    archive_mod.restore_snapshot(session, snap, stories)
+    actions = [a for a in catalog_actions(session, include_unsupported=False) if a.get("op") != "COURTYARD"]
+    held = archive_mod.capture(session)
+    out: list[dict[str, Any]] = []
+    for action in actions:
+        key = f"{tag}|{action_key(action)}"
+        archive_mod.restore_snapshot(session, held)
+        try:
+            applied = apply_action(session, action)
+        except Exception:
+            continue
+        if not applied.get("ok"):
+            continue
+        feat = encode_strategy(read_strategy(session))
+        out.append(
+            {
+                "action": action,
+                "x": feat,
+                "label": _label(action),
+                "key": key,
+                "origin": snap,
+            }
+        )
+    if origin_restore is not None:
+        archive_mod.restore_snapshot(session, origin_restore)
     return out
 
 
