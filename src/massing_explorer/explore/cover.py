@@ -15,7 +15,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Iterator
 
-from .partitions import apply_partition, enumerate_partitions, partition_signature
+from .csp import describe_csp
+from .partitions import (
+    COVER_PARTITION_MAX,
+    apply_partition,
+    cover_partition_budget,
+    partition_signature,
+)
 from .strategy import grouping_is_required, partition_id
 from .topology import paired_bars_drawable, pairing_proposals, stated_frontage_ft, topology_is_required
 
@@ -25,7 +31,7 @@ COVER_STEP_LARGE = 20
 COVER_MAX = 120
 # Stop when a batch adds no new cells and few novel feature encodings.
 COVER_STAGNANT_FRAC = 0.08
-COVER_PARTITION_CAP = 8
+# COVER search pool size is adaptive (12–20); UI presentation stays separate.
 
 ENVELOPES = ("balanced", "compact", "elongated")  # elongated → search low_rise
 LOADINGS = ("double", "single")
@@ -146,12 +152,37 @@ def build_cover_plan(session: Any, *, pool_size: int = COVER_MAX) -> CoverPlan:
     plan.stated_signature = partition_signature(stated_groups)
     plan.partitions = [{"groups": stated_groups, "reason": "stated P"}]
     if not locked_p:
-        for item in enumerate_partitions(session, cap=COVER_PARTITION_CAP):
+        # One CSP pass at COVER max; budget may trim further.
+        report = describe_csp(session, cap=COVER_PARTITION_MAX)
+        budget = cover_partition_budget(
+            session, feasible_count=int(report.get("feasible_count") or 0)
+        )
+        for item in list(report.get("chosen") or [])[:budget]:
             sig = partition_signature(item["groups"])
             if sig == plan.stated_signature:
                 continue
             plan.partitions.append(item)
+        if len(plan.partitions) > max(1, budget):
+            plan.partitions = plan.partitions[: max(1, budget)]
 
+    # Persist the COVER P-pool for MCTS / later search (not the UI 5-shortlist).
+    pool_payload = [
+        {
+            "reason": p.get("reason") or "",
+            "groups": [
+                {
+                    "id": g.get("id"),
+                    "name": g.get("name"),
+                    "departments": list(g.get("departments") or []),
+                    "story_count": int(g.get("story_count") or 2),
+                }
+                for g in (p.get("groups") or [])
+            ],
+        }
+        for p in plan.partitions
+    ]
+    session.constraints["cover_partition_pool"] = pool_payload
+    session.constraints["cover_partition_budget"] = len(plan.partitions)
     # Story patterns sized to stated mass count; re-derived per partition on apply.
     cap = max(1, int(session.constraints.get("max_stories") or 4))
     locks = dict(session.constraints.get("story_lock") or {})
@@ -175,7 +206,8 @@ def build_cover_plan(session: Any, *, pool_size: int = COVER_MAX) -> CoverPlan:
     plan.envelopes = list(ENVELOPES)
     plan.plate_profiles = list(PLATE_PROFILES)
 
-    plan.samples = list(_stratified_samples(plan, pool_size=pool_size, session=session))
+    raw = list(_stratified_samples(plan, pool_size=pool_size, session=session))
+    plan.samples = _order_by_diversity(_canonicalize_samples(raw), pool_size=pool_size)
     return plan
 
 
@@ -292,6 +324,78 @@ def _stratified_samples(
     return iter(ordered[:pool_size])
 
 
+def _canonicalize_samples(samples: list[CoverSample]) -> list[CoverSample]:
+    """Drop instructions that realize the same strategy. Step on 1-story is uniform."""
+    out: list[CoverSample] = []
+    seen: set[tuple] = set()
+    for sample in samples:
+        plate = sample.plate_profile
+        stories = tuple(int(s) for s in (sample.stories or ()))
+        if plate == "step" and stories and max(stories) < 2:
+            plate = "uniform"
+        key = (
+            sample.partition_index,
+            stories,
+            sample.topology,
+            sample.loading,
+            sample.envelope,
+            plate,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        if plate == sample.plate_profile and stories == tuple(sample.stories or ()):
+            out.append(sample)
+            continue
+        out.append(
+            CoverSample(
+                partition_index=sample.partition_index,
+                stories=stories,
+                topology=sample.topology,
+                loading=sample.loading,
+                envelope=sample.envelope,
+                plate_profile=plate,
+                label=sample.label,
+            )
+        )
+    return out
+
+
+def _sample_distance(a: CoverSample, b: CoverSample) -> float:
+    dist = 0.0
+    if a.partition_index != b.partition_index:
+        dist += 4.0
+    if a.topology != b.topology:
+        dist += 2.0
+    if a.loading != b.loading:
+        dist += 1.0
+    if a.envelope != b.envelope:
+        dist += 1.5
+    if a.plate_profile != b.plate_profile:
+        dist += 1.0
+    left = tuple(int(s) for s in (a.stories or ()))
+    right = tuple(int(s) for s in (b.stories or ()))
+    n = max(len(left), len(right), 1)
+    dist += sum(
+        abs((left[i] if i < len(left) else 0) - (right[i] if i < len(right) else 0))
+        for i in range(n)
+    )
+    return dist
+
+
+def _order_by_diversity(samples: list[CoverSample], *, pool_size: int) -> list[CoverSample]:
+    """Greedy farthest-point order. The stated sample stays first."""
+    if len(samples) <= 2:
+        return samples[:pool_size]
+    chosen = [samples[0]]
+    rest = list(samples[1:])
+    while rest and len(chosen) < pool_size:
+        nxt = max(rest, key=lambda sample: min(_sample_distance(sample, kept) for kept in chosen))
+        chosen.append(nxt)
+        rest.remove(nxt)
+    return chosen
+
+
 
 def _apply_plate_profile(session: Any, profile: str) -> None:
     """uniform = equal plates; step = ≤2-type setback on multi-story masses."""
@@ -395,6 +499,8 @@ def run_cover(
     plan = build_cover_plan(session, pool_size=max_attempts)
     archive["cover_plan"] = {
         "partitions": len(plan.partitions),
+        "partition_reasons": [p.get("reason") or "" for p in plan.partitions],
+        "partition_sizes": [len(p.get("groups") or []) for p in plan.partitions],
         "story_patterns": len(plan.story_patterns),
         "topologies": list(plan.topologies),
         "loadings": list(plan.loadings),
@@ -417,6 +523,7 @@ def run_cover(
     if origin_entry and origin_entry.get("fits_limitations"):
         legal_regions.add(origin_sig)
     known_feat = encodings_from_archive(archive)
+    solved_keys = {origin_key}
 
     def run_batch(n: int, tag: str) -> dict[str, Any]:
         nonlocal cursor, known_feat
@@ -424,6 +531,7 @@ def run_cover(
         before_regions = len(all_regions)
         before_attempts = int(archive.get("attempts") or 0)
         took = 0
+        skipped = 0
         new_feat = 0
         while (
             took < n
@@ -433,6 +541,11 @@ def run_cover(
             sample = plan.samples[cursor]
             cursor += 1
             reason = apply_cover_sample(session, plan, sample, origin=origin)
+            key = cell_key(session)
+            if key in solved_keys:
+                skipped += 1
+                continue
+            solved_keys.add(key)
             evaluate(session, archive, f"COVER {tag}: {reason}")
             sig = region_signature(session)
             all_regions.add(sig)
@@ -452,6 +565,7 @@ def run_cover(
             "tag": tag,
             "requested": n,
             "ran": took,
+            "skipped_noop": skipped,
             "new_legal_regions": new_legal,
             "new_regions": new_regions,
             "new_feature": new_feat,

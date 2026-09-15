@@ -1,0 +1,359 @@
+"""P constraints, archive identity, COVER no-ops, and feasibility story weight."""
+
+from __future__ import annotations
+
+import unittest
+from types import SimpleNamespace
+
+from massing_explorer.explore.cover import CoverSample, _canonicalize_samples, _sample_distance
+from massing_explorer.explore.csp import describe_csp
+from massing_explorer.explore.feasibility import feasibility_distance, violations_from_checks
+from massing_explorer.explore.realize import _envelope_widths
+from massing_explorer.explore.repair import _nudge_for_violations
+from massing_explorer.explore.strategy import grouping_is_required, idea_key
+from massing_explorer.massing_models import ValidationCheck
+
+
+def _mass(mid: str, depts: list[str], stories: int = 2):
+    return SimpleNamespace(id=mid, name=mid, departments=list(depts), story_count=stories)
+
+
+class TestPartitionConstraints(unittest.TestCase):
+    def test_mass_count_and_together_do_not_freeze_p(self) -> None:
+        gym, dining, art, admin, media = "Gym", "Dining", "Art", "Admin", "Media"
+        session = SimpleNamespace(
+            constraints={
+                "p_constraints": {
+                    "together": [[gym, dining]],
+                    "apart": [],
+                    "alone": [],
+                    "mass_count": 3,
+                    "mass_count_min": 3,
+                    "mass_count_max": 3,
+                },
+                "briefing": {
+                    "requirements": [
+                        {"lever": "mass_count", "value": 3},
+                        {"lever": "same_mass", "departments": [gym, dining, art, admin, media]},
+                    ]
+                },
+            },
+            masses=[
+                _mass("public", [gym, dining]),
+                _mass("arts", [art]),
+                _mass("ops", [admin]),
+                _mass("media", [media], 1),
+            ],
+            department_names=lambda: [gym, dining, art, admin, media],
+            brief_locked=True,
+            floor_pins={},
+            double_height_rooms=[],
+        )
+        self.assertFalse(grouping_is_required(session))
+        report = describe_csp(session, cap=8)
+        self.assertFalse(report["locked"])
+        self.assertGreaterEqual(report["feasible_count"], 2)
+        for item in report["chosen"]:
+            groups = item["groups"]
+            self.assertEqual(len(groups), 3)
+            homes = {d: i for i, g in enumerate(groups) for d in g["departments"]}
+            self.assertEqual(homes[gym], homes[dining])
+
+    def test_mass_count_range_does_not_prefer_higher_count(self) -> None:
+        gym, dining, art, admin, media = "Gym", "Dining", "Art", "Admin", "Media"
+        session = SimpleNamespace(
+            constraints={
+                "p_constraints": {
+                    "together": [[gym, dining]],
+                    "apart": [],
+                    "alone": [],
+                    "mass_count": 4,
+                    "mass_count_min": 2,
+                    "mass_count_max": 5,
+                    "preferred_mass_count": None,
+                },
+                "briefing": {"requirements": [], "limitations": [], "preferences": []},
+            },
+            masses=[
+                _mass("public", [gym, dining]),
+                _mass("arts", [art]),
+                _mass("ops", [admin]),
+                _mass("media", [media], 1),
+            ],
+            department_names=lambda: [gym, dining, art, admin, media],
+            brief_locked=True,
+            floor_pins={},
+            double_height_rooms=[],
+        )
+        from massing_explorer.explore.csp import _score
+
+        report = describe_csp(session, cap=8)
+        sizes = {len(item["groups"]) for item in report["chosen"]}
+        self.assertGreaterEqual(len(sizes), 2, sorted(sizes))
+        self.assertIn(min(sizes), sizes)
+        self.assertLess(min(sizes), max(sizes))
+        # Default semantic rank is flat: mass count is not in the score.
+        self.assertEqual(_score([{"departments": ["A"]}], [0]), (1000, 0))  # stated
+        atoms = [{"departments": [d]} for d in ("A", "B", "C", "D", "E")]
+        three = [0, 0, 1, 1, 2]  # two pairwise merges → generic
+        two = [0, 0, 0, 1, 1]  # two multi-atom blocks → generic
+        self.assertEqual(_score(atoms, three), (200, 0))
+        self.assertEqual(_score(atoms, two), (200, 0))
+        self.assertEqual(_score(atoms, three), _score(atoms, two))
+
+    def test_preferred_mass_count_may_favor_higher_or_lower(self) -> None:
+        from massing_explorer.explore.csp import _score
+
+        atoms = [{"departments": [d]} for d in ("A", "B", "C", "D", "E")]
+        three = [0, 0, 1, 1, 2]
+        two = [0, 0, 0, 1, 1]
+        self.assertEqual(len(set(three)), 3)
+        self.assertEqual(len(set(two)), 2)
+        # Prefer 3 → three beats two.
+        self.assertGreater(
+            _score(atoms, three, preferred_mass_count=3),
+            _score(atoms, two, preferred_mass_count=3),
+        )
+        # Prefer 2 → two beats three.
+        self.assertGreater(
+            _score(atoms, two, preferred_mass_count=2),
+            _score(atoms, three, preferred_mass_count=2),
+        )
+        # Without a preference, they stay equal.
+        self.assertEqual(_score(atoms, three), _score(atoms, two))
+
+    def test_shortlist_covers_both_ends_of_a_wide_range(self) -> None:
+        names = [f"D{i}" for i in range(6)]
+        session = SimpleNamespace(
+            constraints={
+                "p_constraints": {
+                    "together": [],
+                    "apart": [],
+                    "alone": [],
+                    "mass_count_min": 2,
+                    "mass_count_max": 5,
+                    "preferred_mass_count": None,
+                },
+                "briefing": {"requirements": [], "limitations": [], "preferences": []},
+            },
+            masses=[_mass(f"m{i}", [names[i]]) for i in range(6)],
+            department_names=lambda: list(names),
+            brief_locked=True,
+            floor_pins={},
+            double_height_rooms=[],
+        )
+        report = describe_csp(session, cap=8)
+        sizes = {len(item["groups"]) for item in report["chosen"]}
+        self.assertIn(2, sizes, sorted(sizes))
+        self.assertIn(5, sizes, sorted(sizes))
+
+    def test_shortlist_shares_slots_fairly_across_mass_counts(self) -> None:
+        """Larger |P| slices must not crowd out smaller ones in the shortlist."""
+        from collections import Counter
+
+        from massing_explorer.explore.csp import _stratum_quotas
+
+        # Equal floor across 4 strata.
+        q = _stratum_quotas([2, 3, 4, 5], 8, available={2: 99, 3: 99, 4: 99, 5: 99})
+        self.assertEqual(q, {2: 2, 3: 2, 4: 2, 5: 2})
+        # Preferred may claim remainder only after equal floors.
+        q2 = _stratum_quotas(
+            [2, 3, 4],
+            8,
+            preferred=4,
+            available={2: 99, 3: 99, 4: 99},
+        )
+        self.assertEqual(q2[2], 2)
+        self.assertEqual(q2[3], 2)
+        self.assertEqual(q2[4], 4)
+
+        names = [f"D{i}" for i in range(6)]
+        session = SimpleNamespace(
+            constraints={
+                "p_constraints": {
+                    "together": [],
+                    "apart": [],
+                    "alone": [],
+                    "mass_count_min": 2,
+                    "mass_count_max": 5,
+                    "preferred_mass_count": None,
+                },
+                "briefing": {"requirements": [], "limitations": [], "preferences": []},
+            },
+            masses=[_mass(f"m{i}", [names[i]]) for i in range(6)],
+            department_names=lambda: list(names),
+            brief_locked=True,
+            floor_pins={},
+            double_height_rooms=[],
+        )
+        report = describe_csp(session, cap=8)
+        counts = Counter(len(item["groups"]) for item in report["chosen"])
+        # Near-equal: every present stratum within 1 of each other, none starved.
+        self.assertGreaterEqual(len(counts), 3)
+        self.assertLessEqual(max(counts.values()) - min(counts.values()), 1)
+        for k in counts:
+            self.assertGreaterEqual(counts[k], 1)
+
+        # Two-level range with a large cap: neither side may monopolize.
+        session.constraints["p_constraints"]["mass_count_min"] = 3
+        session.constraints["p_constraints"]["mass_count_max"] = 4
+        report2 = describe_csp(session, cap=20)
+        counts2 = Counter(len(item["groups"]) for item in report2["chosen"])
+        self.assertIn(3, counts2)
+        self.assertIn(4, counts2)
+        self.assertLessEqual(abs(counts2[3] - counts2[4]), 1)
+        self.assertGreaterEqual(min(counts2[3], counts2[4]), 9)
+
+
+class TestIdeaIdentity(unittest.TestCase):
+    def _session(self, stories: int, pin: dict | None = None):
+        return SimpleNamespace(
+            constraints={"loading": "double", "cover_envelope": "balanced", "story_lock": {}},
+            masses=[_mass("a", ["Art"], stories)],
+            pairings=[],
+            floor_pins=pin or {},
+            floor_tapers=None,
+            floor_steps=None,
+            double_height_rooms=[],
+        )
+
+    def test_pin_and_exact_stories_change_the_cell(self) -> None:
+        bare = idea_key(self._session(3))
+        pinned = idea_key(self._session(3, {"Art": 0}))
+        taller = idea_key(self._session(4))
+        self.assertNotEqual(bare, pinned)
+        self.assertNotEqual(bare, taller)
+
+
+class TestCoverCanonical(unittest.TestCase):
+    def test_step_on_one_story_collapses_to_uniform(self) -> None:
+        samples = _canonicalize_samples(
+            [
+                CoverSample(stories=(1, 1), plate_profile="uniform", label="u"),
+                CoverSample(stories=(1, 1), plate_profile="step", label="s"),
+                CoverSample(stories=(2, 1), plate_profile="step", label="real"),
+            ]
+        )
+        plates = [(s.stories, s.plate_profile) for s in samples]
+        self.assertEqual(plates, [((1, 1), "uniform"), ((2, 1), "step")])
+
+    def test_different_partitions_are_farther_than_loading(self) -> None:
+        base = CoverSample(partition_index=0, stories=(2, 1), loading="double")
+        other_p = CoverSample(partition_index=1, stories=(2, 1), loading="double")
+        other_l = CoverSample(partition_index=0, stories=(2, 1), loading="single")
+        self.assertGreater(_sample_distance(base, other_p), _sample_distance(base, other_l))
+
+
+class TestEnvelopeWidths(unittest.TestCase):
+    def test_compact_and_elongated_generate_different_widths(self) -> None:
+        plate = 10000.0
+        compact = _envelope_widths(SimpleNamespace(constraints={"cover_envelope": "compact"}), plate)
+        long = _envelope_widths(SimpleNamespace(constraints={"cover_envelope": "elongated"}), plate)
+        self.assertLess(min(long), min(compact))
+
+
+class TestStoryDistance(unittest.TestCase):
+    def test_story_violation_adds_distance(self) -> None:
+        story = violations_from_checks(
+            [ValidationCheck(check="max_stories:a", passed=False, message="too tall")]
+        )
+        none = violations_from_checks([])
+        self.assertEqual(story["stories"], 1.0)
+        self.assertGreater(feasibility_distance(story), feasibility_distance(none))
+
+    def test_split_nudge_bumps_stories(self) -> None:
+        session = SimpleNamespace(
+            constraints={"max_stories": 4, "cover_envelope": "balanced", "story_lock": {}},
+            masses=[_mass("a", ["Art", "Admin"], 1)],
+        )
+        label = _nudge_for_violations(session, {"split": 1.0})
+        self.assertEqual(label, "stories+1")
+        self.assertEqual(session.masses[0].story_count, 2)
+
+
+class TestCoverPartitionBudget(unittest.TestCase):
+    def _session(self, *, n_atoms: int = 5, k_min: int = 2, k_max: int = 4):
+        names = [f"D{i}" for i in range(n_atoms)]
+        return SimpleNamespace(
+            constraints={
+                "p_constraints": {
+                    "together": [],
+                    "apart": [],
+                    "alone": [],
+                    "mass_count_min": k_min,
+                    "mass_count_max": k_max,
+                    "preferred_mass_count": None,
+                },
+                "briefing": {"requirements": [], "limitations": [], "preferences": []},
+            },
+            masses=[_mass(f"m{i}", [names[i]]) for i in range(n_atoms)],
+            department_names=lambda: list(names),
+            brief_locked=True,
+            floor_pins={},
+            double_height_rooms=[],
+            pairings=[],
+            floor_steps={},
+            floor_tapers={},
+        )
+
+    def test_ui_shortlist_stays_small_while_cover_budget_is_12_to_20(self) -> None:
+        from massing_explorer.explore.csp import UI_PARTITION_CAP, describe_csp
+        from massing_explorer.explore.partitions import (
+            COVER_PARTITION_MAX,
+            COVER_PARTITION_MIN,
+            cover_partition_budget,
+            enumerate_partitions,
+        )
+
+        session = self._session()
+        ui = describe_csp(session)
+        self.assertLessEqual(ui["shown"], UI_PARTITION_CAP)
+        self.assertLessEqual(len(enumerate_partitions(session)), UI_PARTITION_CAP)
+        self.assertGreaterEqual(ui["feasible_count"], COVER_PARTITION_MIN)
+        budget = cover_partition_budget(session, feasible_count=ui["feasible_count"])
+        self.assertGreaterEqual(budget, COVER_PARTITION_MIN)
+        self.assertLessEqual(budget, COVER_PARTITION_MAX)
+        cover = enumerate_partitions(session, cap=budget)
+        self.assertEqual(len(cover), budget)
+        sizes = {len(item["groups"]) for item in cover}
+        self.assertGreaterEqual(len(sizes), 2)
+
+    def test_mcts_candidates_prefer_persisted_cover_pool(self) -> None:
+        from massing_explorer.explore.partitions import cover_partition_candidates
+
+        session = self._session()
+        session.constraints["cover_partition_pool"] = [
+            {
+                "reason": "stated",
+                "groups": [
+                    {"id": "m0", "name": "m0", "departments": ["D0"], "story_count": 2},
+                    {"id": "m1", "name": "m1", "departments": ["D1", "D2"], "story_count": 2},
+                    {"id": "m2", "name": "m2", "departments": ["D3", "D4"], "story_count": 2},
+                ],
+            },
+            {
+                "reason": "alt",
+                "groups": [
+                    {"id": "a", "name": "a", "departments": ["D0", "D1"], "story_count": 2},
+                    {"id": "b", "name": "b", "departments": ["D2"], "story_count": 2},
+                    {"id": "c", "name": "c", "departments": ["D3"], "story_count": 2},
+                    {"id": "d", "name": "d", "departments": ["D4"], "story_count": 2},
+                ],
+            },
+            {
+                "reason": "alt2",
+                "groups": [
+                    {"id": "x", "name": "x", "departments": ["D0"], "story_count": 2},
+                    {"id": "y", "name": "y", "departments": ["D1"], "story_count": 2},
+                    {"id": "z", "name": "z", "departments": ["D2", "D3", "D4"], "story_count": 2},
+                ],
+            },
+        ]
+        # Stated masses are one-dept each — first pool entry is not stated, so all three return.
+        found = cover_partition_candidates(session, limit=4)
+        self.assertEqual(len(found), 3)
+        self.assertEqual([f["reason"] for f in found], ["stated", "alt", "alt2"])
+
+
+if __name__ == "__main__":
+    unittest.main()

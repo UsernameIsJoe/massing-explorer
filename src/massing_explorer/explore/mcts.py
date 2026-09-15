@@ -354,18 +354,13 @@ def catalog_actions(session: Any, include_unsupported: bool = True) -> list[dict
             actions.append({"op": "CLEAR_PAIRINGS"})
     if not grouping_is_required(session):
         try:
-            from .partitions import enumerate_partitions, partition_signature
+            from .partitions import cover_partition_candidates
 
-            stated = partition_signature([list(m.departments) for m in session.masses])
-            added = 0
-            for item in enumerate_partitions(session, cap=3):
+            # Prefer the COVER 12–20 pool (not the UI CSP 5 / old cap=3).
+            for item in cover_partition_candidates(session, limit=4):
                 groups = item.get("groups") or []
-                if partition_signature(groups) == stated:
-                    continue
-                actions.append({"op": "APPLY_PARTITION", "groups": groups})
-                added += 1
-                if added >= 2:
-                    break
+                if groups:
+                    actions.append({"op": "APPLY_PARTITION", "groups": groups})
         except Exception:
             pass
     if include_unsupported:

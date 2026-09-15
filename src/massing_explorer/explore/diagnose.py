@@ -163,7 +163,7 @@ def classify_failure(
         return "search"
     if not grouping_is_required(session):
         parts = {e.get("partition") for e in cells.values() if e.get("partition")}
-        if len(parts) <= 1 and attempts < 40:
+        if len(parts) == 1 and attempts < 40:
             return "search"
 
     dominant = patterns.get("dominant_kinds") or []

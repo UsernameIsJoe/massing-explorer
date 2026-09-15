@@ -1,9 +1,10 @@
 """
-Project an illegal COVER idea onto the nearest legal twin.
+Rescue a near-feasible idea.
 
-COVER explores architectural ideas. REPAIR restores the idea and runs
-realize(s) to fill feet. It does not regroup programs, bump stories, chase
-preference scores, or invent a second sampler. Story ±1 stays an MCTS lever.
+Dimensional misses are filled by realize(s). If the idea is still illegal,
+one strategic nudge is chosen from the violation (stories, split, envelope)
+and realized again. Progress is d_before - d_after. Global search quality
+stays 0 while the scheme is illegal. REPAIR does not regroup programs.
 """
 
 from __future__ import annotations
@@ -48,6 +49,7 @@ def run_repair(
 
     spent = 0
     legalized = 0
+    progress = 0.0
     moves: list[str] = []
 
     for entry in candidates:
@@ -57,46 +59,116 @@ def run_repair(
             continue
         archive_mod.restore_entry(session, entry)
         held_partition = partition_id(session)
-        held_stories = {m.id: int(m.story_count) for m in session.masses}
         before = feasibility_distance_of(entry)
         result, perf = realize(session)
-        for mass in session.masses or []:
-            if mass.id in held_stories:
-                mass.story_count = held_stories[mass.id]
+        spent += 1
+        best = (result, perf, "realize")
+        best_d = _distance(perf)
+        held_dim = archive_mod.capture(session)
         if partition_id(session) != held_partition:
             archive_mod.restore_entry(session, entry)
             continue
-        reason = "COVER repair: realize(s)"
+        if not perf.get("fits_limitations") and spent < budget:
+            nudge = _nudge_for_violations(session, perf.get("violations") or {})
+            if nudge:
+                result2, perf2 = realize(session)
+                spent += 1
+                if partition_id(session) == held_partition and _distance(perf2) < best_d - 1e-9:
+                    best = (result2, perf2, nudge)
+                    best_d = _distance(perf2)
+                else:
+                    archive_mod.restore_snapshot(session, held_dim)
+        result, perf, label = best
+        reason = f"COVER repair: {label}"
         inserted = archive_mod.insert(archive, session, result, perf, reason=reason)
         inserted["repair"] = reason
+        inserted["repair_progress"] = round(max(0.0, before - best_d), 4)
         if hasattr(result, "to_dict"):
             session.last_massing = result.to_dict()
-        spent += 1
-        moves.append(reason)
-        after_legal = bool(perf.get("fits_limitations"))
-        after_raw = perf.get("feasibility_distance")
-        after_d = (
-            0.0
-            if after_legal
-            else (float(after_raw) if after_raw is not None else 1.0)
-        )
-        if after_legal:
+        progress += max(0.0, before - best_d)
+        moves.append(f"{label} Δ{before - best_d:+.3f}")
+        if perf.get("fits_limitations"):
             legalized += 1
-            continue
-        if after_d + 1e-9 >= before:
-            archive_mod.restore_entry(session, entry)
 
     archive_mod.restore_snapshot(session, origin)
     archive_mod.refresh_frontier(archive)
     report["tried"] = spent
     report["legalized"] = legalized
+    report["progress"] = round(progress, 4)
     report["moves"] = moves[:12]
     report["note"] = (
-        f"REPAIR: {spent} realize projection(s) on {len(candidates)} idea(s), "
-        f"{legalized} became legal."
+        f"REPAIR: {spent} projection(s) on {len(candidates)} idea(s), "
+        f"{legalized} became legal, distance improved by {progress:.3f}."
     )
     archive["repair"] = report
     return report
+
+
+def _distance(perf: dict[str, Any] | None) -> float:
+    perf = perf or {}
+    if perf.get("fits_limitations"):
+        return 0.0
+    raw = perf.get("feasibility_distance")
+    if raw is None:
+        return 1.0
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def _nudge_for_violations(session: Any, violations: dict[str, Any]) -> str | None:
+    """One strategic move chosen from the remaining violation. No regrouping."""
+    vec = {str(k): float(v or 0.0) for k, v in (violations or {}).items()}
+    if vec.get("stories", 0.0) >= 0.5:
+        if _clamp_stories_to_cap(session):
+            return "stories→cap"
+    if vec.get("split", 0.0) >= 0.5 or vec.get("edge_overrun", 0.0) >= 0.05:
+        if _bump_stories(session, +1):
+            return "stories+1"
+    if vec.get("ratio_hard", 0.0) >= 0.05 or vec.get("min_edge_short", 0.0) >= 0.05:
+        if _flip_envelope(session):
+            return "envelope"
+    if vec.get("split", 0.0) >= 0.5:
+        return None
+    return None
+
+
+def _unlocked_masses(session: Any) -> list[Any]:
+    lock = (session.constraints or {}).get("story_lock") or {}
+    return [m for m in (session.masses or []) if m.id not in lock]
+
+
+def _clamp_stories_to_cap(session: Any) -> bool:
+    cap = max(1, int((session.constraints or {}).get("max_stories") or 4))
+    changed = False
+    for mass in _unlocked_masses(session):
+        if int(mass.story_count or 1) > cap:
+            mass.story_count = cap
+            changed = True
+    return changed
+
+
+def _bump_stories(session: Any, delta: int) -> bool:
+    cap = max(1, int((session.constraints or {}).get("max_stories") or 4))
+    masses = _unlocked_masses(session)
+    if not masses:
+        return False
+    mass = max(masses, key=lambda m: (len(m.departments or []), int(m.story_count or 1)))
+    nxt = int(mass.story_count or 1) + int(delta)
+    if nxt < 1 or nxt > cap or nxt == int(mass.story_count or 1):
+        return False
+    mass.story_count = nxt
+    return True
+
+
+def _flip_envelope(session: Any) -> bool:
+    current = str((session.constraints or {}).get("cover_envelope") or "balanced")
+    nxt = {"compact": "elongated", "elongated": "compact"}.get(current, "compact")
+    if nxt == current:
+        return False
+    session.constraints["cover_envelope"] = nxt
+    return True
 
 
 def _repair_candidates(archive: dict[str, Any]) -> list[dict[str, Any]]:

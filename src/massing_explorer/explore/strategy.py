@@ -21,22 +21,112 @@ def story_band(stories: int) -> str:
 
 
 def grouping_is_required(session: Any) -> bool:
-    """True when the brief locked program organization. P is not sampled."""
-    briefing = session.constraints.get("briefing") or {}
-    for clause in briefing.get("requirements") or []:
-        if clause.get("lever") in {"mass_count", "same_mass", "alone", "keep_together"}:
-            return True
-    return bool(session.brief_locked)
+    """True only when the architect named a complete partition to freeze.
+
+    mass_count, keep-together, and alone constrain P. They do not freeze it.
+    brief_locked still blocks the chat tools from rewriting wings; COVER and
+    the CSP may sample other organizations that obey those constraints.
+    """
+    return bool((getattr(session, "constraints", None) or {}).get("partition_locked"))
+
+
+def p_constraints(session: Any) -> dict[str, Any] | None:
+    """User-stated P constraints, not the synthesized starting grouping."""
+    raw = (getattr(session, "constraints", None) or {}).get("p_constraints")
+    return raw if isinstance(raw, dict) else None
 
 
 def required_together(session: Any) -> list[frozenset[str]]:
+    """Glue pairs the architect stated. Synthesized wings are not glue."""
+    stated = p_constraints(session)
+    if stated is not None:
+        return _pair_list(stated.get("together"))
     pairs: list[frozenset[str]] = []
-    briefing = session.constraints.get("briefing") or {}
+    briefing = (getattr(session, "constraints", None) or {}).get("briefing") or {}
     for clause in briefing.get("requirements") or []:
         if clause.get("lever") in {"same_mass", "keep_together"}:
             depts = [str(d) for d in (clause.get("departments") or [])]
             if len(depts) >= 2:
                 pairs.append(frozenset(depts))
+    return pairs
+
+
+def required_alone(session: Any) -> list[str]:
+    """Departments the architect said must be their own mass."""
+    stated = p_constraints(session)
+    if stated is not None:
+        return [str(d) for d in (stated.get("alone") or []) if d]
+    out: list[str] = []
+    briefing = (getattr(session, "constraints", None) or {}).get("briefing") or {}
+    for clause in briefing.get("requirements") or []:
+        if clause.get("lever") != "alone":
+            continue
+        for dept in clause.get("departments") or []:
+            name = str(dept)
+            if name and name not in out:
+                out.append(name)
+    return out
+
+
+def preferred_mass_count(session: Any) -> int | None:
+    """Soft preferred |P| from the brief. Absent → no mass-count ranking bias."""
+    stated = p_constraints(session)
+    if stated is not None and stated.get("preferred_mass_count") is not None:
+        try:
+            n = int(stated["preferred_mass_count"])
+        except (TypeError, ValueError):
+            n = 0
+        return n if n > 0 else None
+    raw = (getattr(session, "constraints", None) or {}).get("preferred_mass_count")
+    if raw is not None and raw != "":
+        try:
+            n = int(raw)
+        except (TypeError, ValueError):
+            n = 0
+        if n > 0:
+            return n
+    briefing = (getattr(session, "constraints", None) or {}).get("briefing") or {}
+    for clause in briefing.get("preferences") or []:
+        if clause.get("lever") != "mass_count":
+            continue
+        value = clause.get("value")
+        if value is None or value == "":
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def required_mass_bounds(session: Any) -> tuple[int, int] | None:
+    """Inclusive |P| range. A single count is (n, n)."""
+    stated = p_constraints(session)
+    if stated is not None:
+        lo = stated.get("mass_count_min")
+        hi = stated.get("mass_count_max")
+        exact = stated.get("mass_count")
+        if lo is None and hi is None and exact is None:
+            return None
+        try:
+            lo_i = int(lo if lo is not None else (exact if exact is not None else hi))
+            hi_i = int(hi if hi is not None else (exact if exact is not None else lo))
+        except (TypeError, ValueError):
+            return None
+        if lo_i <= 0 or hi_i <= 0:
+            return None
+        return (min(lo_i, hi_i), max(lo_i, hi_i))
+    count = required_mass_count(session)
+    if count is None:
+        return None
+    return (int(count), int(count))
+
+
+def _pair_list(raw: Any) -> list[frozenset[str]]:
+    pairs: list[frozenset[str]] = []
+    for item in raw or []:
+        if isinstance(item, (list, tuple, set, frozenset)) and len(item) >= 2:
+            pairs.append(frozenset(str(d) for d in item))
     return pairs
 
 
@@ -58,6 +148,9 @@ def required_mass_count(session: Any) -> int | None:
 
 def required_apart(session: Any) -> list[frozenset[str]]:
     """Keep-apart pairs constrain P; they do not lock a single grouping."""
+    stated = p_constraints(session)
+    if stated is not None:
+        return _pair_list(stated.get("apart"))
     pairs: list[frozenset[str]] = []
     briefing = session.constraints.get("briefing") or {}
     for clause in briefing.get("requirements") or []:
@@ -149,9 +242,11 @@ def partition_id(session: Any) -> str:
 
 
 def idea_key(session: Any) -> str:
-    """Coarse COVER idea: P + T + loading + envelope + plate + story bands.
+    """Architectural identity: P + T + V + loading + envelope + plate + exact stories.
 
     Exact widths are omitted so a repaired plate stays the same idea.
+    Vertical organization is included because search can pin floors.
+    Story counts are exact so 3 and 4 do not collapse into one band.
     """
     loading = session.constraints.get("loading") or "double"
     topo = topology_of(session)
@@ -163,10 +258,22 @@ def idea_key(session: Any) -> str:
         f"L:{loading}",
         f"E:{env}",
         f"PL:{plate}",
+        _vertical_token(
+            session.floor_pins or {},
+            session.double_height_rooms or [],
+            session.constraints.get("story_lock") or {},
+        ),
     ]
     for mass in session.masses:
-        parts.append(f"{mass.id}:{story_band(mass.story_count)}")
+        parts.append(f"{mass.id}:{int(mass.story_count)}")
     return "|".join(parts)
+
+
+def _vertical_token(pins: Any, double_height: Any, story_lock: Any) -> str:
+    pin_bits = sorted(f"{k}:{int(v)}" for k, v in (pins or {}).items())
+    dh_bits = sorted(str(x) for x in (double_height or []))
+    lock_bits = sorted(f"{k}:{int(v)}" for k, v in (story_lock or {}).items())
+    return f"V:{','.join(pin_bits)}/{','.join(dh_bits)}/{','.join(lock_bits)}"
 
 
 def idea_key_from_entry(entry: dict[str, Any] | None) -> str:
@@ -189,12 +296,18 @@ def idea_key_from_entry(entry: dict[str, Any] | None) -> str:
             parts.append("+".join(sorted(str(d) for d in (depts or []))))
         partition = " / ".join(sorted(parts))
     stories = geom.get("stories") or entry.get("stories") or {}
-    bands = []
+    heights = []
     for mid, n in stories.items():
         try:
-            bands.append(f"{mid}:{story_band(int(n))}")
+            heights.append(f"{mid}:{int(n)}")
         except (TypeError, ValueError):
             continue
+    vertical = strat.get("V") or {}
+    token = _vertical_token(
+        vertical.get("pins") or {},
+        vertical.get("double_height") or [],
+        vertical.get("story_lock") or {},
+    )
     return "|".join(
-        [f"P:{partition}", f"T:{topo}", f"L:{loading}", f"E:{env}", f"PL:{plate}", *bands]
+        [f"P:{partition}", f"T:{topo}", f"L:{loading}", f"E:{env}", f"PL:{plate}", token, *heights]
     )

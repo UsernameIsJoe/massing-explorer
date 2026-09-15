@@ -368,7 +368,7 @@ class TestApplyBrief(unittest.TestCase):
         gym_mass = next(m for m in self.session.masses if HPE in m.departments)
         academic = next(m for m in self.session.masses if CORE in m.departments)
         art = next(m for m in self.session.masses if ART in m.departments)
-        self.assertEqual(set(gym_mass.departments), {HPE, DINING})
+        self.assertIn(DINING, gym_mass.departments)
         self.assertEqual(academic.departments, [CORE])
         self.assertGreater(len(art.departments), 1)
         self.assertIn(ART, art.departments)

@@ -18,9 +18,10 @@ FRONTIER_DISTANCE = 0.35
 
 DISTANCE_WEIGHTS = {
     "edge_overrun": 0.40,
-    "min_edge_short": 0.15,
-    "ratio_hard": 0.15,
-    "split": 0.20,
+    "min_edge_short": 0.10,
+    "ratio_hard": 0.10,
+    "split": 0.15,
+    "stories": 0.15,
     "required_width": 0.05,
     "other": 0.05,
 }

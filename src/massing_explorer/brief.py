@@ -95,11 +95,13 @@ class ParsedBrief:
     constraints: dict[str, Any] = field(default_factory=dict)
     max_stories: int | None = None
     named_masses: list[tuple[str, list[str]]] = field(default_factory=list)
+    stated_wings: list[tuple[str, list[str]]] = field(default_factory=list)
     pair_length_ft: float | None = None
     mass_count: int | None = None
     mass_count_min: int | None = None
     mass_count_max: int | None = None
     pin_ground: list[str] = field(default_factory=list)
+    stated_alone: list[str] = field(default_factory=list)
     free_departments: list[str] = field(default_factory=list)
     open_slots: int | None = None
     length_over_width: float | None = None
@@ -129,6 +131,7 @@ class ParsedBrief:
             "unmatched": self.unmatched,
             "unknown_programs": list(self.unknown_programs),
             "pin_ground": list(self.pin_ground),
+            "stated_alone": list(self.stated_alone),
             "free_departments": list(self.free_departments),
             "open_slots": self.open_slots,
             "dimensions": list(self.dimensions),
@@ -2208,6 +2211,7 @@ def parse_brief(text: str, department_names: list[str]) -> ParsedBrief:
     _extract_near_relations(parsed, raw, department_names)
     _extract_cluster_and_plaza_rules(parsed, raw, department_names)
     parsed.named_masses = _extract_named_masses(raw, department_names)
+    parsed.stated_wings = list(parsed.named_masses)
     _apply_counted_masses(parsed, raw, department_names)
     parsed.pair_length_ft = _extract_named_pair_length(raw)
     if parsed.constraints.get("max_building_length_ft"):
@@ -3091,6 +3095,9 @@ def _apply_counted_masses(
         for d in depts:
             if d not in solos:
                 solos.append(d)
+    for dept in solos:
+        if dept not in parsed.stated_alone:
+            parsed.stated_alone.append(dept)
 
     pin_kinds: dict[str, str] = dict(parsed.constraints.get("pin_ground_kind") or {})
 
@@ -4242,6 +4249,8 @@ def apply_classified_clauses(parsed: ParsedBrief, reading: Any) -> dict[str, lis
                         parsed.keep_together.append((depts[0], other))
             elif lever == "alone":
                 for dept in depts:
+                    if dept not in parsed.stated_alone:
+                        parsed.stated_alone.append(dept)
                     if not any(dept in mass_depts for _, mass_depts in parsed.named_masses):
                         parsed.named_masses.append((dept.title(), [dept]))
             elif lever == "mass_count" and value and parsed.mass_count is None:
@@ -4689,6 +4698,40 @@ def apply_parsed_brief(
     if parsed.named_masses or parsed.keep_together or parsed.mass_count:
         session.brief_locked = True
         session.save()
+    # Chat tools stay locked. Search reads these constraints and still varies P.
+    together = [list(p) for p in parsed.keep_together]
+    stated_groups: list[list[str]] = []
+    for _name, depts in parsed.stated_wings:
+        clean = [str(d) for d in depts if d]
+        if clean:
+            stated_groups.append(clean)
+            for i, left in enumerate(clean):
+                for right in clean[i + 1 :]:
+                    pair = [left, right]
+                    if pair not in together and [right, left] not in together:
+                        together.append(pair)
+    for left, right in parsed.keep_together:
+        if not any(left in group and right in group for group in stated_groups):
+            stated_groups.append([str(left), str(right)])
+    apart = [list(p) for p in parsed.keep_apart]
+    for i, left in enumerate(stated_groups):
+        for right in stated_groups[i + 1 :]:
+            for a in left:
+                for b in right:
+                    pair = [a, b]
+                    if pair not in apart and [b, a] not in apart:
+                        apart.append(pair)
+    if parsed.stated_wings:
+        session.constraints["keep_stated_drawing"] = True
+    session.constraints["p_constraints"] = {
+        "together": together,
+        "apart": apart,
+        "alone": list(parsed.stated_alone),
+        "mass_count": parsed.mass_count,
+        "mass_count_min": parsed.mass_count_min,
+        "mass_count_max": parsed.mass_count_max,
+        "preferred_mass_count": parsed.constraints.get("preferred_mass_count"),
+    }
 
     searched = None
     solved = None

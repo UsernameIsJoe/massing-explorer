@@ -117,6 +117,7 @@ class AdaptiveCoverTests(unittest.TestCase):
 
     def test_thin_axis_product_does_not_pad_with_geom_ranks(self) -> None:
         """Widths are realize's job; COVER does not invent geom-rank padding."""
+        self.session.constraints["partition_locked"] = True
         self.session.constraints["story_lock"] = {
             m.id: int(m.story_count) for m in self.session.masses
         }

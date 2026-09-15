@@ -113,12 +113,33 @@ def run_search(session: Any, mode: str = "cover", client: Any = None, plan: Any 
     note += " " + str(explain_report.get("note") or "")
     csp_report = describe_csp(session)
     note += " " + str(csp_report.get("note") or "")
+    cover_pool_n = int(session.constraints.get("cover_partition_budget") or 0)
+    if cover_pool_n and not csp_report.get("locked"):
+        note += (
+            f" COVER searches {cover_pool_n} diverse partition(s); "
+            f"the board shows {csp_report.get('shown')}."
+        )
     topo_report = describe_topology(session)
     note += " " + str(topo_report.get("note") or "")
     archive["note"] = note
 
     weights = (learning.get("weights") or {}) if learning else {}
-    kept = _pick_kept(archive, weights, archive.get("stated_partition"))
+    preferred = archive.get("stated_partition")
+    kept = _pick_kept(archive, weights, preferred)
+    tasted = bool(weights and any(abs(float(v)) > 1e-9 for v in weights.values()))
+    if session.constraints.get("keep_stated_drawing") and preferred and not tasted:
+        stated_cells = [
+            e
+            for e in (archive.get("cells") or {}).values()
+            if e.get("partition") == preferred
+        ]
+        if stated_cells:
+            legal_stated = [e for e in stated_cells if e.get("fits_limitations")]
+            kept = (
+                max(legal_stated, key=lambda e: taste_weight(e, weights))
+                if legal_stated
+                else min(stated_cells, key=_cell_badness)
+            )
     if kept:
         archive_mod.restore_entry(session, kept)
     robust_report = {"ran": False}
@@ -217,6 +238,7 @@ def run_search(session: Any, mode: str = "cover", client: Any = None, plan: Any 
         "locked": csp_report.get("locked"),
         "feasible": csp_report.get("feasible_count"),
         "shown": csp_report.get("shown"),
+        "cover_pool": cover_pool_n,
         "note": csp_report.get("note"),
         "rejected": csp_report.get("rejected") or [],
         "atoms": csp_report.get("atoms") or [],
@@ -297,6 +319,7 @@ def run_search(session: Any, mode: str = "cover", client: Any = None, plan: Any 
             "locked": csp_report.get("locked"),
             "feasible": csp_report.get("feasible_count"),
             "shown": csp_report.get("shown"),
+            "cover_pool": cover_pool_n,
             "note": csp_report.get("note"),
         },
         "topology": {
@@ -751,8 +774,13 @@ def _pick_kept(
             if same:
                 return max(same, key=lambda e: taste_weight(e, weights))
         return max(legal, key=lambda e: taste_weight(e, weights))
-    # No legal cell: keep the least-bad COVER sample, not an illegal stated scheme.
+    # No legal cell: keep the stated organization if we have it. A closer
+    # illegal regroup is still in the archive; it should not replace the brief.
     cells = list((archive.get("cells") or {}).values())
     if not cells:
         return {}
+    if preferred_partition and not tasted:
+        stated = [e for e in cells if e.get("partition") == preferred_partition]
+        if stated:
+            return min(stated, key=_cell_badness)
     return min(cells, key=_cell_badness)

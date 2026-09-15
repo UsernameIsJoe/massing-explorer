@@ -192,6 +192,7 @@ def _width_choices(session: Any, mass: Any, config: dict[str, Any]) -> list[floa
 
     plate = _plate_of(session, mass, config)
     raw: list[float] = []
+    raw.extend(_envelope_widths(session, plate))
     try:
         raw.append(float(functional_bar_width(session, mass, config)))
     except Exception:
@@ -215,6 +216,20 @@ def _width_choices(session: Any, mass: Any, config: dict[str, Any]) -> list[floa
         seen.add(w)
         out.append(w)
     return out
+
+
+def _envelope_widths(session: Any, plate: float) -> list[float]:
+    """Generate widths for the requested envelope, not only a later tie-break."""
+    if plate <= 0:
+        return []
+    env = str((session.constraints or {}).get("cover_envelope") or "balanced")
+    side = plate ** 0.5
+    min_w = float((session.constraints or {}).get("min_edge_ft") or MIN_WIDTH_FT)
+    if env == "compact":
+        return [side, side * 1.2, max(min_w, side * 0.85)]
+    if env == "elongated":
+        return [max(min_w, side * 0.42), max(min_w, side * 0.55), max(min_w, side * 0.7)]
+    return [max(min_w, side * 0.65), side, side * 1.15]
 
 
 def _total_length_combo(

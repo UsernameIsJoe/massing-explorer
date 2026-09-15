@@ -44,6 +44,19 @@ def empty_cells(session: Any, archive: dict[str, Any] | None = None) -> dict[str
             }
         )
     else:
+        count = required_mass_count(session)
+        if count:
+            items.append(
+                {
+                    "kind": "unsampled",
+                    "cell": "P",
+                    "sentence": (
+                        f"Program organization is constrained to {count} masses. "
+                        "Together and alone pairs stay glued. Other legal organizations "
+                        "are still sampled."
+                    ),
+                }
+            )
         parts = {e.get("partition") for e in (archive.get("cells") or {}).values() if e.get("partition")}
         if len(parts) <= 1:
             items.append(

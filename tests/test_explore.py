@@ -100,7 +100,7 @@ class TestActions(unittest.TestCase):
         session = _tiny_session()
         out = apply_action(session, {"op": "SPLIT_MASS", "programs": [ART], "from": "academic"})
         self.assertFalse(out["ok"])
-        self.assertIn("required", out["reason"].lower())
+        self.assertIn("constraint solver", out["reason"].lower())
         self.assertEqual(len(session.masses), 2)
 
     def test_keep_apart_cannot_undo_a_required_pair(self) -> None:
@@ -202,7 +202,7 @@ class TestController(unittest.TestCase):
         )
         out = apply_brief(self.session, text)
         self.assertTrue(out["ok"], out)
-        self.assertTrue(grouping_is_required(self.session))
+        self.assertFalse(grouping_is_required(self.session))
         explore = self.session.constraints.get("explore") or {}
         archive = explore.get("archive") or {}
         self.assertGreaterEqual(archive.get("attempts", 0), 2)
@@ -212,11 +212,11 @@ class TestController(unittest.TestCase):
         self.assertEqual(home[HPE], home[DINING])
         self.assertEqual(len(self.session.masses), 4)
         parts = {e.get("partition") for e in (archive.get("cells") or {}).values()}
-        self.assertEqual(len(parts), 1)
+        self.assertGreater(len(parts), 1, parts)
         explain = explore.get("explain") or {}
         joined = " ".join(explain.get("sentences") or [])
         self.assertIn("Courtyard", joined)
-        self.assertIn("required", joined.lower())
+        self.assertIn("constrained", joined.lower())
         self.assertGreaterEqual(int(explain.get("locked") or 0), 1)
         robust = explore.get("robustness") or {}
         self.assertTrue(robust.get("ran"))
@@ -228,7 +228,8 @@ class TestController(unittest.TestCase):
             title="Empty cells and same-strategy robustness",
         )
         strategy = read_strategy(self.session)
-        self.assertTrue(strategy["P"]["locked"])
+        self.assertFalse(strategy["P"]["locked"])
+        self.assertEqual(strategy["P"]["mass_count"], 4)
         self.assertEqual(strategy["T"]["kind"], "independent_bars")
         from massing_explorer.solver import solve_massing_study
 
@@ -834,6 +835,7 @@ class TestPartitions(unittest.TestCase):
 
     def test_locked_brief_returns_only_the_stated_grouping(self) -> None:
         session = _tiny_session()
+        session.constraints["partition_locked"] = True
         found = enumerate_partitions(session)
         self.assertEqual(len(found), 1)
         self.assertEqual(found[0]["reason"], "stated grouping")
@@ -984,7 +986,7 @@ class TestTopology(unittest.TestCase):
                 "Core academic by itself is one mass. Site length is 400, width is 100, max 4 stories.",
             )
             self.assertTrue(out["ok"], out)
-            self.assertTrue(grouping_is_required(session))
+            self.assertFalse(grouping_is_required(session))
             self.assertEqual(stated_frontage_ft(session), 400)
             explore = session.constraints.get("explore") or {}
             archive = explore.get("archive") or {}
