@@ -209,6 +209,42 @@ HTML = r"""<!DOCTYPE html>
   .status.ok { color: var(--ok); }
   .status.bad { color: var(--bad); }
   .status.warn { color: var(--warn); }
+  .run-progress {
+    display: none;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: -8px;
+  }
+  .run-progress.show { display: flex; }
+  .run-progress .bar {
+    height: 3px;
+    background: #1c1c1c;
+    border: 1px solid var(--line);
+    overflow: hidden;
+    position: relative;
+  }
+  .run-progress .bar > span {
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 40%;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
+    animation: run-progress-slide 1.1s ease-in-out infinite;
+  }
+  .run-progress.determinate .bar > span {
+    animation: none;
+    width: var(--pct, 8%);
+    background: var(--accent);
+    transition: width 0.35s ease;
+  }
+  @keyframes run-progress-slide {
+    0% { left: -40%; }
+    100% { left: 100%; }
+  }
+  .run-progress .phase {
+    font-size: 11px;
+    color: var(--faint);
+    letter-spacing: 0.04em;
+  }
   main {
     position: relative;
     display: grid;
@@ -894,6 +930,26 @@ HTML = r"""<!DOCTYPE html>
     border: 1px solid var(--line-strong);
     padding: 10px;
     background: rgba(255,255,255,0.02);
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease;
+    width: 100%;
+    text-align: left;
+    font: inherit;
+    color: inherit;
+    display: block;
+  }
+  .learn-card:hover,
+  .learn-card:focus-visible {
+    border-color: var(--accent, #d4a84b);
+    background: rgba(212,168,75,0.06);
+    outline: none;
+  }
+  .learn-card .hint-pick {
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--faint);
+    margin-top: 8px;
   }
   .learn-card canvas {
     width: 100%;
@@ -963,6 +1019,10 @@ HTML = r"""<!DOCTYPE html>
 
     <button class="primary" id="go">Generate</button>
     <div class="status" id="status">Ready.</div>
+    <div class="run-progress" id="runProgress" aria-hidden="true">
+      <div class="bar"><span id="runProgressFill"></span></div>
+      <div class="phase" id="runProgressPhase">Working…</div>
+    </div>
   </aside>
 
   <main>
@@ -1017,13 +1077,11 @@ HTML = r"""<!DOCTYPE html>
     <div class="modal learn-modal" role="dialog" aria-labelledby="learnTitle">
       <h2 id="learnTitle">Which scheme do you prefer?</h2>
       <p class="lead" id="learnLead">
-        Pick A or B. Soft taste only — requirements and caps stay locked.
+        Click the scheme you prefer. Soft taste only — requirements and caps stay locked.
       </p>
       <div class="learn-pair" id="learnPair"></div>
       <div class="modal-actions">
         <button type="button" class="ghost" id="learnSkip">Skip for now</button>
-        <button type="button" id="learnPickA">Prefer A</button>
-        <button type="button" id="learnPickB">Prefer B</button>
       </div>
     </div>
   </div>
@@ -1048,6 +1106,9 @@ const brief = document.getElementById("brief");
 const explore = document.getElementById("explore");
 const go = document.getElementById("go");
 const status = document.getElementById("status");
+const runProgress = document.getElementById("runProgress");
+const runProgressFill = document.getElementById("runProgressFill");
+const runProgressPhase = document.getElementById("runProgressPhase");
 const empty = document.getElementById("empty");
 const meta = document.getElementById("meta");
 const massList = document.getElementById("massList");
@@ -1075,8 +1136,6 @@ const modalitySkip = document.getElementById("modalitySkip");
 const learnModal = document.getElementById("learnModal");
 const learnPairEl = document.getElementById("learnPair");
 const learnLead = document.getElementById("learnLead");
-const learnPickA = document.getElementById("learnPickA");
-const learnPickB = document.getElementById("learnPickB");
 const learnSkip = document.getElementById("learnSkip");
 let pendingLearnPair = null;
 
@@ -1095,24 +1154,25 @@ function learnCardHtml(side, card) {
     ["perf", axes.performance_efficiency],
     ["robust", axes.robustness],
   ].map(([k, v]) => `${k} ${fmtAxis(v)}`).join(" · ");
-  return `<div class="learn-card" data-side="${side}">
+  return `<button type="button" class="learn-card" data-side="${side}" aria-label="Prefer scheme ${side.toUpperCase()}">
     <div class="side">Scheme ${side.toUpperCase()}</div>
     <canvas aria-hidden="true"></canvas>
     <div class="label">${esc(card.label || card.cell_id || side)}</div>
     <div class="axes">${esc(axisLine)}</div>
-  </div>`;
+    <div class="hint-pick">Click to prefer</div>
+  </button>`;
 }
 
 function openLearnModal(pair) {
   pendingLearnPair = pair || null;
   if (!pendingLearnPair || !pendingLearnPair.a || !pendingLearnPair.b) return;
   const n = pendingLearnPair.comparisons || 0;
-  const maxN = pendingLearnPair.max_comparisons || 4;
+  const maxN = pendingLearnPair.max_comparisons || 5;
   const kind = pendingLearnPair.kind ? ` · ${pendingLearnPair.kind}` : "";
   if (learnLead) {
     const progress = `Question ${Math.min(n + 1, maxN)} of ${maxN}`;
     learnLead.textContent = `${progress}${kind}. `
-      + (pendingLearnPair.note || "Which scheme do you prefer? Soft taste only — requirements and caps stay locked.");
+      + (pendingLearnPair.note || "Click the scheme you prefer. Soft taste only — requirements and caps stay locked.");
   }
   learnPairEl.innerHTML = learnCardHtml("a", pendingLearnPair.a) + learnCardHtml("b", pendingLearnPair.b);
   learnModal.classList.add("show");
@@ -1123,6 +1183,7 @@ function openLearnModal(pair) {
       const mesh = pendingLearnPair[side]?.preview;
       const canvas = card.querySelector("canvas");
       if (canvas && mesh) paintSchemeThumb(canvas, mesh);
+      card.addEventListener("click", () => submitLearnChoice(side));
     }
   });
 }
@@ -1143,9 +1204,13 @@ async function submitLearnChoice(winner) {
     setStatus("No study loaded.", "warn");
     return;
   }
-  learnPickA.disabled = true;
-  learnPickB.disabled = true;
-  setStatus(`Recording preference ${String(winner).toUpperCase()}…`);
+  if (learnPairEl) {
+    for (const btn of learnPairEl.querySelectorAll(".learn-card")) btn.disabled = true;
+  }
+  if (learnSkip) learnSkip.disabled = true;
+  const learnLabel = `Recording preference ${String(winner).toUpperCase()}…`;
+  setStatus(learnLabel);
+  startRunProgress(learnLabel);
   try {
     const res = await fetch("/api/learn_choice", {
       method: "POST",
@@ -1172,13 +1237,14 @@ async function submitLearnChoice(winner) {
   } catch (err) {
     setStatus(String(err), "bad");
   } finally {
-    learnPickA.disabled = false;
-    learnPickB.disabled = false;
+    stopRunProgress();
+    if (learnSkip) learnSkip.disabled = false;
+    if (learnPairEl) {
+      for (const btn of learnPairEl.querySelectorAll(".learn-card")) btn.disabled = false;
+    }
   }
 }
 
-learnPickA.addEventListener("click", () => submitLearnChoice("a"));
-learnPickB.addEventListener("click", () => submitLearnChoice("b"));
 learnSkip.addEventListener("click", () => {
   closeLearnModal();
   setStatus("Skipped A/B for now. Open Process → steps to see LEARN pending.", "warn");
@@ -1301,10 +1367,57 @@ go.addEventListener("click", async () => {
   await runGenerate([], false);
 });
 
+let runProgressTimer = null;
+let runProgressStep = 0;
+const RUN_PHASES = [
+  "Reading brief…",
+  "COVER sampling…",
+  "REPAIR / planner…",
+  "MCTS / BO…",
+  "REFINE / archive…",
+];
+
+function startRunProgress(label) {
+  if (!runProgress) return;
+  stopRunProgress();
+  runProgress.classList.add("show");
+  runProgress.classList.remove("determinate");
+  runProgress.setAttribute("aria-hidden", "false");
+  runProgressStep = 0;
+  if (runProgressPhase) runProgressPhase.textContent = label || RUN_PHASES[0];
+  if (runProgressFill) runProgressFill.style.width = "";
+  runProgressTimer = setInterval(() => {
+    runProgressStep = Math.min(runProgressStep + 1, RUN_PHASES.length - 1);
+    if (runProgressPhase) {
+      runProgressPhase.textContent = RUN_PHASES[runProgressStep];
+    }
+    runProgress.classList.add("determinate");
+    const pct = 12 + runProgressStep * 18;
+    runProgress.style.setProperty("--pct", `${Math.min(pct, 88)}%`);
+  }, 4500);
+}
+
+function stopRunProgress() {
+  if (runProgressTimer) {
+    clearInterval(runProgressTimer);
+    runProgressTimer = null;
+  }
+  if (!runProgress) return;
+  runProgress.classList.remove("show", "determinate");
+  runProgress.setAttribute("aria-hidden", "true");
+  runProgress.style.removeProperty("--pct");
+}
+
 async function runGenerate(modalityAnswers, skipModalityAsk) {
   const text = brief.value.trim();
   go.disabled = true;
-  setStatus(skipModalityAsk ? "COVER sampling…" : (modalityAnswers?.length ? "Applying your reading, then COVER sampling…" : "Reading brief, then COVER sampling…"));
+  const kickoff = skipModalityAsk
+    ? "COVER sampling…"
+    : (modalityAnswers?.length
+      ? "Applying your reading, then COVER sampling…"
+      : "Reading brief, then COVER sampling…");
+  setStatus(kickoff);
+  startRunProgress(kickoff);
   try {
     const res = await fetch("/api/generate", {
       method: "POST",
@@ -1349,6 +1462,7 @@ async function runGenerate(modalityAnswers, skipModalityAsk) {
   } catch (err) {
     setStatus(String(err), "bad");
   } finally {
+    stopRunProgress();
     go.disabled = false;
   }
 }
@@ -1511,8 +1625,14 @@ async function selectScheme(rank) {
   }
   renderProcess(lastTransparency);
   if (studyId == null) return;
+  // Persist selection in the background; card preview already updated the view.
   if (scheme.source === "archive" && scheme.cell_id) {
-    await applyArchiveCell(scheme.cell_id);
+    // Envelope preview is interim; always swap in the full program mesh when ready.
+    applyArchiveCell(scheme.cell_id, { quiet: true, skipMesh: false });
+    return;
+  }
+  if (scheme.preview) {
+    setStatus(`Previewing scheme #${rank}.`, "ok");
     return;
   }
   setStatus(`Loading scheme #${rank}…`);
@@ -1542,8 +1662,10 @@ async function selectScheme(rank) {
   }
 }
 
-async function applyArchiveCell(cellId) {
-  setStatus("Loading COVER candidate…");
+async function applyArchiveCell(cellId, opts = {}) {
+  const quiet = Boolean(opts.quiet);
+  const skipMesh = Boolean(opts.skipMesh);
+  if (!quiet) setStatus("Loading COVER candidate…");
   try {
     const res = await fetch("/api/apply_cell", {
       method: "POST",
@@ -1552,21 +1674,25 @@ async function applyArchiveCell(cellId) {
     });
     const data = await res.json();
     if (!data.ok) {
-      setStatus(data.error || "Could not open that cell", "warn");
+      if (!quiet) setStatus(data.error || "Could not open that cell", "warn");
       return;
     }
-    renderMesh(data.mesh);
-    renderLegend(data.mesh);
-    lastMesh = data.mesh;
-    clearInspect();
-    updateHud(data.mesh);
-    const pass = data.mesh.all_checks_passed;
-    setStatus(
-      (pass ? "Candidate applied. " : "Candidate applied with failed checks. ") + (data.note || ""),
-      pass ? "ok" : "warn"
-    );
+    if (!skipMesh && data.mesh) {
+      renderMesh(data.mesh);
+      renderLegend(data.mesh);
+      lastMesh = data.mesh;
+      clearInspect();
+      updateHud(data.mesh);
+    }
+    if (!quiet) {
+      const pass = data.mesh && data.mesh.all_checks_passed;
+      setStatus(
+        (pass ? "Candidate applied. " : "Candidate applied with failed checks. ") + (data.note || ""),
+        pass ? "ok" : "warn"
+      );
+    }
   } catch (err) {
-    setStatus(String(err), "bad");
+    if (!quiet) setStatus(String(err), "bad");
   }
 }
 
@@ -1586,7 +1712,8 @@ async function selectCandidate(cellId) {
   }
   renderProcess(lastTransparency);
   if (studyId == null || !cellId) return;
-  await applyArchiveCell(cellId);
+  // Envelope preview is interim; always swap in the full program mesh when ready.
+  applyArchiveCell(cellId, { quiet: true, skipMesh: false });
 }
 
 const thumbScenes = new WeakMap();
@@ -1691,7 +1818,10 @@ function mountPoolThumbs() {
 function renderLegend(mesh) {
   const leg = mesh.legend || {};
   const masses = leg.masses || [];
-  if (!masses.length) {
+  const hasDepts = masses.some((m) => (m.departments || []).length);
+  // Envelope thumbnails have no program split — keep the study legend stable.
+  if (!hasDepts) {
+    if (legend.classList.contains("show") && legend.innerHTML) return;
     legend.classList.remove("show");
     legend.innerHTML = "";
     return;
@@ -2152,7 +2282,7 @@ function renderProcess(t) {
       if (pool.typology_cells && pool.typology_cells !== pool.count) {
         coverBits.push(`${pool.typology_cells} typology cells`);
       }
-      if (pool.drawings_collapsed) coverBits.push(`hid ${pool.drawings_collapsed} duplicate drawings`);
+      if (pool.drawings_collapsed) coverBits.push(`hid ${pool.drawings_collapsed} near-twin drawing(s)`);
       if (pool.cover_incomplete) coverBits.push("map incomplete");
       const coverLine = coverBits.length ? `${coverBits.join(" · ")} · ` : "";
       processBody.innerHTML = `
@@ -2204,7 +2334,7 @@ function renderProcess(t) {
       return;
     }
     processBody.innerHTML = `
-      <div class="notes-line" style="margin-top:0">${cands.length} top candidate(s) · not a ranking of the whole pool. Search keeps at most three: best stated-fit (or LEARN taste after A/B), one different organization / topology / envelope, and a contrast lineage. Radars: 9 COVER probe axes (strategy space) and 4 soft eval axes (LEARN).</div>
+      <div class="notes-line" style="margin-top:0">${cands.length} candidate(s) · elites first (best fit / contrast), then other legal cells. Near-identical drawings may still appear so you can inspect twins. Radars: 9 COVER probe axes and 4 soft eval axes (LEARN).</div>
       <div class="cand-grid">
         ${cands.map(c => {
           const masses = (c.masses || []).map(m =>
@@ -2403,6 +2533,29 @@ function renderMesh(mesh) {
 """
 
 
+def _study_department_colors(session: Any) -> dict[str, str]:
+    """Stable department → hex map for one study (same legend across candidates)."""
+    from .preview3d import stable_department_colors
+
+    store = dict(session.constraints.get("explore") or {})
+    cached_raw = store.get("department_colors")
+    if isinstance(cached_raw, dict) and cached_raw:
+        return {str(k): str(v) for k, v in cached_raw.items() if k and v}
+    names: list[str] = []
+    try:
+        names = [str(n) for n in (session.department_names() or []) if n]
+    except Exception:
+        names = []
+    if not names:
+        program = getattr(session, "program", None)
+        if program is not None:
+            names = [str(d.name) for d in (program.departments or []) if getattr(d, "name", None)]
+    colors = stable_department_colors(names)
+    store["department_colors"] = colors
+    session.constraints["explore"] = store
+    return colors
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "MassingExplorerUI/0.1"
 
@@ -2570,6 +2723,8 @@ class Handler(BaseHTTPRequestHandler):
             program=program,
             config_path=config_path or "",
         )
+        # Lock program → color map for this study so every candidate shares legends.
+        _study_department_colors(session)
         session.save()
 
         note = ""
@@ -2635,7 +2790,9 @@ class Handler(BaseHTTPRequestHandler):
             config = load_project_config(config_path) if config_path else {}
         except FileNotFoundError:
             config = {}
-        mesh = preview_mesh(result, config=config)
+        mesh = preview_mesh(
+            result, config=config, department_colors=_study_department_colors(session)
+        )
         # Confirm every spreadsheet department landed in the mesh.
         program_names = {d.name for d in program.departments}
         boxed = {b.get("department") for b in mesh.get("boxes") or []}
@@ -2765,7 +2922,9 @@ class Handler(BaseHTTPRequestHandler):
             config = load_project_config(config_path) if config_path else {}
         except FileNotFoundError:
             config = {}
-        mesh = preview_mesh(result, config=config)
+        mesh = preview_mesh(
+            result, config=config, department_colors=_study_department_colors(session)
+        )
         session.save()
         _STATE["study_id"] = session.study_id
         scheme = session.last_search[index]
@@ -2824,7 +2983,9 @@ class Handler(BaseHTTPRequestHandler):
             config = load_project_config(config_path) if config_path else {}
         except FileNotFoundError:
             config = {}
-        mesh = preview_mesh(result, config=config)
+        mesh = preview_mesh(
+            result, config=config, department_colors=_study_department_colors(session)
+        )
         session.save()
         _STATE["study_id"] = session.study_id
         self._json(
@@ -2870,20 +3031,8 @@ class Handler(BaseHTTPRequestHandler):
                 400,
             )
             return
-        # Preference feedback retargets local search under the new taste weights.
-        try:
-            from .explore.controller import run_search
-
-            refined = run_search(session, mode="refine")
-            if refined:
-                applied = dict(applied)
-                applied["reply"] = (
-                    str(applied.get("reply") or "")
-                    + " REFINE reran under updated taste."
-                )
-                session.save()
-        except Exception:
-            pass
+        # Keep A/B snappy: choice already restored the winner and queued the next
+        # pair. Full REFINE runs only when LEARN completes (inside apply_choice).
 
         config_path = session.config_path or _STATE.get("config_path") or (
             str(DEFAULT_CONFIG) if DEFAULT_CONFIG.exists() else None
@@ -2893,7 +3042,9 @@ class Handler(BaseHTTPRequestHandler):
             config = load_project_config(config_path) if config_path else {}
         except FileNotFoundError:
             config = {}
-        mesh = preview_mesh(result, config=config)
+        mesh = preview_mesh(
+            result, config=config, department_colors=_study_department_colors(session)
+        )
         session.save()
         _STATE["study_id"] = session.study_id
         transparency = transparency_payload(session, full_explore=True)

@@ -1,13 +1,14 @@
 # Blueprint: hierarchical strategy search
 
-Recorded 9 Sep 2026; REPAIR / near-feasible frontier added 11 Sep 2026. This is
-the constitution of the search. Older notes in
-`DISCUSSION-search-architecture.md` and `PLAN-search-architecture.md` describe
-the three *jobs* (cover, learn, refine). This file says how those jobs sit in
-the system: they are modes over an archive, not a one-way Stage 1 → 2 → 3
-pipeline, and not a width enumerator.
+Updated 16 Sep 2026 (P pool, realize(s), studio UI LEARN). This is the
+constitution of the search. Older notes in `DISCUSSION-search-architecture.md`
+and `PLAN-search-architecture.md` describe the three *jobs* (cover, learn,
+refine). This file says how those jobs sit in the system: they are modes over
+an archive, not a one-way Stage 1 → 2 → 3 pipeline, and not a width enumerator.
 
 The engine stays the engine. What changes is the control loop.
+
+Product pages: [CONCEPT.md](CONCEPT.md), [WORKFLOW.md](WORKFLOW.md), [UI.md](UI.md).
 
 ---
 
@@ -143,10 +144,12 @@ knowledge about why regions are empty.
 | Strategy planner | `explore/planner.py` |
 | Semantic actions | `explore/actions.py` |
 | Constraint / massing engine | `solver.py`, `layout.py`, `allocate.py`, pairing, GSF |
+| Realize widths for a frozen `s` | `explore/realize.py` |
 | Performance vector | `explore/performance.py` |
 | Distance to feasibility | `explore/feasibility.py` |
 | Design archive + frontier | `explore/archive.py` |
 | COVER / LEARN / REFINE | `explore/controller.py`, `explore/cover.py` |
+| Expanding P pool | `explore/p_pool.py` |
 | REPAIR (project onto feasible set) | `explore/repair.py` |
 | DIAGNOSE (zero legal or low yield) | `explore/diagnose.py` |
 | LEARN (pairwise) | `explore/preference.py` |
@@ -155,10 +158,11 @@ knowledge about why regions are empty.
 | MCTS around planner + engine | `explore/mcts.py` |
 | Bayesian budget manager | `explore/bayes.py` |
 | Caps and saturation stop | `explore/saturate.py` |
+| Studio UI | `ui_app.py`, `explore/ui_payload.py` |
 | Width/story enumeration baseline | `search.py` |
 
-Chat entry: `brief.apply_parsed_brief` → `explore.controller.run_search`. Product
-pages: [CONCEPT.md](CONCEPT.md), [WORKFLOW.md](WORKFLOW.md).
+Chat / UI entry: `brief.apply_parsed_brief` → `explore.controller.run_search`.
+Product pages: [CONCEPT.md](CONCEPT.md), [WORKFLOW.md](WORKFLOW.md), [UI.md](UI.md).
 
 ---
 
@@ -235,18 +239,22 @@ for LEARN taste or “best scheme” display.
 What fundamentally different feasible strategies have we not investigated?
 
 Sample **joint** points across open axes — program organization (P), story
-*patterns* (not one-mass increments), drawable topology (T), loading, and
-envelope family (balanced / compact / elongated) — rather than a product of
-story margins around the baseline.
+*patterns* (not one-mass increments), drawable topology (T), loading,
+envelope family (balanced / compact / elongated), and plate profile — rather
+than a product of story margins around the baseline.
+
+Open P uses an expanding **P pool** (`p_pool.py`): status is on the
+organization (feasible / unresolved / impossible), not one failed width.
+CSP shortlists with fair |P| shares and a family-aware shape prior so
+school-shaped bars are not lost among hundreds of flat-ranked partitions.
+Soft `preferred_stories` biases story order without locking every mass to N.
+Changing P clears stale mass-width locks before `realize(s)`.
 
 **Adaptive budget:** start ~40 evaluations → measure new legal regions *and*
 feature-space novelty → if still discovering, add +10 or +20 → stop when
-stagnant (no meaningful new cells or encodings) → hard cap ~100–120.
-If the cap hits while regions are still opening, mark the map incomplete.
-Do not call a truncated story product a joint sample.
-
-COVER also samples floor-plate profile (uniform vs two-type step) on
-multi-story masses.
+stagnant → hard cap ~100–120. If the cap hits while regions are still
+opening, mark the map incomplete. The P pool may expand mid-run when
+outcomes repeat or gaps remain.
 
 ### REPAIR
 
@@ -269,13 +277,14 @@ idea cell (`cell_key` = `idea_key`).
 
 What comparison would teach us the most about what the designer values?
 
-Pairwise A/B among feasible schemes only. Prefer pairs that differ in P, T,
-envelope, or loading so the preference engine sees distinct legal schemes. A
+Pairwise A/B among feasible schemes only — **at most five** questions.
+Prefer pairs that are **visibly different** (P, T, envelope, loading,
+stories / silhouette) so a short questionnaire still spans the pool. A
 written brief is not a sample. Bradley–Terry on **measured** traits. Taste
 steers where MCTS / BO / REFINE spend effort; it does not override a must.
-Pick ambiguous pairs; keep connecting comparisons so ratings stay on one
-scale. "Why B?" may propose the next pair or explain; it does not invent an
-unmeasured coordinate.
+In the studio UI the user **clicks the preferred scheme card**; intermediate
+picks stay snappy (full REFINE waits until LEARN completes). Chat still
+accepts typed `A` / `B`.
 
 ### REFINE
 

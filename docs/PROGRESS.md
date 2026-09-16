@@ -5,6 +5,32 @@ Update this file at the end of every work session.
 
 ---
 
+## 2026-09-16 — Legal yield restored; studio UI LEARN polish; docs
+
+### Done
+
+- **Search strength vs 53c checkpoint** (without reverting): clear stale widths
+  on partition apply; MCTS scores `APPLY_PARTITION` as a leaf; COVER biases
+  stories by `preferred_stories`; CSP shortlist reserves quality slots and
+  family-aware school-bar ranking so win orgs enter the P pool.
+- **P-pool status** stays on organization; archive insert syncs outcomes.
+- Underwood 3-mass fixture regress: current ≥ 53c legal three-mass on the same
+  brief + tweaked GSF; COVER contributes legal regions again.
+- **Studio UI:** A/B max 5, click card to prefer (no Prefer A/B buttons);
+  snappier picks (no full REFINE each click); pool/candidates show more
+  distinct legals; main preview restores department-colored mesh after apply.
+- **Docs:** CONCEPT, WORKFLOW, BLUEPRINT boxes/LEARN/COVER, README, new
+  [UI.md](UI.md).
+
+### Next steps
+
+- Tighter COVER story sampling on DH + prefer-N.
+- Optional: constraint-driven CSP shape score (width locks / DH) instead of
+  name tokens alone.
+- Kill multi-UI-server footgun (port 8765) in launcher if needed.
+
+---
+
 ## 2026-09-11 — Realize strategy (pairwise P + realize(s))
 
 ### Done

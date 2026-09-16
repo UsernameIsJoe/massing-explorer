@@ -20,13 +20,15 @@ TRAIT_NAMES = (
 )
 
 # Cap A/B questions; stop earlier when weights stabilize or remaining pairs are uninformative.
-MAX_LEARN_COMPARISONS = 8
-MIN_LEARN_COMPARISONS = 3
+MAX_LEARN_COMPARISONS = 5
+MIN_LEARN_COMPARISONS = 2
 LEARN_INFO_FLOOR = 0.12
 WEIGHT_STABLE_L1 = 0.08
 
 # Reject near-twin drawings: need a clear architectural difference to choose.
-MIN_PAIR_DIVERSITY = 4.0
+MIN_PAIR_DIVERSITY = 5.0
+# First questions prefer a higher contrast so fewer A/Bs still cover the space.
+EARLY_PAIR_DIVERSITY = 7.0
 
 
 def utility(weights: dict[str, float], traits: dict[str, Any]) -> float:
@@ -127,15 +129,44 @@ def next_pair(
     compared = {item.get("a") for item in comparisons} | {item.get("b") for item in comparisons}
     unseen = [s for s in legal if s["id"] not in compared]
     seen = [s for s in legal if s["id"] in compared]
+    # Early A/Bs: maximize visible difference so a short questionnaire still spans the pool.
+    early = len(comparisons) < 2
+    min_div = EARLY_PAIR_DIVERSITY if early else MIN_PAIR_DIVERSITY
+
+    def _best_among(pool: list[dict[str, Any]]) -> dict[str, Any] | None:
+        best = None
+        best_div = -1.0
+        best_score = -1.0
+        for i, left in enumerate(pool):
+            for right in pool[i + 1 :]:
+                d = _pair_diversity(left, right)
+                if d < min_div:
+                    continue
+                pa = chance_a_beats_b(left["traits"], right["traits"], weights)
+                # Diversity first; information is a light tiebreak (stronger later).
+                score = d * (1.0 + (0.15 if early else 0.35) * information(pa))
+                if d > best_div + 1e-9 or (abs(d - best_div) < 1e-9 and score > best_score):
+                    best_div = d
+                    best_score = score
+                    best = _pair(
+                        left,
+                        right,
+                        "contrast" if d >= min_div + 1.5 else "connecting",
+                    )
+        return best
+
+    if len(unseen) >= 2:
+        best = _best_among(unseen)
+        if best:
+            return best
 
     if unseen and seen:
-        # Prefer a fresh scheme vs an already-seen one, but only if visibly different.
         best = None
         best_div = -1.0
         for fresh in unseen:
             for other in seen:
                 d = _pair_diversity(fresh, other)
-                if d < MIN_PAIR_DIVERSITY:
+                if d < min_div:
                     continue
                 if d > best_div:
                     best_div = d
@@ -143,28 +174,8 @@ def next_pair(
         if best:
             return best
 
-    if len(unseen) >= 2:
-        best = None
-        best_div = -1.0
-        best_score = -1.0
-        for i, left in enumerate(unseen):
-            for right in unseen[i + 1 :]:
-                d = _pair_diversity(left, right)
-                if d < MIN_PAIR_DIVERSITY:
-                    continue
-                pa = chance_a_beats_b(left["traits"], right["traits"], weights)
-                score = d + 0.5 * information(pa)
-                if d > best_div + 1e-9 or (abs(d - best_div) < 1e-9 and score > best_score):
-                    best_div = d
-                    best_score = score
-                    best = _pair(
-                        left,
-                        right,
-                        "contrast" if d >= MIN_PAIR_DIVERSITY + 2 else "connecting",
-                    )
-        if best:
-            return best
-
+    # Fallback: any remaining diverse pair (relax early floor).
+    min_div = MIN_PAIR_DIVERSITY
     best = None
     best_score = -1.0
     for i, left in enumerate(legal):
@@ -172,10 +183,9 @@ def next_pair(
             if _already(comparisons, left["id"], right["id"]):
                 continue
             d = _pair_diversity(left, right)
-            if d < MIN_PAIR_DIVERSITY:
+            if d < min_div:
                 continue
             pa = chance_a_beats_b(left["traits"], right["traits"], weights)
-            # Weight diversity more than BT ambiguity so A/B is chooseable.
             score = d * (1.0 + 0.25 * information(pa))
             if score > best_score:
                 best_score = score
@@ -305,17 +315,19 @@ def apply_choice(session: Any, side: str) -> dict[str, Any] | None:
     store["kept_cell"] = chosen["id"]
     session.constraints["explore"] = store
 
-    # Close the loop: a short targeted refine with the new weights, keep alternatives.
-    refine_report = _learn_targeted_refine(session, archive, weights)
-    if refine_report.get("ran"):
-        store["refine"] = refine_report
-        learning["refine_after_choice"] = {
-            "tuned": refine_report.get("tuned"),
-            "improved": refine_report.get("improved"),
-            "note": refine_report.get("note"),
-        }
-        store["learning"] = learning
-        session.constraints["explore"] = store
+    # Only refine once LEARN finishes — intermediate picks stay snappy for the UI.
+    refine_report: dict[str, Any] = {"ran": False}
+    if nxt is None:
+        refine_report = _learn_targeted_refine(session, archive, weights)
+        if refine_report.get("ran"):
+            store["refine"] = refine_report
+            learning["refine_after_choice"] = {
+                "tuned": refine_report.get("tuned"),
+                "improved": refine_report.get("improved"),
+                "note": refine_report.get("note"),
+            }
+            store["learning"] = learning
+            session.constraints["explore"] = store
 
     if hasattr(session, "save"):
         session.save()

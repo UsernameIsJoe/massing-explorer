@@ -667,7 +667,7 @@ class TestPreference(unittest.TestCase):
                 break
             seen_pairs += 1
             comparisons.append({"a": pair["a"], "b": pair["b"], "winner": "a"})
-        self.assertEqual(MAX_LEARN_COMPARISONS, 4)
+        self.assertEqual(MAX_LEARN_COMPARISONS, 5)
         self.assertLessEqual(seen_pairs, MAX_LEARN_COMPARISONS)
         self.assertIsNone(next_pair(schemes, {}, comparisons))
 

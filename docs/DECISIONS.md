@@ -154,9 +154,11 @@ Later: Rhino geometry export.
 
 ## UI
 
-- **Not a priority.**
-- CLI first. Chat via terminal + Ollama.
-- Rich UI deferred.
+- **Studio UI in code** (`ui_app.py`, `run_ui.bat`) — drop Excel, brief,
+  Generate, sample pool / candidates, click A/B (max 5). See [UI.md](UI.md).
+- CLI chat via terminal + Ollama remains supported.
+- Algorithm / archive remain source of truth; UI is a client over
+  `run_search`.
 
 ---
 
@@ -224,11 +226,11 @@ Translate an architectural program spreadsheet into conceptual building masses:
 | 3 | Room dimensions | Chat + config database |
 | 4 | Fixed grossing factors? | No — per project |
 | 5 | Units | Feet first |
-| 6 | UI | Algorithm over UI; CLI |
-| 7 | Multiple options | One kept drawing; archive of distinct elites; LEARN A/B |
+| 6 | UI | Studio UI + CLI; algorithm remains source of truth |
+| 7 | Multiple options | One kept drawing; archive of distinct elites; LEARN A/B (click, max 5) |
 | 8 | Remember state | Yes |
 | 9 | Adjacency | Conversational |
-| 10 | Output | Text for now; Rhino later |
+| 10 | Output | Text + live 3D preview; Rhino optional |
 | 11 | GSF tolerance | ±3%, adjustable |
 | 12 | Room fit scope | Anchor rooms; list compromises |
 | 13 | Double-height | In chat |

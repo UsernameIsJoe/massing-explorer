@@ -297,10 +297,13 @@ Phase 7 (Rhino) — optional
   enumerated only when grouping was not a must
 - Courtyard / podium / perpendicular site packing until layout can draw them
 - Streets, neighbors, topography, EnergyPlus (D waits for those inputs)
-- Web UI
 - Cloud LLM APIs
 - Angled site boundaries
 - Treating Bayesian optimization as a shape generator or putting it on feet
+
+The **studio UI** (`ui_app.py` / `run_ui.bat`) is in scope — see [UI.md](UI.md).
+It drives the same COVER / REPAIR / LEARN loop as chat; it is not a second
+search engine.
 
 ---
 

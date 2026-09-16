@@ -654,18 +654,27 @@ def _process_steps(store: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _drawing_signature(card: dict[str, Any]) -> tuple:
-    """Rounded footprint fingerprint for UI dedupe."""
+    """Fingerprint for UI dedupe — strategy + plates, so envelope/story variants stay visible."""
     masses = card.get("masses") or []
-    if not masses:
-        return ("empty", card.get("cell_id") or card.get("label") or "")
-    return tuple(
+    stories = card.get("stories") or {}
+    story_sig = tuple(sorted((str(k), int(v)) for k, v in stories.items())) if isinstance(stories, dict) else ()
+    plate_sig = tuple(
         (
             str(m.get("mass_id") or m.get("id") or ""),
             int(m.get("stories") or 0),
-            round(float(m.get("width_ft") or 0)),
-            round(float(m.get("length_ft") or 0)),
+            # 5 ft bins — collapses near-identical solves, keeps real variants.
+            int(round(float(m.get("width_ft") or 0) / 5.0) * 5),
+            int(round(float(m.get("length_ft") or 0) / 5.0) * 5),
         )
         for m in masses
+    ) if masses else (("empty",),)
+    return (
+        str(card.get("partition") or ""),
+        str(card.get("topology") or ""),
+        str(card.get("envelope") or ""),
+        str(card.get("loading") or ""),
+        story_sig,
+        plate_sig,
     )
 
 
@@ -689,7 +698,12 @@ def _dedupe_drawings(cards: list[dict[str, Any]]) -> tuple[list[dict[str, Any]],
             continue
         seen.add(sig)
         out.append(card)
-    out.sort(key=lambda c: int(c.get("rank") or 0))
+    out.sort(
+        key=lambda c: (
+            not bool(c.get("fits") or c.get("verified") or c.get("kept")),
+            int(c.get("rank") or 0),
+        )
+    )
     for i, card in enumerate(out):
         card["rank"] = i
     return out, collapsed
@@ -824,6 +838,28 @@ def transparency_payload(
                 top_candidates = [
                     _slim_candidate(e, kept=(e.get("cell") == kept_id), story_height_ft=story_h) for e in ranked[:5]
                 ]
+            else:
+                # Elites are a short contrast set; append remaining legal cells so
+                # the Candidates tab matches the legal archive (sample pool may
+                # still hide near-twin drawings).
+                from massing_explorer.explore import archive as archive_mod
+                from massing_explorer.explore.performance import prefer_clean_splits
+
+                legal = prefer_clean_splits(archive_mod.legal_cells(archive))
+                ranked = sorted(legal, key=lambda e: taste_weight(e, weights), reverse=True)
+                shown = {str(c.get("cell_id") or "") for c in top_candidates}
+                for entry in ranked:
+                    cid = str(entry.get("cell") or "")
+                    if not cid or cid in shown:
+                        continue
+                    card = _slim_candidate(
+                        entry, kept=(cid == kept_id), story_height_ft=story_h
+                    )
+                    card["why"] = "Additional legal cell in the archive."
+                    top_candidates.append(card)
+                    shown.add(cid)
+                    if len(top_candidates) >= 12:
+                        break
         except Exception:
             top_candidates = []
 

@@ -1,24 +1,36 @@
 # Massing Explorer
 
-A **program-aware massing explorer** that turns architectural program spreadsheets into dimensionally tested conceptual masses. A local LLM reasons about design decisions. A deterministic Python engine owns geometry, GSF, and checks.
+A **program-aware massing explorer** that turns architectural program
+spreadsheets into dimensionally tested conceptual masses. A local LLM reasons
+about design decisions. A deterministic Python engine owns geometry, GSF, and
+checks.
 
-The system's value is to make the architect smarter about the design problem: which legal strategies exist, which near-feasible ideas can be repaired into the same concept, which archive cells are empty and why, which brief clauses collapsed the feasible set. It is not merely "Option 17."
+The system's value is to make the architect smarter about the design problem:
+which legal strategies exist, which near-feasible ideas can be repaired into
+the same concept, which archive cells are empty and why, which brief clauses
+collapsed the feasible set. It is not merely "Option 17."
 
-**Standalone project.** Algorithm-first. Constitution: [docs/BLUEPRINT-search.md](docs/BLUEPRINT-search.md). Concept and workflow: [docs/CONCEPT.md](docs/CONCEPT.md), [docs/WORKFLOW.md](docs/WORKFLOW.md).
+**Standalone project.** Algorithm-first, with a local **studio UI** for drop /
+brief / Generate / A/B. Constitution: [docs/BLUEPRINT-search.md](docs/BLUEPRINT-search.md).
+Concept and workflow: [docs/CONCEPT.md](docs/CONCEPT.md),
+[docs/WORKFLOW.md](docs/WORKFLOW.md). Studio: [docs/UI.md](docs/UI.md).
 
 ---
 
 ## What it does
 
 1. **Ingests** a program from Excel/CSV
-2. **Interprets** a chat brief into requirements, limitations, and preferences
-3. **Explores** strategies `S = (P, T, V, G, D)` — COVER / REPAIR / LEARN / REFINE over an archive, not a width enumerator
+2. **Interprets** a chat or UI brief into requirements, limitations, and preferences
+3. **Explores** strategies `S = (P, T, V, G, D)` — COVER / REPAIR / LEARN / REFINE
+   over an archive (expanding **P pool** + `realize(s)` for feet), not a width enumerator
 4. **Proves** each move through the massing engine (footprints, pairing, voids, GSF, floors)
 5. **Projects** near-illegal COVER ideas onto the same concept when a typed action can fix a hard miss
 6. **Reports** legal vs empty cells, a kept drawing, optional A/B among schemes that already fit, and a near-feasible frontier
-7. **Remembers** study state across the conversation
+7. **Remembers** study state across the conversation / UI session
 
-A requirement is a must. A limitation is a cap, never a length to draw. A preference may be met more than one way. A ground-floor note is a pin, not a mass. Partitions are proposed only when the brief did not require a grouping.
+A requirement is a must. A limitation is a cap, never a length to draw. A
+preference may be met more than one way. A ground-floor note is a pin, not a
+mass. Partitions are proposed only when the brief did not require a grouping.
 
 ---
 
@@ -34,12 +46,12 @@ A requirement is a must. A limitation is a cap, never a length to draw. A prefer
                       |
            LLM strategy planner  (<=5 typed moves)
                       |
-           Constraint / massing engine
+           Constraint / massing engine + realize(s)
            (solver, layout, allocate, pairing, GSF)
                       |
                  Performance
                       |
-           Diverse design archive
+           Diverse design archive + P pool
                       |
          COVER → REPAIR → LEARN / REFINE
                       |
@@ -47,9 +59,14 @@ A requirement is a must. A limitation is a cap, never a length to draw. A prefer
          or near-feasible frontier (MCTS start, not LEARN)
 ```
 
-MCTS sits around planner + engine and may start from legal elites **or** near-feasible frontier samples. Bayesian optimization is a small evaluation-budget manager on **legal** actions, not a shape generator. Neither sits on feet. REPAIR owns “nudge this plate onto the cap.” `search.py` remains a width/story enumeration baseline.
+MCTS sits around planner + engine and may start from legal elites **or**
+near-feasible frontier samples. Structural moves such as `APPLY_PARTITION`
+are scored as leaves. Bayesian optimization is a small evaluation-budget
+manager on **legal** actions. REPAIR owns “nudge this plate onto the cap.”
+`search.py` remains a width/story enumeration baseline.
 
-**Rule:** the LLM proposes typed actions; the engine applies or rejects them. Never trust the LLM for arithmetic.
+**Rule:** the LLM proposes typed actions; the engine applies or rejects them.
+Never trust the LLM for arithmetic.
 
 ---
 
@@ -62,19 +79,19 @@ MCTS sits around planner + engine and may start from legal elites **or** near-fe
 | Room dimensions | **User prompt** or **project config database** |
 | Grossing factors | **Vary per project** — set in config or chat |
 | Units | **Feet** first |
-| UI | **Not a priority** — CLI / minimal interface; algorithm first |
-| Options | **One kept drawing** on the study; archive holds several distinct elites; LEARN may ask A/B |
-| State | **Remember** across chat turns |
+| UI | **Studio UI** (`ui_app` / `run_ui.bat`) plus CLI chat — algorithm remains source of truth |
+| Options | **One kept drawing** on the study; archive holds several distinct elites; LEARN may ask A/B (click card, max 5) |
+| State | **Remember** across chat / UI turns |
 | Adjacency | **Conversational** |
-| Output (v1) | **Text report** + plan/site PNGs; optional `.3dm` export |
+| Output (v1) | **Text report** + plan/site PNGs + live 3D preview; optional `.3dm` export |
 | GSF tolerance | **±3%** default, user-adjustable |
 | Room fit | **Anchor rooms** only; list what is compromised |
-| Double-height | Identified in **chat** |
+| Double-height | Identified in **chat** / brief |
 | Site context | **Stated rectangle and frontage** — streets, neighbors, topography wait |
-| Repo | **Standalone** (not tied to prior Rhino site-export work) |
+| Repo | **Standalone** |
 | Planning limits | **Chat** + **config file** (e.g. 80 ft academic width) |
 | LLM | **Ollama**, local only, no paid APIs |
-| Vision/OCR | **Out of scope** — not a priority |
+| Vision/OCR | **Out of scope** |
 
 Full rationale: [docs/DECISIONS.md](docs/DECISIONS.md)
 
@@ -84,24 +101,14 @@ Full rationale: [docs/DECISIONS.md](docs/DECISIONS.md)
 
 | Phase | Focus | Status |
 |-------|-------|--------|
-| **1** | Excel ingest, GSF engine, config file, CLI, text output | **Complete** |
-| **2** | Ollama chat loop, grouping, story count, state memory | **Complete** |
-| **3** | Footprint solver, anchor room fit, double-height, stepped floors | **Complete** |
-| **4** | Paired masses, site limits from config/chat, resize loop | **Complete** |
-| **5** | Floor-by-floor program allocation, floor pins | **Complete** |
-| **6** | Width/story enumeration that fits a site envelope (`search.py`) | **Complete** (baseline) |
-| **7** | Rhino massing geometry export | Optional / present as `rhino_export.py` |
-| **Search 0–8** | Blueprint loop: archive, COVER/LEARN/REFINE, planner, CSP, drawable T, MCTS | **Complete** |
-| **BO** | Bayesian optimization as evaluation-budget manager (not a generator) | **In code** |
-| **REPAIR** | Project illegal COVER ideas onto the feasible set; near-feasible frontier | **In code** |
-
-Phases 3–5 *evaluate* a scheme you specify. Phase 6 enumerates widths and stories.
-The blueprint search sits **on top** of that engine: a brief now COVER / REPAIR /
-LEARN / REFINE over distinct strategies. Every drawing is still re-verified
-through `solve_massing_study`.
+| **1–5** | Ingest, chat, footprints, pairing, floors | **Complete** |
+| **6** | Width/story enumeration (`search.py`) | **Complete** (baseline) |
+| **7** | Rhino massing export | Optional / present |
+| **Search 0–8** | Blueprint loop: archive, COVER/LEARN/REFINE, planner, CSP, MCTS | **Complete** |
+| **BO / REPAIR / realize / P pool** | Budget manager, near-miss projection, strategy→feet, expanding P | **In code** |
+| **Studio UI** | Drop Excel, brief, Generate, pool, click A/B | **In code** |
 
 Details: [docs/PHASES.md](docs/PHASES.md). Progress: [docs/PROGRESS.md](docs/PROGRESS.md).
-Decisions: [docs/DECISIONS.md](docs/DECISIONS.md).
 
 ---
 
@@ -110,57 +117,31 @@ Decisions: [docs/DECISIONS.md](docs/DECISIONS.md).
 ```
 massing-explorer/
 ├── src/massing_explorer/
-│   ├── brief.py            # Intent: roles, grouping, apply brief → search
-│   ├── reading.py          # LLM reading of a brief
-│   ├── chat.py             # Chat turn; A/B is a LEARN choice
+│   ├── brief.py, reading.py, chat.py
+│   ├── ui_app.py           # Studio UI
 │   ├── explore/            # Strategy archive + COVER/REPAIR/LEARN/REFINE
-│   │   ├── controller.py   # Modes over the archive
-│   │   ├── strategy.py     # S = (P, T, V, G, D)
-│   │   ├── actions.py      # Typed moves; engine apply/reject
-│   │   ├── archive.py      # One elite per legal cell; near-feasible frontier
-│   │   ├── cover.py        # Joint multi-axis COVER
-│   │   ├── feasibility.py  # Hard-limit violation vector
-│   │   ├── repair.py       # Project an idea onto the feasible set
-│   │   ├── planner.py      # ≤5 typed actions
-│   │   ├── csp.py          # Legal partitions when P is open
-│   │   ├── topology.py     # Drawable T; stated D
-│   │   ├── mcts.py         # Search over actions, not feet
-│   │   ├── bayes.py        # Evaluation-budget manager
-│   │   ├── preference.py   # Bradley–Terry on measured traits
-│   │   └── performance.py  # Feasibility + measured vector
-│   ├── solver.py           # Footprint, pairing, void, site limit solver
-│   ├── layout.py           # Drawable plates (bars, L leftover)
-│   ├── search.py           # Width/story enumeration baseline
-│   ├── allocate.py         # Which department sits on which level
-│   ├── visual.py           # Plan/elevation, site, archive boards
-│   ├── rhino_export.py     # Optional .3dm solids
+│   │   ├── controller.py, cover.py, p_pool.py, realize.py
+│   │   ├── csp.py, mcts.py, bayes.py, preference.py, …
+│   ├── solver.py, layout.py, allocate.py, search.py
+│   ├── preview3d.py, visual.py, rhino_export.py
 │   └── parser/
-├── tests/                  # test_phase1 … test_phase6, test_explore
-├── docs/
-│   ├── BLUEPRINT-search.md # Constitution
-│   ├── PLAN-realize-strategy.md  # Strategy vs dimensions; realize(s)
-│   ├── PLAN-search-architecture.md
-│   ├── CONCEPT.md
-│   ├── WORKFLOW.md
-│   ├── PHASES.md
-│   ├── DECISIONS.md
-│   └── PROGRESS.md
+├── tests/
+├── docs/                   # BLUEPRINT, CONCEPT, WORKFLOW, UI, …
 ├── config/
-└── examples/
+├── examples/               # incl. Underwood tweaked GSF + 3-mass brief
+└── run_ui.bat
 ```
 
 ---
 
 ## Workflow
 
-A chat brief now runs the [blueprint control loop](docs/WORKFLOW.md): interpret →
-structured strategy → COVER → REPAIR → planner / MCTS / BO / REFINE → LEARN.
+A brief runs the [blueprint control loop](docs/WORKFLOW.md): interpret →
+structured strategy → COVER (P pool) → REPAIR → planner / MCTS / BO / REFINE →
+LEARN. Studio steps: [docs/UI.md](docs/UI.md).
 
-The older 15-step program-to-massing checklist (GSF, footprints, pairing, floors)
-is still what the **engine** automates. See [docs/DECISIONS.md](docs/DECISIONS.md#manual-workflow-reference).
-Step 13 (compare alternatives) is no longer deferred: LEARN compares two legal
-drawings; the archive keeps several distinct elites; REPAIR projects near-misses
-of the same idea onto the legal set.
+The engine still automates the older program-to-massing checklist (GSF,
+footprints, pairing, floors). See [docs/DECISIONS.md](docs/DECISIONS.md).
 
 ---
 
@@ -168,61 +149,38 @@ of the same idea onto the legal set.
 
 ```bash
 pip install -e .
-python -m massing_explorer ingest examples/underwood_elementary_space_summary.xlsx -c config/project.example.yaml
 python -m unittest discover -s tests
+
+# Studio UI (recommended for briefs + A/B)
+run_ui.bat
+# → http://127.0.0.1:8765/  — restart after git pull so code reloads
+
+# CLI ingest / chat / solve / search
+python -m massing_explorer ingest examples/underwood_elementary_space_summary.xlsx -c config/project.example.yaml
+python -m massing_explorer chat --study underwood -p examples/underwood_elementary_space_summary.xlsx -c config/project.example.yaml
 ```
 
-### CLI commands
+Regression fixture for a tight three-mass brief:
+
+- `examples/Underwood_Elementary_Space_Summary_GSF_Tweaked.xlsx`
+- `examples/underwood_3mass_brief.txt`
+
+### More CLI
 
 ```bash
-# Parse program file and print report
-python -m massing_explorer ingest <program.xlsx|program.csv> -c config/project.example.yaml
-
-# Save report and JSON
-python -m massing_explorer ingest program.xlsx -o output/report.txt -j output/program.json
-
-# Start a chat study (requires Ollama running locally)
-python -m massing_explorer chat --study underwood -p examples/underwood_elementary_space_summary.xlsx -c config/project.example.yaml
-
-# Resume an existing study
-python -m massing_explorer chat --study underwood
-
-# Solve footprints + validation (+ optional PNG visual)
 python -m massing_explorer solve --study underwood_checkpoint ^
   -p examples/underwood_elementary_space_summary.xlsx ^
-  -c config/project.example.yaml ^
-  --demo-grouping ^
-  --visual output/massing_checkpoint.png
+  -c config/project.example.yaml --demo-grouping --visual output/massing.png
 
-# Two masses sharing a width inside a total length, with site caps
-python -m massing_explorer solve --study underwood_checkpoint ^
-  --pair academic,support --pair-length 280 ^
-  --max-length 200 --max-total-length 420 ^
-  --visual output/massing_checkpoint.png
-
-# Ask what WOULD fit, instead of checking a scheme you already picked.
-# `solve` validates widths you supply; `search` finds the widths and story counts.
 python -m massing_explorer search --study underwood_checkpoint ^
-  -c config/project.example.yaml ^
-  --max-total-length 300 --max-length 200 --max-width 100 ^
-  --max-stories 5 --preference low_rise
+  -c config/project.example.yaml --max-total-length 300 --max-length 200 ^
+  --max-width 100 --max-stories 5 --preference low_rise --apply 0
 
-# Then write one of the listed schemes into the study
-python -m massing_explorer search --study underwood_checkpoint ^
-  --max-total-length 300 --max-length 200 --max-width 100 ^
-  --apply 0 --visual output/searched.png
-
-# In-chat commands: /status  /grouping  /solve  /quit
-
-# Show project config (anchor rooms, grossing factors)
 python -m massing_explorer config config/project.example.yaml
 ```
 
-The Excel parser auto-detects header rows and column names from keywords — it is not hardcoded to any single file format. It handles:
-
-- Hierarchical schedules (department header rows + room rows), like MSBA space summaries
-- Flat CSV files with a `department` column
-- Footer rows with declared NFA, GFA, and grossing factor
+The Excel parser auto-detects header rows and column names from keywords. It
+handles hierarchical MSBA-style schedules, flat CSV, and footer NFA/GFA rows.
 
 ---
 

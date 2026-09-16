@@ -44,6 +44,12 @@ _PREVIEW_PALETTE = (
 )
 
 
+def stable_department_colors(names: list[str] | None) -> dict[str, str]:
+    """Fixed palette index per department name (sorted) for one study / run."""
+    ordered = sorted({str(n).strip() for n in (names or []) if n and str(n).strip()})
+    return {name: _PREVIEW_PALETTE[i % len(_PREVIEW_PALETTE)] for i, name in enumerate(ordered)}
+
+
 def _department_hex_colors(result: MassingStudyResult) -> dict[str, str]:
     seen: list[str] = []
     for mass in result.masses:
@@ -52,17 +58,33 @@ def _department_hex_colors(result: MassingStudyResult) -> dict[str, str]:
         ] + [p for f in mass.floors for p in f.programs]:
             if name and name not in seen:
                 seen.append(name)
-    return {name: _PREVIEW_PALETTE[i % len(_PREVIEW_PALETTE)] for i, name in enumerate(seen)}
+    # Sort so two schemes with the same departments share colors even when
+    # discovery order differs (mass order / allocation order).
+    return stable_department_colors(seen)
 
 
 def preview_mesh(
     result: MassingStudyResult,
     story_height_ft: float | None = None,
     config: dict[str, Any] | None = None,
+    *,
+    department_colors: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     height = float(story_height_ft) if story_height_ft else story_height_from_config(config)
     masses = _place_order(result)
-    colors = _department_hex_colors(result)
+    colors = dict(department_colors) if department_colors else _department_hex_colors(result)
+    # Any dept missing from the study map still gets a stable slot.
+    missing = []
+    for mass in result.masses:
+        for name in list(mass.departments) + [
+            a.department for f in mass.floors for a in f.allocations
+        ]:
+            if name and name not in colors and name not in missing:
+                missing.append(name)
+    if missing:
+        extra = stable_department_colors(list(colors.keys()) + missing)
+        for name in missing:
+            colors[name] = extra[name]
     fallback = _PREVIEW_PALETTE[0]
 
     boxes: list[dict[str, Any]] = []
