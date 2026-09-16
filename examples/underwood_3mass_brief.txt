@@ -1,0 +1,13 @@
+# Regression brief — Underwood Elementary (tweaked GSF)
+# Spreadsheet: examples/Underwood_Elementary_Space_Summary_GSF_Tweaked.xlsx
+# Source: C:\Users\tu\Downloads\Underwood_Elementary_Space_Summary_GSF_Tweaked.xlsx
+#
+# Prompt (verbatim intent):
+# 3 masses, max 3 floors. length max 60 meters. gym and dining together and
+# double height. art and music prefer on ground floor. media prefer on top
+# floor above admin. admin have to be on ground floor. core academic and
+# special ed width has to be 80 feet. mass ratio have to be between 2:5 and
+# 5:8. prefer 3 floors.
+#
+# Success bar (vs 53c883b): find legal three-mass schemes on this brief;
+# compare 3–4-mass coverage and preference satisfaction when mass count allows.

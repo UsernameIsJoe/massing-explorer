@@ -321,7 +321,17 @@ def _apply_partition(session: Any, action: dict[str, Any]) -> dict[str, Any]:
         return _reject("APPLY_PARTITION", "APPLY_PARTITION needs CSP groups.")
     from .partitions import apply_partition
 
+    # Drop feet tied to the previous organization — realize must refill widths.
+    before_ids = [m.id for m in (session.masses or [])]
     apply_partition(session, groups)
+    after_ids = [m.id for m in (session.masses or [])]
+    for mid in set(before_ids) | set(after_ids):
+        session.constraints.pop(f"{mid}_width_ft", None)
+    explore = session.constraints.get("explore")
+    if isinstance(explore, dict):
+        explore.pop("realize_cache", None)
+    if hasattr(session, "save"):
+        session.save()
     return _ok("APPLY_PARTITION", "Applied a CSP partition.")
 
 

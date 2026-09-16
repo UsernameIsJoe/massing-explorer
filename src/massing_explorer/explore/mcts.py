@@ -26,6 +26,12 @@ ROOT_CAP = MCTS_ROOTS
 # Illegal search_reward tops out at 0.25; accepted schemes sit above ~0.4.
 # Only deepen past unvisited siblings once a child looks accepted / near-accepted.
 _DEEPEN_Q = 0.35
+# Structural jumps must be scored before a follow-up story/envelope nudge
+# overwrites them in the same simulation (otherwise APPLY_PARTITION rarely
+# appears as an archive leaf and legal regroupings are missed).
+_STRUCTURAL_OPS = frozenset(
+    {"APPLY_PARTITION", "COLOCATE", "KEEP_APART", "SPLIT_MASS", "PAIR_MASSES", "CLEAR_PAIRINGS"}
+)
 
 
 class _Node:
@@ -209,6 +215,9 @@ def _simulate_tree(
             node = child
             if node.kind in {"illegal", "unsupported"}:
                 break
+            # Score structural jumps as leaves; do not descend into follow-ups yet.
+            if _is_structural(node.action):
+                break
 
         if node.kind not in {"illegal", "unsupported"} and len(path) <= depth:
             if not node.expanded:
@@ -224,7 +233,10 @@ def _simulate_tree(
                 for child in node.children
                 if child.visits == 0 and child.kind not in {"illegal", "unsupported"}
             ]
-            if waiting and len(path) < depth:
+            # Do not chain a follow-up after a structural jump in the same sim —
+            # evaluate the regrouping (or pairing) as its own archive leaf.
+            structural_leaf = _is_structural(node.action)
+            if waiting and len(path) < depth and not structural_leaf:
                 # First look: highest-prior unvisited, else PUCT among all.
                 child = max(waiting, key=lambda item: item.prior)
                 _play(session, child)
@@ -378,12 +390,14 @@ def catalog_actions(session: Any, include_unsupported: bool = False) -> list[dic
         try:
             from .partitions import cover_partition_candidates, local_partition_candidates
 
-            # COVER pool for long-range jumps; local moves extend past the shortlist.
-            for item in cover_partition_candidates(session, limit=3):
+            # Local moves first: frontier roots need nearby regroupings (e.g. peel
+            # admin off athletics). COVER-pool jumps come after; balance caps
+            # APPLY_PARTITION so pool-only ordering would drop the local win.
+            for item in local_partition_candidates(session, limit=3):
                 groups = item.get("groups") or []
                 if groups:
                     actions.append({"op": "APPLY_PARTITION", "groups": groups})
-            for item in local_partition_candidates(session, limit=3):
+            for item in cover_partition_candidates(session, limit=3):
                 groups = item.get("groups") or []
                 if groups:
                     actions.append({"op": "APPLY_PARTITION", "groups": groups})
@@ -490,12 +504,14 @@ def _expand(
 
 def _balance_action_categories(actions: list[dict[str, Any]], *, per_op: int = 3) -> list[dict[str, Any]]:
     """Round-robin across ops so SET_STORIES cannot crowd out APPLY_PARTITION."""
+    # Allow more APPLY slots: local + COVER candidates both matter for legal yield.
     buckets: dict[str, list[dict[str, Any]]] = {}
     for action in actions:
         op = str(action.get("op") or "")
         buckets.setdefault(op, []).append(action)
     for op in buckets:
-        buckets[op] = buckets[op][: max(1, per_op)]
+        cap = 6 if op == "APPLY_PARTITION" else max(1, per_op)
+        buckets[op] = buckets[op][:cap]
     out: list[dict[str, Any]] = []
     while any(buckets.values()):
         for op in list(buckets.keys()):
@@ -558,6 +574,12 @@ def _reward(performance: dict[str, Any], weights: dict[str, float] | None = None
     from .saturate import search_reward
 
     return search_reward(performance, weights)
+
+
+def _is_structural(action: dict[str, Any] | None) -> bool:
+    if not action:
+        return False
+    return str(action.get("op") or "").upper() in _STRUCTURAL_OPS
 
 
 def _select_child(node: _Node) -> _Node | None:

@@ -435,6 +435,17 @@ class ArchiveInsertSyncTests(unittest.TestCase):
         # First pick should be among the taller patterns.
         self.assertIn(order[0], (2, 3))
 
+    def test_prefer_stories_raises_taller_patterns(self) -> None:
+        patterns = [(1, 1, 1), (2, 2, 2), (3, 2, 1), (3, 3, 3), (1, 3, 2)]
+        plain = bias_story_index_order(patterns, {"prefer_tall": 0.3})
+        pref = bias_story_index_order(
+            patterns, {"prefer_tall": 0.3}, preferred_stories=3
+        )
+        # Prefer-3 lifts all-3s above mid-height all-2s (plain ranks 2s first).
+        self.assertLess(pref.index(3), pref.index(1))
+        self.assertGreater(plain.index(3), plain.index(1))
+        self.assertLess(pref.index(4), pref.index(0))
+
     def test_deepen_vs_expand_split(self) -> None:
         d, e = deepen_vs_expand_counts(10)
         self.assertEqual(d + e, 10)

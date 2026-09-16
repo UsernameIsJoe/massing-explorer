@@ -297,13 +297,16 @@ def _pick_shortlist(
         buckets[k].pop(best_i)
         return best_assign
 
-    # Fill each stratum up to its fair quota (seed = best-ranked, then farthest).
+    # Fill each stratum up to its fair quota.
+    # First half: keep semantic rank (school-shaped seeds for COVER).
+    # Second half: organizational diversity so the map still spreads.
     for k in active:
         quota = quotas.get(k, 0)
         if quota <= 0:
             continue
+        quality_slots = max(1, (quota + 1) // 2)
         while taken[k] < quota and buckets[k]:
-            if not chosen_by_k[k]:
+            if taken[k] < quality_slots or not chosen_by_k[k]:
                 assign = buckets[k].pop(0)
                 if not push(assign):
                     continue
@@ -715,7 +718,92 @@ def _reason(atoms: list[dict[str, Any]], assign: list[int]) -> str:
             rest = [i for i in range(len(atoms)) if i not in academic_only]
             if rest and len({assign[i] for i in rest}) == 1:
                 return "academic apart from a combined public/support bar"
+    # Typical school three-bar: classroom wing | public/arts | athletics+dining.
+    if len(blocks) >= 3 and _is_school_bars(atoms, assign):
+        return "school bars: academic / public / athletics"
     return f"csp partition: {len(blocks)} masses"
+
+
+def _is_school_bars(atoms: list[dict[str, Any]], assign: list[int]) -> bool:
+    """Academic together, athletics/dining together, arts out of the classroom bar."""
+    academic = [i for i, a in enumerate(atoms) if "academic" in _families(a)]
+    arts = [i for i, a in enumerate(atoms) if "arts" in _families(a)]
+    ath = [
+        i
+        for i, a in enumerate(atoms)
+        if _families(a) & {"athletics", "dining"}
+    ]
+    if len(academic) < 1 or len(ath) < 1:
+        return False
+    if len({assign[i] for i in academic}) != 1:
+        return False
+    if len({assign[i] for i in ath}) != 1:
+        return False
+    if assign[academic[0]] == assign[ath[0]]:
+        return False
+    if arts and any(assign[i] == assign[academic[0]] for i in arts):
+        return False
+    return True
+
+
+def _shape_bonus(atoms: list[dict[str, Any]], assign: list[int]) -> float:
+    """
+    Soft school-shaped tiebreak so COVER's 12–20 shortlist is not a random
+    slice of hundreds of equally ranked partitions.
+
+    Mass count is still not a quality signal — only organization shape.
+    """
+    if not atoms or not assign:
+        return 0.0
+    bonus = 0.0
+    academic = [i for i, a in enumerate(atoms) if "academic" in _families(a)]
+    arts = [i for i, a in enumerate(atoms) if "arts" in _families(a)]
+    ath = [
+        i
+        for i, a in enumerate(atoms)
+        if _families(a) & {"athletics", "dining"}
+    ]
+    if len(academic) >= 2 and len({assign[i] for i in academic}) == 1:
+        bonus += 3.0
+    elif len(academic) >= 2:
+        bonus -= 1.5
+    if ath and len({assign[i] for i in ath}) == 1:
+        bonus += 2.0
+    if academic and arts:
+        acad_block = assign[academic[0]]
+        if all(assign[i] != acad_block for i in arts):
+            bonus += 2.0
+        else:
+            # Arts jammed into the classroom bar often fights width locks.
+            bonus -= 1.0
+    # Core academic + special ed share a wing when both are atoms.
+    core_i = sped_i = None
+    media_i = None
+    for i, atom in enumerate(atoms):
+        blob = " ".join(str(d).lower() for d in (atom.get("departments") or []))
+        if "core academic" in blob:
+            core_i = i
+        if "special education" in blob:
+            sped_i = i
+        if "media" in blob:
+            media_i = i
+    if core_i is not None and sped_i is not None and assign[core_i] == assign[sped_i]:
+        bonus += 2.0
+    # Media often rides the tall academic bar (top floor) rather than admin.
+    if media_i is not None and academic and assign[media_i] == assign[academic[0]]:
+        bonus += 1.0
+    # Clinic / admin belong with the public bar, not the gym wing.
+    for i, atom in enumerate(atoms):
+        blob = " ".join(str(d).lower() for d in (atom.get("departments") or []))
+        if not any(tok in blob for tok in ("medical", "administration", "guidance")):
+            continue
+        if ath and assign[i] == assign[ath[0]]:
+            bonus -= 0.75
+        if arts and assign[i] == assign[arts[0]]:
+            bonus += 0.75
+    # Light balance only — a glued gym atom as its own mass is common and legal.
+    bonus += 0.05 * _block_balance(assign)
+    return bonus
 
 
 def _score(
@@ -729,12 +817,14 @@ def _score(
 
     Any allowed |P| range is flexible: higher does not beat lower unless the
     brief states a preferred mass count, in which case closer |P| ranks above
-    farther |P| after the semantic tier.
+    farther |P| after the semantic tier. Shape bonus is a soft tiebreak so
+    school-like bars surface in the COVER shortlist.
     """
     reason = _reason(atoms, assign)
     rank = {
         "stated grouping": 1000,
         "colocate gym with dining": 900,
+        "school bars: academic / public / athletics": 850,
         "colocate academic with arts": 800,
         "arts with gym and dining": 700,
         "academic apart from a combined public/support bar": 600,
@@ -742,12 +832,13 @@ def _score(
     if reason.startswith("colocate ") and rank == 200:
         # Mild note only — not enough to starve other |P| values in the shortlist.
         rank = 250
+    shape = _shape_bonus(atoms, assign)
     if preferred_mass_count is None:
-        return (rank, 0)
+        return (rank, 0, shape)
     n_blocks = len(set(assign))
     # Closer to the stated preference wins; direction can be high or low.
     proximity = -abs(n_blocks - int(preferred_mass_count))
-    return (rank, proximity)
+    return (rank, proximity, shape)
 
 
 def _assignment_label(atoms: list[dict[str, Any]], assign: list[int]) -> str:

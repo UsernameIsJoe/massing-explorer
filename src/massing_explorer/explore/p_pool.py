@@ -342,11 +342,19 @@ def demand_profile(groups: list[Any], session: Any = None) -> dict[str, float]:
 def bias_story_index_order(
     patterns: list[tuple[int, ...]],
     profile: dict[str, float] | None,
+    preferred_stories: float | int | None = None,
 ) -> list[int]:
-    """Reorder story-pattern indices for a P's demand profile."""
+    """Reorder story-pattern indices for a P's demand profile and soft story pref."""
     if not patterns:
         return []
     prefer_tall = float((profile or {}).get("prefer_tall") or 0.0)
+    want: float | None
+    try:
+        want = float(preferred_stories) if preferred_stories is not None else None
+    except (TypeError, ValueError):
+        want = None
+    if want is not None and want <= 0:
+        want = None
     scored: list[tuple[float, int]] = []
     for i, pat in enumerate(patterns):
         if not pat:
@@ -358,6 +366,11 @@ def bias_story_index_order(
         score = prefer_tall * (mean / 4.0 + 0.15 * spread) + (1.0 - prefer_tall) * (
             1.0 - abs(mean - 2.0) / 3.0
         )
+        # Soft "prefer N floors" from the brief — raise patterns near N without
+        # locking every mass to N (gym/dining often need 1–2).
+        if want is not None:
+            score += 0.35 * (1.0 - min(1.0, abs(mean - want) / max(want, 1.0)))
+            score += 0.25 * min(1.0, max(pat) / want)
         scored.append((score, i))
     scored.sort(key=lambda t: (-t[0], t[1]))
     return [i for _s, i in scored]

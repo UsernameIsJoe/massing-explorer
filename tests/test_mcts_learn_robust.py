@@ -132,6 +132,114 @@ class PuctDeepenTests(unittest.TestCase):
         self.assertNotIn("FIX_PARTITION", played)
         self.assertTrue({"SET_STORIES", "APPLY_PARTITION"} & set(played))
 
+    def test_apply_partition_scored_without_chained_followup(self) -> None:
+        """APPLY_PARTITION must be evaluated as its own leaf (53c legal-yield)."""
+        from massing_explorer.explore.mcts import run_mcts
+
+        mass = SimpleNamespace(
+            id="m1", name="M1", story_count=2, departments=["CORE ACADEMIC"]
+        )
+        archive = {"cells": {}, "attempts": 0}
+        session = SimpleNamespace(
+            masses=[mass],
+            constraints={
+                "max_stories": 3,
+                "explore_budget": {"mcts_sims": 8, "mcts_depth": 4, "mcts_roots": 1},
+                "explore": {"archive": archive},
+            },
+            floor_pins={},
+            pairings=[],
+            program=object(),
+        )
+        scored_ops: list[str] = []
+
+        def _fake_apply(sess, action):
+            return {
+                "ok": True,
+                "op": str((action or {}).get("op") or "").upper(),
+                "reason": "ok",
+            }
+
+        def _fake_score(sess, arch, node, weights=None):
+            op = str((node.action or {}).get("op") or "root").upper()
+            scored_ops.append(op)
+            return 0.2
+
+        with patch("massing_explorer.explore.mcts.apply_action", side_effect=_fake_apply), patch(
+            "massing_explorer.explore.mcts.catalog_actions",
+            return_value=[
+                {"op": "SET_STORIES", "mass": "m1", "stories": 3},
+                {"op": "APPLY_PARTITION", "groups": [["CORE ACADEMIC"]]},
+                {"op": "SET_LOADING", "loading": "single"},
+            ],
+        ), patch(
+            "massing_explorer.explore.mcts.cover_roots",
+            return_value=[
+                {
+                    "snapshot": {"masses": [], "constraints": {}, "stories": {"m1": 2}},
+                    "stories": {"m1": 2},
+                    "label": "frontier d=0.000",
+                    "entry": None,
+                }
+            ],
+        ), patch("massing_explorer.explore.mcts._score", side_effect=_fake_score), patch(
+            "massing_explorer.explore.archive.restore_snapshot"
+        ), patch("massing_explorer.explore.archive.capture", return_value={}):
+            run_mcts(session, archive=archive, simulations=8, root_cap=1, max_depth=4)
+
+        self.assertIn("APPLY_PARTITION", scored_ops)
+        # At least one simulation scored APPLY as the leaf (not only as a parent
+        # of a chained SET_STORIES / SET_LOADING).
+        self.assertGreaterEqual(scored_ops.count("APPLY_PARTITION"), 1)
+
+    def test_apply_partition_clears_stale_widths(self) -> None:
+        """Regrouping must drop prior feet so realize can refill (ratio_band miss)."""
+        from massing_explorer.explore.actions import apply_action
+
+        m1 = SimpleNamespace(
+            id="athletics_dining_support",
+            name="Ath",
+            story_count=2,
+            departments=["DINING & FOOD SERVICE", "HEALTH & PHYSICAL EDUCATION"],
+        )
+        m2 = SimpleNamespace(
+            id="arts_support",
+            name="Arts",
+            story_count=1,
+            departments=["ART & MUSIC"],
+        )
+        session = SimpleNamespace(
+            masses=[m1, m2],
+            constraints={
+                "athletics_dining_support_width_ft": 196.85,
+                "arts_support_width_ft": 66.0,
+                "explore": {"realize_cache": {"x": 1}},
+            },
+            floor_pins={},
+            pairings=[],
+        )
+        groups = [
+            {
+                "id": "athletics_dining_support",
+                "departments": ["DINING & FOOD SERVICE", "HEALTH & PHYSICAL EDUCATION"],
+                "story_count": 2,
+            },
+            {
+                "id": "arts_support",
+                "departments": ["ADMINISTRATION & GUIDANCE", "ART & MUSIC"],
+                "story_count": 1,
+            },
+        ]
+        with patch(
+            "massing_explorer.explore.partitions.apply_partition",
+            return_value=None,
+        ):
+            out = apply_action(session, {"op": "APPLY_PARTITION", "groups": groups})
+        self.assertTrue(out.get("ok"))
+        self.assertNotIn("athletics_dining_support_width_ft", session.constraints)
+        self.assertNotIn("arts_support_width_ft", session.constraints)
+        self.assertNotIn("realize_cache", session.constraints.get("explore") or {})
+
     def test_balance_action_categories_round_robin(self) -> None:
         actions = (
             [{"op": "SET_STORIES", "stories": i} for i in range(6)]

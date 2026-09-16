@@ -93,13 +93,14 @@ class TestPartitionConstraints(unittest.TestCase):
         self.assertIn(min(sizes), sizes)
         self.assertLess(min(sizes), max(sizes))
         # Default semantic rank is flat: mass count is not in the score.
-        self.assertEqual(_score([{"departments": ["A"]}], [0]), (1000, 0))  # stated
+        self.assertEqual(_score([{"departments": ["A"]}], [0])[:2], (1000, 0))  # stated
         atoms = [{"departments": [d]} for d in ("A", "B", "C", "D", "E")]
         three = [0, 0, 1, 1, 2]  # two pairwise merges → generic
         two = [0, 0, 0, 1, 1]  # two multi-atom blocks → generic
-        self.assertEqual(_score(atoms, three), (200, 0))
-        self.assertEqual(_score(atoms, two), (200, 0))
-        self.assertEqual(_score(atoms, three), _score(atoms, two))
+        self.assertEqual(_score(atoms, three)[:2], (200, 0))
+        self.assertEqual(_score(atoms, two)[:2], (200, 0))
+        # Mass count must not decide the order when shape is otherwise tied.
+        self.assertEqual(_score(atoms, three)[:2], _score(atoms, two)[:2])
 
     def test_preferred_mass_count_may_favor_higher_or_lower(self) -> None:
         from massing_explorer.explore.csp import _score
@@ -119,8 +120,8 @@ class TestPartitionConstraints(unittest.TestCase):
             _score(atoms, two, preferred_mass_count=2),
             _score(atoms, three, preferred_mass_count=2),
         )
-        # Without a preference, they stay equal.
-        self.assertEqual(_score(atoms, three), _score(atoms, two))
+        # Without a preference, |P| alone must not decide the order.
+        self.assertEqual(_score(atoms, three)[:2], _score(atoms, two)[:2])
 
     def test_shortlist_covers_both_ends_of_a_wide_range(self) -> None:
         names = [f"D{i}" for i in range(6)]
@@ -415,6 +416,23 @@ class TestCoverPartitionBudget(unittest.TestCase):
             self.assertLessEqual(n, 3)
             depts = [d for g in item["groups"] for d in g["departments"]]
             self.assertEqual(len(depts), len(set(depts)))
+
+    def test_school_bars_outrank_arts_in_classroom_wing(self) -> None:
+        """COVER shortlist must prefer academic|public|athletics over arts-in-academic."""
+        from massing_explorer.explore.csp import _score
+
+        atoms = [
+            {"departments": ["CORE ACADEMIC"]},
+            {"departments": ["SPECIAL EDUCATION"]},
+            {"departments": ["ART & MUSIC"]},
+            {"departments": ["ADMINISTRATION & GUIDANCE"]},
+            {"departments": ["DINING & FOOD SERVICE", "HEALTH & PHYSICAL EDUCATION"]},
+            {"departments": ["MEDIA CENTER"]},
+            {"departments": ["MEDICAL"]},
+        ]
+        school = [0, 0, 1, 1, 2, 0, 1]  # academic+media | arts+admin+medical | gym
+        jammed = [0, 0, 0, 1, 2, 0, 1]  # arts inside classroom bar
+        self.assertGreater(_score(atoms, school), _score(atoms, jammed))
 
 
 if __name__ == "__main__":

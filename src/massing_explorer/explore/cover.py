@@ -249,7 +249,9 @@ def _append_partition_samples(
         i_p = partition_indices[cursor % len(partition_indices)]
         groups = (plan.partitions[i_p] or {}).get("groups") or []
         order = bias_story_index_order(
-            plan.story_patterns, demand_profile(groups, session)
+            plan.story_patterns,
+            demand_profile(groups, session),
+            preferred_stories=(session.constraints or {}).get("preferred_stories"),
         ) or list(range(s_n))
         i_s = order[(cursor // max(1, len(partition_indices))) % len(order)]
         i_t = (cursor // 3) % t_n
@@ -374,8 +376,11 @@ def _stratified_samples(
         push(make(0, 0, 0, 0, 0, i_pl))
     # Demand-biased story axis for P0 (stated); other P get their own order in fill.
     p0_groups = (plan.partitions[0] or {}).get("groups") or []
+    pref_stories = session.constraints.get("preferred_stories")
     story_order = bias_story_index_order(
-        plan.story_patterns, demand_profile(p0_groups, session)
+        plan.story_patterns,
+        demand_profile(p0_groups, session),
+        preferred_stories=pref_stories,
     ) or list(range(s_n))
     story_axis_cap = min(s_n, max(8, pool_size // max(1, e_n * l_n * pl_n)))
     for i_s in story_order[:story_axis_cap]:
@@ -389,7 +394,9 @@ def _stratified_samples(
                         for i_p in range(p_n):
                             groups = (plan.partitions[i_p] or {}).get("groups") or []
                             s_order = bias_story_index_order(
-                                plan.story_patterns, demand_profile(groups, session)
+                                plan.story_patterns,
+                                demand_profile(groups, session),
+                                preferred_stories=pref_stories,
                             ) or list(range(s_n))
                             for i_s in s_order:
                                 if len(ordered) >= pool_size:
@@ -509,6 +516,15 @@ def apply_cover_sample(
     groups = part.get("groups") or []
     if groups and sample.partition_index > 0:
         apply_partition(session, groups)
+
+    # Origin snapshot may carry stated feet. After any (P, S) sample, realize
+    # must refill widths — stale locks cause ratio_band / site_length misses
+    # on otherwise legal organizations (53c checkpoint).
+    for mass in session.masses or []:
+        session.constraints.pop(f"{mass.id}_width_ft", None)
+    explore = session.constraints.get("explore")
+    if isinstance(explore, dict):
+        explore.pop("realize_cache", None)
 
     n = len(session.masses)
     locks = dict(session.constraints.get("story_lock") or {})
