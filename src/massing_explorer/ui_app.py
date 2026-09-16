@@ -1446,6 +1446,12 @@ async function runGenerate(modalityAnswers, skipModalityAsk) {
     lastTransparency = data.transparency || null;
     studyId = data.study_id || null;
     selectedSchemeRank = (lastTransparency?.sample_pool?.selected_rank) ?? 0;
+    programMeshCache.clear();
+    previewRequestGen += 1;
+    thumbPaintToken += 1;
+    if (data.mesh && studyId != null) {
+      programMeshCache.set(meshCacheKey("study", studyId), data.mesh);
+    }
     renderProcess(lastTransparency);
     clearInspect();
     closeChecksPanel();
@@ -1608,6 +1614,54 @@ function updateHud(mesh) {
     (gsf ? `<br/>area ~ ${fmtArea(gsf, 0)}` : "");
 }
 
+// Program-colored meshes by cell / scheme key — revisit is instant after first load.
+const programMeshCache = new Map();
+let previewRequestGen = 0;
+let previewDebounceTimer = null;
+let thumbPaintToken = 0;
+
+function meshCacheKey(kind, id) {
+  return `${kind}:${id}`;
+}
+
+function showProgramMesh(mesh, note, passHint) {
+  if (!mesh) return;
+  renderMesh(mesh);
+  renderLegend(mesh);
+  lastMesh = mesh;
+  clearInspect();
+  updateHud(mesh);
+  if (note != null) {
+    const pass = passHint != null ? passHint : mesh.all_checks_passed;
+    setStatus(
+      (pass ? "" : "Failed checks. ") + note,
+      pass ? "ok" : "warn"
+    );
+  }
+}
+
+function markPoolCardSelected(selectorMatch) {
+  for (const card of processBody.querySelectorAll(".pool-card")) {
+    card.classList.toggle("selected", selectorMatch(card));
+  }
+}
+
+function scheduleProgramPreview(loader) {
+  // Debounce so rapid card clicks only solve the last selection.
+  previewRequestGen += 1;
+  const gen = previewRequestGen;
+  if (previewDebounceTimer) clearTimeout(previewDebounceTimer);
+  previewDebounceTimer = setTimeout(async () => {
+    previewDebounceTimer = null;
+    if (gen !== previewRequestGen) return;
+    try {
+      await loader(gen);
+    } catch (err) {
+      if (gen === previewRequestGen) setStatus(String(err), "bad");
+    }
+  }, 90);
+}
+
 async function selectScheme(rank) {
   const pool = lastTransparency?.sample_pool || {};
   const schemes = pool.schemes || [];
@@ -1617,54 +1671,61 @@ async function selectScheme(rank) {
   if (lastTransparency?.sample_pool) {
     lastTransparency.sample_pool.selected_rank = rank;
   }
+  markPoolCardSelected((card) => Number(card.dataset.rank) === rank);
+
+  const cacheKey = scheme.cell_id
+    ? meshCacheKey("cell", scheme.cell_id)
+    : meshCacheKey("scheme", scheme.index ?? rank);
+  const cached = programMeshCache.get(cacheKey);
+  if (cached) {
+    showProgramMesh(cached, `Showing scheme #${rank}.`, cached.all_checks_passed);
+    return;
+  }
+
   if (scheme.preview) {
     renderMesh(scheme.preview);
     renderLegend(scheme.preview);
     lastMesh = scheme.preview;
     updateHud(scheme.preview);
   }
-  renderProcess(lastTransparency);
   if (studyId == null) return;
-  // Persist selection in the background; card preview already updated the view.
+
   if (scheme.source === "archive" && scheme.cell_id) {
-    // Envelope preview is interim; always swap in the full program mesh when ready.
-    applyArchiveCell(scheme.cell_id, { quiet: true, skipMesh: false });
+    setStatus(`Loading programs for scheme #${rank}…`);
+    scheduleProgramPreview((gen) =>
+      applyArchiveCell(scheme.cell_id, { quiet: true, skipMesh: false, gen, cacheKey })
+    );
     return;
   }
-  if (scheme.preview) {
-    setStatus(`Previewing scheme #${rank}.`, "ok");
-    return;
-  }
-  setStatus(`Loading scheme #${rank}…`);
-  try {
+  setStatus(`Loading programs for scheme #${rank}…`);
+  scheduleProgramPreview(async (gen) => {
     const res = await fetch("/api/apply_scheme", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ study_id: studyId, index: scheme.index ?? rank }),
     });
     const data = await res.json();
+    if (gen !== previewRequestGen) return;
     if (!data.ok) {
       setStatus(data.error || "Could not apply scheme", "warn");
       return;
     }
-    renderMesh(data.mesh);
-    renderLegend(data.mesh);
-    lastMesh = data.mesh;
-    clearInspect();
-    updateHud(data.mesh);
-    const pass = data.mesh.all_checks_passed;
-    setStatus(
-      (pass ? "Scheme applied. " : "Scheme applied with failed checks. ") + (data.note || ""),
-      pass ? "ok" : "warn"
-    );
-  } catch (err) {
-    setStatus(String(err), "bad");
-  }
+    if (data.mesh) {
+      programMeshCache.set(cacheKey, data.mesh);
+      showProgramMesh(
+        data.mesh,
+        (data.note || `Scheme #${rank}.`),
+        data.mesh.all_checks_passed
+      );
+    }
+  });
 }
 
 async function applyArchiveCell(cellId, opts = {}) {
   const quiet = Boolean(opts.quiet);
   const skipMesh = Boolean(opts.skipMesh);
+  const gen = opts.gen != null ? opts.gen : previewRequestGen;
+  const cacheKey = opts.cacheKey || meshCacheKey("cell", cellId);
   if (!quiet) setStatus("Loading COVER candidate…");
   try {
     const res = await fetch("/api/apply_cell", {
@@ -1673,18 +1734,26 @@ async function applyArchiveCell(cellId, opts = {}) {
       body: JSON.stringify({ study_id: studyId, cell_id: cellId }),
     });
     const data = await res.json();
+    if (gen !== previewRequestGen) return;
     if (!data.ok) {
       if (!quiet) setStatus(data.error || "Could not open that cell", "warn");
       return;
     }
+    if (data.mesh) programMeshCache.set(cacheKey, data.mesh);
     if (!skipMesh && data.mesh) {
-      renderMesh(data.mesh);
-      renderLegend(data.mesh);
-      lastMesh = data.mesh;
-      clearInspect();
-      updateHud(data.mesh);
-    }
-    if (!quiet) {
+      showProgramMesh(
+        data.mesh,
+        quiet ? null : ((data.note || "Candidate applied.")),
+        data.mesh.all_checks_passed
+      );
+      if (quiet) {
+        const pass = data.mesh.all_checks_passed;
+        setStatus(
+          (pass ? "Programs loaded. " : "Programs loaded with failed checks. ") + (data.note || ""),
+          pass ? "ok" : "warn"
+        );
+      }
+    } else if (!quiet) {
       const pass = data.mesh && data.mesh.all_checks_passed;
       setStatus(
         (pass ? "Candidate applied. " : "Candidate applied with failed checks. ") + (data.note || ""),
@@ -1692,6 +1761,7 @@ async function applyArchiveCell(cellId, opts = {}) {
       );
     }
   } catch (err) {
+    if (gen !== previewRequestGen) return;
     if (!quiet) setStatus(String(err), "bad");
   }
 }
@@ -1699,21 +1769,31 @@ async function applyArchiveCell(cellId, opts = {}) {
 async function selectCandidate(cellId) {
   const cands = lastTransparency?.top_candidates || [];
   const cand = cands.find(c => c.cell_id === cellId);
+  if (lastTransparency) {
+    for (const c of lastTransparency.top_candidates || []) {
+      c.selected = c.cell_id === cellId;
+    }
+  }
+  markPoolCardSelected((card) => card.dataset.cell === cellId);
+
+  const cacheKey = meshCacheKey("cell", cellId);
+  const cached = programMeshCache.get(cacheKey);
+  if (cached) {
+    showProgramMesh(cached, "Showing candidate.", cached.all_checks_passed);
+    return;
+  }
+
   if (cand?.preview) {
     renderMesh(cand.preview);
     renderLegend(cand.preview);
     lastMesh = cand.preview;
     updateHud(cand.preview);
   }
-  if (lastTransparency) {
-    for (const c of lastTransparency.top_candidates || []) {
-      c.selected = c.cell_id === cellId;
-    }
-  }
-  renderProcess(lastTransparency);
   if (studyId == null || !cellId) return;
-  // Envelope preview is interim; always swap in the full program mesh when ready.
-  applyArchiveCell(cellId, { quiet: true, skipMesh: false });
+  setStatus("Loading programs…");
+  scheduleProgramPreview((gen) =>
+    applyArchiveCell(cellId, { quiet: true, skipMesh: false, gen, cacheKey })
+  );
 }
 
 const thumbScenes = new WeakMap();
@@ -1732,13 +1812,27 @@ function getSharedThumbRenderer() {
   return sharedThumbRenderer;
 }
 
-function paintSchemeThumb(canvas, mesh) {
+function paintSchemeThumb(canvas, mesh, cacheHost) {
   if (!mesh || !canvas) return;
   const w = canvas.clientWidth || 168;
   const h = canvas.clientHeight || 110;
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
   canvas.width = Math.max(1, Math.floor(w * dpr));
   canvas.height = Math.max(1, Math.floor(h * dpr));
+
+  // Reuse a prior bitmap when the tab is rebuilt.
+  if (cacheHost && cacheHost._thumbUrl) {
+    const img = new Image();
+    img.onload = () => {
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    };
+    img.src = cacheHost._thumbUrl;
+    return;
+  }
 
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x070707);
@@ -1785,8 +1879,10 @@ function paintSchemeThumb(canvas, mesh) {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(renderer.domElement, 0, 0, canvas.width, canvas.height);
+    if (cacheHost) {
+      try { cacheHost._thumbUrl = canvas.toDataURL("image/jpeg", 0.72); } catch (_) {}
+    }
   }
-  // Dispose temp GPU objects from this paint.
   group.traverse((obj) => {
     if (obj.geometry) obj.geometry.dispose();
     if (obj.material) {
@@ -1797,23 +1893,44 @@ function paintSchemeThumb(canvas, mesh) {
 }
 
 function mountPoolThumbs() {
-  const cards = processBody.querySelectorAll(".pool-card");
-  for (const card of cards) {
-    const canvas = card.querySelector("canvas");
-    let mesh = null;
-    if (card.dataset.rank != null && card.dataset.rank !== "") {
-      const rank = Number(card.dataset.rank);
-      const scheme = (lastTransparency?.sample_pool?.schemes || []).find(s => s.rank === rank);
-      mesh = scheme?.preview;
-      card.addEventListener("click", () => selectScheme(rank));
-    } else if (card.dataset.cell) {
-      const cand = (lastTransparency?.top_candidates || []).find(c => c.cell_id === card.dataset.cell);
-      mesh = cand?.preview;
-      card.addEventListener("click", () => selectCandidate(card.dataset.cell));
+  const cards = Array.from(processBody.querySelectorAll(".pool-card"));
+  const token = ++thumbPaintToken;
+  let i = 0;
+  const paintBatch = () => {
+    if (token !== thumbPaintToken) return;
+    const end = Math.min(i + 2, cards.length);
+    for (; i < end; i++) {
+      const card = cards[i];
+      const canvas = card.querySelector("canvas");
+      let mesh = null;
+      let cacheHost = null;
+      if (card.dataset.rank != null && card.dataset.rank !== "") {
+        const rank = Number(card.dataset.rank);
+        const scheme = (lastTransparency?.sample_pool?.schemes || []).find(s => s.rank === rank);
+        mesh = scheme?.preview;
+        cacheHost = scheme;
+      } else if (card.dataset.cell) {
+        const cand = (lastTransparency?.top_candidates || []).find(c => c.cell_id === card.dataset.cell);
+        mesh = cand?.preview;
+        cacheHost = cand;
+      }
+      if (canvas && mesh) paintSchemeThumb(canvas, mesh, cacheHost);
     }
-    if (canvas && mesh) paintSchemeThumb(canvas, mesh);
-  }
+    if (i < cards.length) requestAnimationFrame(paintBatch);
+  };
+  requestAnimationFrame(paintBatch);
 }
+
+// One listener for the pool/candidates grids (avoids stacking handlers on rebuild).
+processBody.addEventListener("click", (e) => {
+  const card = e.target.closest(".pool-card");
+  if (!card || !processBody.contains(card)) return;
+  if (card.dataset.rank != null && card.dataset.rank !== "") {
+    selectScheme(Number(card.dataset.rank));
+    return;
+  }
+  if (card.dataset.cell) selectCandidate(card.dataset.cell);
+});
 
 function renderLegend(mesh) {
   const leg = mesh.legend || {};
