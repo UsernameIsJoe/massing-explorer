@@ -70,6 +70,12 @@ def insert(
     performance: dict[str, Any],
     reason: str = "",
 ) -> dict[str, Any]:
+    """
+    Record one evaluation in the behavior archive.
+
+    Every stage (COVER, MCTS, REPAIR, BO, REFINE) must go through here so
+    P-pool organization status stays in sync with accepted results.
+    """
     archive["attempts"] = int(archive.get("attempts") or 0) + 1
     key = cell_key(session)
     legal = bool(performance.get("fits_limitations"))
@@ -101,7 +107,22 @@ def insert(
     elif not current.get("fits_limitations") and _closer_illegal(entry, current):
         cells[key] = entry
     refresh_frontier(archive)
+    _sync_p_pool(archive, session, performance)
     return cells.get(key, entry)
+
+
+def _sync_p_pool(
+    archive: dict[str, Any],
+    session: Any,
+    performance: dict[str, Any] | None,
+) -> None:
+    """One shared P-status update for every archive insert (all search stages)."""
+    try:
+        from .p_pool import record_p_outcome
+
+        record_p_outcome(archive, session, performance)
+    except Exception:
+        pass
 
 
 def legal_cells(archive: dict[str, Any]) -> list[dict[str, Any]]:

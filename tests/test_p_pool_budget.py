@@ -120,10 +120,8 @@ class EqualBudgetPPoolTests(unittest.TestCase):
             from massing_explorer.explore.realize import realize
 
             result, perf = realize(session)
+            # insert alone updates P-pool status (no separate record_p_outcome).
             archive_mod.insert(store, session, result, perf, reason=reason)
-            from massing_explorer.explore.p_pool import record_p_outcome
-
-            record_p_outcome(store, session, perf)
 
         if expand:
             report = run_cover(

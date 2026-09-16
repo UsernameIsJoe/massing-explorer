@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 from massing_explorer.explore.p_pool import (
     STATUS_FEASIBLE,
@@ -243,7 +244,171 @@ class StatusTests(unittest.TestCase):
         self.assertIsNone(structural_impossible(_S(), groups))
 
 
-class DemandBiasTests(unittest.TestCase):
+class ArchiveInsertSyncTests(unittest.TestCase):
+    """Every stage insert must update P-pool; COVER must not double-count."""
+
+    def _session(self, stories: int = 3):
+        class _M:
+            def __init__(self) -> None:
+                self.id = "academic_support"
+                self.name = "Academic Support"
+                self.departments = ["CORE ACADEMIC"]
+                self.story_count = stories
+
+        class _S:
+            masses = [_M()]
+            constraints: dict = {"max_stories": 3}
+            floor_pins: dict = {}
+            pairings: list = []
+            program = object()  # truthy so MCTS/BO would realize if called
+
+        return _S()
+
+    def test_insert_legal_marks_org_feasible(self) -> None:
+        from massing_explorer.explore import archive as archive_mod
+        from massing_explorer.explore.p_pool import (
+            STATUS_FEASIBLE,
+            ensure_p_pool,
+            partition_key,
+            seed_p_pool,
+        )
+
+        session = self._session()
+        groups = [
+            {
+                "id": "academic_support",
+                "name": "Academic Support",
+                "departments": ["CORE ACADEMIC"],
+                "story_count": 3,
+            }
+        ]
+        archive = archive_mod.empty_archive()
+        seed_p_pool(archive, [{"groups": groups}], source="initial")
+        key = partition_key(groups)
+        self.assertEqual(archive["p_pool"]["entries"][key]["status"], "unresolved")
+
+        with mock.patch(
+            "massing_explorer.explore.archive.cell_key", return_value="cell-legal"
+        ), mock.patch(
+            "massing_explorer.explore.archive.idea_key", return_value="idea"
+        ), mock.patch(
+            "massing_explorer.explore.archive.partition_id", return_value="part"
+        ), mock.patch(
+            "massing_explorer.explore.archive.read_strategy", return_value={}
+        ), mock.patch(
+            "massing_explorer.explore.archive._snapshot", return_value={}
+        ), mock.patch(
+            "massing_explorer.explore.archive._plates_from_result", return_value=[]
+        ):
+            archive_mod.insert(
+                archive,
+                session,
+                result=None,
+                performance={"fits_limitations": True, "program_coherence": 0.8},
+                reason="mcts APPLY_PARTITION",
+            )
+
+        entry = ensure_p_pool(archive)["entries"][key]
+        self.assertEqual(entry["status"], STATUS_FEASIBLE)
+        self.assertEqual(entry["legal_hits"], 1)
+        self.assertEqual(entry["attempts"], 1)
+
+    def test_cover_evaluate_does_not_double_count_attempts(self) -> None:
+        from massing_explorer.explore import archive as archive_mod
+        from massing_explorer.explore.controller import _evaluate
+        from massing_explorer.explore.p_pool import ensure_p_pool, partition_key, seed_p_pool
+
+        session = self._session()
+        groups = [
+            {
+                "id": "academic_support",
+                "name": "Academic Support",
+                "departments": ["CORE ACADEMIC"],
+                "story_count": 3,
+            }
+        ]
+        archive = archive_mod.empty_archive()
+        seed_p_pool(archive, [{"groups": groups}], source="initial")
+        key = partition_key(groups)
+
+        with mock.patch(
+            "massing_explorer.explore.controller.realize",
+            return_value=(None, {"fits_limitations": True}),
+        ), mock.patch(
+            "massing_explorer.explore.archive.cell_key", return_value="cell-cover"
+        ), mock.patch(
+            "massing_explorer.explore.archive.idea_key", return_value="idea"
+        ), mock.patch(
+            "massing_explorer.explore.archive.partition_id", return_value="part"
+        ), mock.patch(
+            "massing_explorer.explore.archive.read_strategy", return_value={}
+        ), mock.patch(
+            "massing_explorer.explore.archive._snapshot", return_value={}
+        ), mock.patch(
+            "massing_explorer.explore.archive._plates_from_result", return_value=[]
+        ):
+            _evaluate(session, archive, "COVER start: P0")
+
+        entry = ensure_p_pool(archive)["entries"][key]
+        self.assertEqual(entry["attempts"], 1)
+        self.assertEqual(entry["legal_hits"], 1)
+
+    def test_each_stage_reason_marks_feasible(self) -> None:
+        from massing_explorer.explore import archive as archive_mod
+        from massing_explorer.explore.p_pool import (
+            STATUS_FEASIBLE,
+            ensure_p_pool,
+            partition_key,
+            seed_p_pool,
+        )
+
+        session = self._session()
+        groups = [
+            {
+                "id": "academic_support",
+                "name": "Academic Support",
+                "departments": ["CORE ACADEMIC"],
+                "story_count": 3,
+            }
+        ]
+        reasons = (
+            "COVER expand+10: P1",
+            "mcts SET_STORIES academic_support 3fl",
+            "COVER repair: stories+1",
+            "bayes APPLY_PARTITION",
+        )
+        for i, reason in enumerate(reasons):
+            archive = archive_mod.empty_archive()
+            seed_p_pool(archive, [{"groups": groups}], source="initial")
+            key = partition_key(groups)
+            with mock.patch(
+                "massing_explorer.explore.archive.cell_key", return_value=f"cell-{i}"
+            ), mock.patch(
+                "massing_explorer.explore.archive.idea_key", return_value="idea"
+            ), mock.patch(
+                "massing_explorer.explore.archive.partition_id", return_value="part"
+            ), mock.patch(
+                "massing_explorer.explore.archive.read_strategy", return_value={}
+            ), mock.patch(
+                "massing_explorer.explore.archive._snapshot", return_value={}
+            ), mock.patch(
+                "massing_explorer.explore.archive._plates_from_result", return_value=[]
+            ):
+                archive_mod.insert(
+                    archive,
+                    session,
+                    result=None,
+                    performance={"fits_limitations": True},
+                    reason=reason,
+                )
+            entry = ensure_p_pool(archive)["entries"][key]
+            self.assertEqual(
+                entry["status"],
+                STATUS_FEASIBLE,
+                msg=f"{reason} should mark organization feasible",
+            )
+            self.assertEqual(entry["legal_hits"], 1)
+            self.assertEqual(entry["attempts"], 1)
     def test_overloaded_prefers_taller_patterns(self) -> None:
         overloaded = demand_profile(
             [

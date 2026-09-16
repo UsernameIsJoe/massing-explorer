@@ -476,13 +476,8 @@ def _cover_geometry(session: Any, archive: dict[str, Any]) -> None:
 
 def _evaluate(session: Any, archive: dict[str, Any], reason: str) -> None:
     result, performance = realize(session)
+    # P-pool status updates inside archive.insert (shared with MCTS/REPAIR/BO).
     archive_mod.insert(archive, session, result, performance, reason=reason)
-    try:
-        from .p_pool import record_p_outcome
-
-        record_p_outcome(archive, session, performance)
-    except Exception:
-        pass
 
 
 def _prepare_learn(archive: dict[str, Any], learning: dict[str, Any]) -> dict[str, Any]:
