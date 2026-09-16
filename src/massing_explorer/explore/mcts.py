@@ -12,7 +12,7 @@ import math
 from typing import Any
 
 from . import archive as archive_mod
-from .actions import UNSUPPORTED, apply_action
+from .actions import SUPPORTED, UNSUPPORTED, apply_action
 from .planner import parse_plan
 from .saturate import MCTS_DEPTH, MCTS_ROOTS, MCTS_SIMS, Saturation, read_explore_budget
 from .strategy import grouping_is_required
@@ -23,6 +23,9 @@ MAX_DEPTH = MCTS_DEPTH
 EXPLORATION = 1.25
 CATALOG_CAP = 18
 ROOT_CAP = MCTS_ROOTS
+# Illegal search_reward tops out at 0.25; accepted schemes sit above ~0.4.
+# Only deepen past unvisited siblings once a child looks accepted / near-accepted.
+_DEEPEN_Q = 0.35
 
 
 class _Node:
@@ -120,12 +123,14 @@ def run_mcts(
                 "best_reward": stats["best_reward"],
                 "saturated": root_sat.stop(),
                 "best_path": _best_path(root),
+                "max_depth_reached": int(stats.get("max_depth_reached") or 0),
             }
         )
 
     archive_mod.restore_snapshot(session, current_snap)
     tree = _flatten(forest)
     best = []
+    max_depth_reached = 0
     if trees:
         best = (
             max(
@@ -134,10 +139,12 @@ def run_mcts(
             ).get("best_path")
             or []
         )
+        max_depth_reached = max(int(t.get("max_depth_reached") or 0) for t in trees)
     return {
         "ran": True,
         "simulations": total_sims,
         "depth": depth,
+        "max_depth_reached": max_depth_reached,
         "roots": [t["label"] for t in trees],
         "root_reports": trees,
         "saturated": bool(trees) and all(t.get("saturated") for t in trees),
@@ -150,9 +157,10 @@ def run_mcts(
         "baseline": "search.py remains the enumeration baseline. MCTS does not sit on feet.",
         "note": (
             f"MCTS: {total_sims} simulation(s) from {len(trees)} COVER root(s), "
-            f"depth {depth} ({applied} applied, {illegal} illegal, {unsupported} unsupported)"
+            f"depth {depth} (reached {max_depth_reached}; {applied} applied, "
+            f"{illegal} illegal, {unsupported} unsupported)"
             f"{'; stopped on saturation' if (trees and all(t.get('saturated') for t in trees)) else ''}. "
-            "Planner is the expansion prior. search.py remains the enumeration baseline."
+            "Planner is the expansion prior. Promising branches deepen under PUCT."
         ),
     }
 
@@ -178,38 +186,27 @@ def _simulate_tree(
     local_cells = set(known_cells)
     applied = illegal = unsupported = 0
     gained_any = False
+    max_depth_reached = 0
     for _ in range(max(1, simulations)):
         if saturation.stop() and ran >= 1:
             break
         archive_mod.restore_snapshot(session, root_snap)
         path = [root]
         node = root
+        # Select: never re-enter dead planner leaves; deepen only after a
+        # child looks accepted (see _select_child). Otherwise give unvisited
+        # catalog siblings a first look so APPLY_PARTITION is not starved.
         while (
             node.children
             and len(path) < depth
             and node.kind not in {"illegal", "unsupported"}
         ):
-            # Prefer depth: descend into any child with visits; expand waiting
-            # siblings only when no unvisited remain under PUCT among visited.
-            waiting = [c for c in node.children if c.visits == 0]
-            if waiting and not all(c.visits > 0 for c in node.children):
-                # Allow deepening before every sibling is probed once.
-                visited = [c for c in node.children if c.visits > 0]
-                if visited and len(path) + 1 < depth:
-                    deep = max(visited, key=lambda child: _puct(child, node.visits))
-                    if deep.visits >= 2 or len(waiting) == 0:
-                        node = deep
-                        _play(session, node)
-                        path.append(node)
-                        if node.kind in {"illegal", "unsupported"}:
-                            break
-                        continue
+            child = _select_child(node)
+            if child is None:
                 break
-            if not all(child.visits > 0 for child in node.children):
-                break
-            node = max(node.children, key=lambda child: _puct(child, node.visits))
-            _play(session, node)
-            path.append(node)
+            _play(session, child)
+            path.append(child)
+            node = child
             if node.kind in {"illegal", "unsupported"}:
                 break
 
@@ -222,13 +219,19 @@ def _simulate_tree(
                     probe_unsupported=False,
                 )
                 node.expanded = True
-            waiting = [child for child in node.children if child.visits == 0]
-            if waiting:
+            waiting = [
+                child
+                for child in node.children
+                if child.visits == 0 and child.kind not in {"illegal", "unsupported"}
+            ]
+            if waiting and len(path) < depth:
+                # First look: highest-prior unvisited, else PUCT among all.
                 child = max(waiting, key=lambda item: item.prior)
                 _play(session, child)
                 path.append(child)
                 node = child
 
+        max_depth_reached = max(max_depth_reached, max(0, len(path) - 1))
         reward = _score(session, archive, node, weights)
         for item in path:
             item.visits += 1
@@ -262,6 +265,7 @@ def _simulate_tree(
         "best_reward": local_best,
         "cells": local_cells,
         "gained": gained_any,
+        "max_depth_reached": max_depth_reached,
     }
 
 
@@ -437,7 +441,13 @@ def _planner_prior(session: Any, client: Any, plan: Any) -> list[dict[str, Any]]
         parsed = parse_plan(_request(client, session, None), session)
     else:
         parsed = parse_plan({}, session)
-    return list(parsed.get("actions") or [])
+    # Unknown ops (FIX_PARTITION, REQUIREMENT, …) falsify in the planner
+    # report but must not monopolize MCTS priors — they are never drawable.
+    return [
+        a
+        for a in list(parsed.get("actions") or [])
+        if str(a.get("op") or "").upper() in SUPPORTED
+    ]
 
 
 def _expand(
@@ -447,9 +457,15 @@ def _expand(
     probe_unsupported: bool = False,
 ) -> None:
     catalog = catalog_actions(session, include_unsupported=probe_unsupported)
+    # Drop known-unsupported ops even if a catalog leak occurs.
+    catalog = [
+        a
+        for a in catalog
+        if str(a.get("op") or "") not in UNSUPPORTED
+    ]
     ordered: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for action in list(prior_actions) + catalog:
+    for action in list(prior_actions) + _balance_action_categories(catalog):
         key = action_key(action)
         if key in seen:
             continue
@@ -470,6 +486,25 @@ def _expand(
         child = _Node(action=action, prior=prior, parent=node)
         child.from_planner = key in prior_keys
         node.children.append(child)
+
+
+def _balance_action_categories(actions: list[dict[str, Any]], *, per_op: int = 3) -> list[dict[str, Any]]:
+    """Round-robin across ops so SET_STORIES cannot crowd out APPLY_PARTITION."""
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    for action in actions:
+        op = str(action.get("op") or "")
+        buckets.setdefault(op, []).append(action)
+    for op in buckets:
+        buckets[op] = buckets[op][: max(1, per_op)]
+    out: list[dict[str, Any]] = []
+    while any(buckets.values()):
+        for op in list(buckets.keys()):
+            if not buckets[op]:
+                continue
+            out.append(buckets[op].pop(0))
+            if not buckets[op]:
+                del buckets[op]
+    return out
 
 
 def _play(session: Any, node: _Node) -> None:
@@ -500,7 +535,7 @@ def _score(session: Any, archive: dict[str, Any], node: _Node, weights: dict[str
     if node.kind in {"unsupported", "pending"}:
         return 0.0
     if node.kind == "illegal":
-        # Graded signal from violation distance when the action itself failed.
+        # Rejected ops stay at zero so high planner priors cannot look "promising".
         return 0.0
     if getattr(session, "program", None) is None:
         return 0.6 if node.kind in {"applied", "root", "cover_root"} else 0.0
@@ -515,6 +550,7 @@ def _score(session: Any, archive: dict[str, Any], node: _Node, weights: dict[str
         performance,
         reason=f"mcts {_label(node.action)}" if node.action else "mcts root",
     )
+    # Illegal drawings still return graded search_reward (feasibility distance).
     return search_reward(performance, weights)
 
 
@@ -524,10 +560,53 @@ def _reward(performance: dict[str, Any], weights: dict[str, float] | None = None
     return search_reward(performance, weights)
 
 
+def _select_child(node: _Node) -> _Node | None:
+    """
+    Pick the next child to descend into.
+
+    Dead (illegal / unsupported) leaves are never re-entered. Until an
+    applied child looks accepted (_DEEPEN_Q), unvisited siblings get the
+    next first look — otherwise planner priors starve APPLY_PARTITION.
+    Once a child clears _DEEPEN_Q, PUCT may deepen it before every sibling
+    is forced once.
+    """
+    viable = [
+        child
+        for child in node.children
+        if child.kind not in {"illegal", "unsupported"}
+    ]
+    if not viable:
+        return None
+    unvisited = [child for child in viable if child.visits <= 0]
+    strong = [
+        child
+        for child in viable
+        if child.visits > 0 and child.kind == "applied" and child.q >= _DEEPEN_Q
+    ]
+    if strong and unvisited:
+        pool = strong + unvisited
+        return max(pool, key=lambda child: _puct(child, node.visits))
+    if unvisited:
+        return max(unvisited, key=lambda child: (float(child.prior or 0.0), _puct(child, node.visits)))
+    return max(viable, key=lambda child: _puct(child, node.visits))
+
+
 def _puct(node: _Node, parent_visits: int) -> float:
+    """
+    Standard PUCT without an unvisited +1000 lockout.
+
+    Unvisited children compete via exploration × prior only, so a strong
+    visited child can deepen before every sibling is forced once.
+    Dead leaves score as −∞ so they cannot win selection if included.
+    """
+    if node.kind in {"illegal", "unsupported"}:
+        return float("-inf")
+    parent_visits = max(1, int(parent_visits))
     if node.visits <= 0:
-        return 1000.0 + node.prior
-    return node.q + EXPLORATION * node.prior * math.sqrt(max(1, parent_visits)) / (1 + node.visits)
+        return EXPLORATION * float(node.prior or 0.0) * math.sqrt(parent_visits)
+    return node.q + EXPLORATION * float(node.prior or 0.0) * math.sqrt(parent_visits) / (
+        1 + node.visits
+    )
 
 
 def _flatten(root: _Node) -> list[dict[str, Any]]:

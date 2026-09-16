@@ -111,7 +111,6 @@ def run_search(session: Any, mode: str = "cover", client: Any = None, plan: Any 
 
     from .csp import describe_csp
     from .explain import empty_cells
-    from .robustness import probe_strategy
     from .topology import describe_topology
 
     explain_report = empty_cells(session, archive)
@@ -130,29 +129,24 @@ def run_search(session: Any, mode: str = "cover", client: Any = None, plan: Any 
 
     weights = (learning.get("weights") or {}) if learning else {}
     preferred = archive.get("stated_partition")
-    # Probe a few leading elites so robustness enters the same objective as search.
-    from .performance import eval_composites
+    # Probe leading elites with the *same* department scenarios; attach to each entry.
+    from .robustness import probe_shortlist, shared_probe_departments
 
-    held_before_probe = archive_mod.capture(session)
-    for entry in sorted(
+    shortlist = sorted(
         archive_mod.legal_cells(archive),
         key=lambda e: taste_weight(e, weights),
         reverse=True,
-    )[:3]:
-        try:
-            archive_mod.restore_entry(session, entry)
-            probe = probe_strategy(session)
-            if probe.get("ran") and probe.get("score") is not None:
-                perf = dict(entry.get("performance") or {})
-                perf["_robustness_probe"] = float(probe["score"])
-                perf.update(eval_composites(perf, session))
-                entry["performance"] = perf
-                cell_id = entry.get("cell")
-                if cell_id and cell_id in (archive.get("cells") or {}):
-                    archive["cells"][cell_id]["performance"] = perf
-        except Exception:
-            continue
-    archive_mod.restore_snapshot(session, held_before_probe)
+    )[:5]
+    shared_depts = shared_probe_departments(session)
+    if shortlist:
+        probe_shortlist(session, shortlist, departments=shared_depts)
+        # Write back into archive cells by id.
+        cells = archive.get("cells") or {}
+        for entry in shortlist:
+            cell_id = entry.get("cell")
+            if cell_id and cell_id in cells:
+                cells[cell_id]["performance"] = entry.get("performance")
+                cells[cell_id]["robustness"] = entry.get("robustness")
 
     kept = _pick_kept(
         archive,
@@ -162,21 +156,36 @@ def run_search(session: Any, mode: str = "cover", client: Any = None, plan: Any 
     )
     if kept:
         archive_mod.restore_entry(session, kept)
-    robust_report = {"ran": False}
-    if session.masses:
-        robust_report = probe_strategy(session)
+    robust_report = {"ran": False, "status": "untested"}
+    if kept and kept.get("robustness"):
+        robust_report = {
+            "ran": True,
+            "status": (kept.get("robustness") or {}).get("status") or "untested",
+            "score": (kept.get("robustness") or {}).get("score"),
+            "survived": (kept.get("robustness") or {}).get("survived"),
+            "collapsed": (kept.get("robustness") or {}).get("collapsed"),
+            "departments": (kept.get("robustness") or {}).get("departments") or shared_depts,
+            "note": (
+                f"Robustness ({(kept.get('robustness') or {}).get('status')}): "
+                f"shared scenarios on {len(shortlist)} shortlist scheme(s)."
+            ),
+        }
         note += " " + str(robust_report.get("note") or "")
         archive["note"] = note
-        if kept and robust_report.get("ran") and robust_report.get("score") is not None:
-            score = float(robust_report["score"])
-            perf = dict(kept.get("performance") or {})
-            perf["_robustness_probe"] = score
-            perf.update(eval_composites(perf, session))
-            kept["performance"] = perf
+    elif session.masses:
+        # Kept not in shortlist / no legal cells — probe current once, still labeled.
+        from .robustness import attach_probe_to_entry, probe_strategy
+
+        robust_report = probe_strategy(session, departments=shared_depts)
+        if kept:
+            attach_probe_to_entry(kept, robust_report)
             cells = archive.get("cells") or {}
             cell_id = kept.get("cell")
             if cell_id and cell_id in cells:
-                cells[cell_id]["performance"] = perf
+                cells[cell_id]["performance"] = kept.get("performance")
+                cells[cell_id]["robustness"] = kept.get("robustness")
+        note += " " + str(robust_report.get("note") or "")
+        archive["note"] = note
     solved = solve_dimensions(session)
 
     store["archive"] = archive
@@ -208,6 +217,7 @@ def run_search(session: Any, mode: str = "cover", client: Any = None, plan: Any 
         "ran": mcts_report.get("ran"),
         "simulations": mcts_report.get("simulations"),
         "depth": mcts_report.get("depth"),
+        "max_depth_reached": mcts_report.get("max_depth_reached"),
         "roots": mcts_report.get("roots") or [],
         "saturated": mcts_report.get("saturated"),
         "applied": mcts_report.get("applied"),
@@ -244,6 +254,7 @@ def run_search(session: Any, mode: str = "cover", client: Any = None, plan: Any 
     }
     store["robustness"] = {
         "ran": robust_report.get("ran"),
+        "status": robust_report.get("status") or "untested",
         "survived": robust_report.get("survived"),
         "collapsed": robust_report.get("collapsed"),
         "score": robust_report.get("score"),
@@ -466,6 +477,12 @@ def _cover_geometry(session: Any, archive: dict[str, Any]) -> None:
 def _evaluate(session: Any, archive: dict[str, Any], reason: str) -> None:
     result, performance = realize(session)
     archive_mod.insert(archive, session, result, performance, reason=reason)
+    try:
+        from .p_pool import record_p_outcome
+
+        record_p_outcome(archive, session, performance)
+    except Exception:
+        pass
 
 
 def _prepare_learn(archive: dict[str, Any], learning: dict[str, Any]) -> dict[str, Any]:

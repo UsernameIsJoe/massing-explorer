@@ -13,9 +13,12 @@ from typing import Any
 from .csp import UI_PARTITION_CAP, describe_csp
 from .strategy import grouping_is_required, required_mass_bounds
 
-# COVER search pool — not a UI number.
+# COVER search pool — not a UI number. Initial experimental batch; may expand.
 COVER_PARTITION_MIN = 12
 COVER_PARTITION_MAX = 20
+# Soft ceiling for the expanding P pool (COVER may admit more mid-run).
+P_POOL_SOFT_MAX = 40
+P_EXPAND_BATCH = 5
 
 
 def partition_signature(groups: list[list[str]] | list[dict[str, Any]]) -> frozenset[frozenset[str]]:

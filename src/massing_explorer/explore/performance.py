@@ -321,15 +321,17 @@ def _euclid(a: tuple[float, ...], b: tuple[float, ...]) -> float:
     return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
 
 
-def _robustness_score(vector: dict[str, Any], session: Any) -> float:
-    """Explicit probe when present; otherwise a neutral headroom proxy — never 1.0 untested."""
+def _robustness_score(vector: dict[str, Any], session: Any = None) -> float:
+    """Explicit probe when present; otherwise a labeled-untested mid proxy — never 1.0."""
     if vector.get("_robustness_probe") is not None:
         return float(vector["_robustness_probe"])
-    # Do not reuse another candidate's explore.robustness report here — that
-    # conflates probes across schemes. Untested → mid headroom from leftover only.
+    status = str(vector.get("robustness_status") or "untested")
     leftover = float(vector.get("leftover_area") or 0.0)
-    # 0.5 baseline (unknown) ± leftover headroom. Full utilization ≠ proven robust.
-    return max(0.0, min(1.0, 0.50 + 0.25 * (1.0 - leftover) - 0.15 * leftover))
+    # Untested → mid headroom from leftover only. Full utilization ≠ proven robust.
+    proxy = max(0.0, min(1.0, 0.50 + 0.25 * (1.0 - leftover) - 0.15 * leftover))
+    if status != "probed":
+        vector["robustness_status"] = "untested"
+    return proxy
 
 
 def _spread(areas: list[float]) -> float:

@@ -2,8 +2,12 @@
 Fill exact feet for a frozen strategy.
 
 Search may change P, T, loading, envelope, plate profile, and story counts.
-This inner step only tries a handful of widths / ratio projections, then
+This inner step tries a small adaptive set of widths / ratio projections, then
 picks a legal drawing or the closest illegal one. It does not bump stories.
+
+Stop when feasibility is structurally hopeless, repeated attempts show no
+distance progress, or further legal quality gain is tiny. Exhausting the
+budget is not proof of impossibility.
 """
 
 from __future__ import annotations
@@ -21,9 +25,17 @@ from .feasibility import feasibility_distance_of
 from .performance import measure
 from .strategy import partition_id
 
-SOLVE_CAP = 16
+SOLVE_CAP_MIN = 3
+SOLVE_CAP_BASE = 6
+SOLVE_CAP_NEAR = 10
+SOLVE_CAP_MAX = 14
 WIDTH_MARGIN_FT = 0.25
 MIN_WIDTH_FT = 45.0
+# Back-compat alias used by older call sites / tests.
+SOLVE_CAP = SOLVE_CAP_MAX
+_NO_PROGRESS_STREAK = 2
+_LEGAL_IMPROVE_EPS = 1e-4
+_CACHE_MAX = 64
 
 
 def realize(
@@ -56,12 +68,28 @@ def realize(
     }
     config = _config_of(session)
 
+    cache_key = _realize_cache_key(session, held_stories)
+    cached = _cache_get(session, cache_key)
+    if cached is not None:
+        combo, perf_hint = cached
+        _restore_widths(session, held_widths)
+        _apply_widths(session, combo)
+        _restore_stories(session, held_stories)
+        result = solve_massing_study(session)
+        _restore_stories(session, held_stories)
+        return result, measure(result, session)
+
     combos = _width_combos(session, config)
     best_legal: tuple[float, float, dict[str, float | None], Any, dict[str, Any]] | None = None
     best_illegal: tuple[float, dict[str, float | None], Any, dict[str, Any]] | None = None
 
+    cap = _adaptive_solve_cap(session, config, len(combos))
     idx = 0
-    while idx < len(combos) and idx < SOLVE_CAP:
+    no_progress = 0
+    last_best_dist: float | None = None
+    last_best_reward: float | None = None
+
+    while idx < len(combos) and idx < cap:
         combo = combos[idx]
         idx += 1
         _restore_widths(session, held_widths)
@@ -74,25 +102,52 @@ def realize(
         perf = measure(result, session)
         extra = _followup_combos(session, config, result, perf, combo)
         for follow in extra:
-            if follow not in combos and len(combos) < SOLVE_CAP:
+            if follow not in combos and len(combos) < SOLVE_CAP_MAX:
                 combos.append(follow)
-        if perf.get("fits_limitations"):
+        # Raise cap when distance is shrinking or a near-feasible / promising legal appears.
+        if not perf.get("fits_limitations"):
+            dist = _distance(perf)
+            if best_illegal is None or dist < best_illegal[0] - 1e-9:
+                best_illegal = (dist, dict(combo), result, perf)
+                if last_best_dist is None or dist < last_best_dist - 1e-6:
+                    no_progress = 0
+                    last_best_dist = dist
+                    if dist < 0.35 and cap < SOLVE_CAP_NEAR:
+                        cap = min(SOLVE_CAP_NEAR, SOLVE_CAP_MAX, len(combos))
+                    elif dist < 0.15 and cap < SOLVE_CAP_MAX:
+                        cap = min(SOLVE_CAP_MAX, len(combos))
+                else:
+                    no_progress += 1
+            else:
+                no_progress += 1
+            if _structurally_hopeless(perf) and idx >= SOLVE_CAP_MIN:
+                break
+            if no_progress >= _NO_PROGRESS_STREAK and idx >= SOLVE_CAP_MIN:
+                break
+        else:
             from .saturate import architectural_reward
 
             reward = float(architectural_reward(perf, weights))
             env = _envelope_fit(session, result)
             env_label = str((session.constraints or {}).get("cover_envelope") or "balanced")
-            # Preserve envelope identity: compact/elongated rank fit first.
             if env_label in {"compact", "elongated"}:
                 key = (env, reward)
             else:
                 key = (reward, env)
-            if best_legal is None or key > (best_legal[0], best_legal[1]):
+            improved = best_legal is None or key > (best_legal[0], best_legal[1])
+            if improved:
                 best_legal = (key[0], key[1], dict(combo), result, perf)
-        else:
-            dist = _distance(perf)
-            if best_illegal is None or dist < best_illegal[0]:
-                best_illegal = (dist, dict(combo), result, perf)
+                if last_best_reward is None or reward > last_best_reward + _LEGAL_IMPROVE_EPS:
+                    no_progress = 0
+                    last_best_reward = reward
+                    if cap < SOLVE_CAP_NEAR:
+                        cap = min(SOLVE_CAP_NEAR, len(combos))
+                else:
+                    no_progress += 1
+            else:
+                no_progress += 1
+            if no_progress >= _NO_PROGRESS_STREAK and idx >= SOLVE_CAP_BASE:
+                break
 
     picked = best_legal[2:] if best_legal is not None else (
         best_illegal[1:] if best_illegal is not None else None
@@ -109,7 +164,89 @@ def realize(
     _restore_stories(session, held_stories)
     result = solve_massing_study(session)
     _restore_stories(session, held_stories)
-    return result, measure(result, session)
+    perf = measure(result, session)
+    _cache_put(session, cache_key, dict(combo), perf)
+    return result, perf
+
+
+def _adaptive_solve_cap(session: Any, config: dict[str, Any], n_combos: int) -> int:
+    """Start small; callers may raise toward NEAR/MAX when progress appears."""
+    n = max(1, int(n_combos))
+    # Many free widths → start a bit higher; required-only → fewer needed.
+    free = 0
+    for mass in session.masses or []:
+        if required_width_ft(session, mass) is None and mass.id not in _paired_ids(session):
+            free += 1
+    base = SOLVE_CAP_BASE if free >= 2 else SOLVE_CAP_MIN
+    return max(SOLVE_CAP_MIN, min(base, n, SOLVE_CAP_MAX))
+
+
+def _structurally_hopeless(perf: dict[str, Any]) -> bool:
+    """True when violations look like hard structural conflict, not a width miss."""
+    kinds = {str(k) for k in (perf.get("failed_kinds") or [])}
+    if "program_split" in kinds and "volume_collision" in kinds:
+        return True
+    violations = perf.get("violations") or {}
+    if not isinstance(violations, dict):
+        return False
+    try:
+        split = float(violations.get("split") or 0)
+        stories = float(violations.get("stories") or 0)
+    except (TypeError, ValueError):
+        return False
+    return split >= 0.9 and stories >= 0.9
+
+
+def _realize_cache_key(session: Any, stories: dict[str, int]) -> tuple:
+    from .strategy import read_strategy
+
+    strat = read_strategy(session)
+    env = str((session.constraints or {}).get("cover_envelope") or "")
+    loading = str((session.constraints or {}).get("loading") or "")
+    topo = "paired" if session.pairings else "independent"
+    plate = str((session.constraints or {}).get("cover_plate_profile") or "uniform")
+    story_t = tuple(sorted((str(k), int(v)) for k, v in stories.items()))
+    part = str(partition_id(session))
+    return (part, story_t, topo, loading, env, plate)
+
+
+def _cache_get(
+    session: Any, key: tuple
+) -> tuple[dict[str, float | None], dict[str, Any]] | None:
+    explore = (session.constraints or {}).setdefault("explore", {})
+    cache = explore.get("realize_cache")
+    if not isinstance(cache, dict):
+        return None
+    hit = cache.get(repr(key))
+    if not isinstance(hit, dict):
+        return None
+    combo = hit.get("combo")
+    if not isinstance(combo, dict):
+        return None
+    return combo, hit.get("perf") or {}
+
+
+def _cache_put(
+    session: Any,
+    key: tuple,
+    combo: dict[str, float | None],
+    perf: dict[str, Any],
+) -> None:
+    explore = (session.constraints or {}).setdefault("explore", {})
+    cache = explore.setdefault("realize_cache", {})
+    if not isinstance(cache, dict):
+        explore["realize_cache"] = {}
+        cache = explore["realize_cache"]
+    cache[repr(key)] = {
+        "combo": {str(k): (None if v is None else float(v)) for k, v in combo.items()},
+        "perf": {
+            "fits_limitations": bool(perf.get("fits_limitations")),
+            "feasibility_distance": perf.get("feasibility_distance"),
+        },
+    }
+    # Bound memory
+    while len(cache) > _CACHE_MAX:
+        cache.pop(next(iter(cache)))
 
 
 def _config_of(session: Any) -> dict[str, Any]:

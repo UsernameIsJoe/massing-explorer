@@ -477,6 +477,14 @@ def _process_steps(store: dict[str, Any]) -> list[dict[str, Any]]:
             )
             if cover.get("samples_planned") is not None:
                 cover_bits.append(f"pool {cover.get('samples_planned')}")
+            p_pool = cover.get("p_pool") if isinstance(cover.get("p_pool"), dict) else {}
+            if p_pool.get("size"):
+                st = p_pool.get("statuses") or {}
+                cover_bits.append(
+                    f"P {p_pool.get('size')} "
+                    f"(ok {st.get('feasible', 0)} / open {st.get('unresolved', 0)} / "
+                    f"x {st.get('impossible', 0)}; +{p_pool.get('expansions', 0)} expand)"
+                )
             if cover.get("incomplete"):
                 cover_bits.append("incomplete")
         elif plan.get("pool"):
@@ -783,6 +791,11 @@ def transparency_payload(
             or 0
         ),
         "cover_incomplete": bool(cover.get("incomplete") or archive.get("cover_incomplete")),
+        "p_pool": (
+            cover.get("p_pool")
+            if isinstance(cover.get("p_pool"), dict)
+            else ((archive.get("cover_plan") or {}).get("p_pool") if isinstance(archive.get("cover_plan"), dict) else {})
+        ),
     }
 
     top_candidates: list[dict[str, Any]] = []

@@ -2,7 +2,8 @@
 Program-perturbation robustness on one strategy.
 
 Grow or shrink a department, re-solve the same P/T/V/G, record survive or
-collapse. This is not a license to regroup a must.
+collapse. Dimensions may adapt via the normal solve path; the strategy
+(grouping / stories) stays fixed. Untested candidates must be labeled untested.
 """
 
 from __future__ import annotations
@@ -16,11 +17,17 @@ from .strategy import partition_id
 GROW = 1.15
 SHRINK = 0.85
 HARD_KINDS = {"site_length", "site_width", "site_total_length", "site_total_width", "gsf_fit", "anchor_fit", "layout_dims"}
+DEFAULT_FACTORS = (SHRINK, GROW)
+
+
+def shared_probe_departments(session: Any, cap: int = 3) -> list[str]:
+    """Same department list for every shortlist probe in a run."""
+    return _pick_departments(session, cap=cap)
 
 
 def probe_strategy(
     session: Any,
-    factors: tuple[float, float] = (SHRINK, GROW),
+    factors: tuple[float, float] = DEFAULT_FACTORS,
     departments: list[str] | None = None,
 ) -> dict[str, Any]:
     """Perturb program area on the current grouping. Restores GSF after each try."""
@@ -30,7 +37,7 @@ def probe_strategy(
     baseline = solve_massing_study(session)
     base_perf = measure(baseline, session)
     base_hard = _hard_kinds(baseline)
-    names = departments or _pick_departments(session)
+    names = list(departments) if departments is not None else _pick_departments(session)
     probes: list[dict[str, Any]] = []
     survived = 0
     collapsed = 0
@@ -78,21 +85,90 @@ def probe_strategy(
 
     total = survived + collapsed
     # Untested (no probes) is unknown — not proven robust.
-    score = (survived / total) if total else 0.5
+    tested = total > 0
+    score = (survived / total) if tested else None
     note = (
         f"Robustness: {survived} survive, {collapsed} collapse on the same strategy. "
-        "Program area moved; grouping did not."
+        "Program area moved; grouping/stories fixed; dimensions may adapt via solve."
+        if tested
+        else "Robustness: untested (no probe departments)."
     )
     return {
         "ran": True,
+        "tested": tested,
+        "status": "probed" if tested else "untested",
         "baseline_fits": bool(base_perf.get("fits_limitations")),
         "survived": survived,
         "collapsed": collapsed,
-        "score": round(score, 4),
+        "score": round(score, 4) if score is not None else None,
         "probes": probes,
         "departments": names,
+        "factors": list(factors),
+        "dimensions_may_adapt": True,
+        "strategy_fixed": True,
         "note": note,
     }
+
+
+def attach_probe_to_entry(entry: dict[str, Any], probe: dict[str, Any]) -> dict[str, Any]:
+    """Write probe results onto the exact archive entry (not a sticky session field)."""
+    from .performance import eval_composites
+
+    perf = dict(entry.get("performance") or {})
+    if probe.get("tested") and probe.get("score") is not None:
+        perf["_robustness_probe"] = float(probe["score"])
+        perf["robustness_status"] = "probed"
+    else:
+        perf.pop("_robustness_probe", None)
+        perf["robustness_status"] = "untested"
+    perf["robustness_scenarios"] = {
+        "departments": list(probe.get("departments") or []),
+        "factors": list(probe.get("factors") or []),
+        "dimensions_may_adapt": bool(probe.get("dimensions_may_adapt", True)),
+        "strategy_fixed": bool(probe.get("strategy_fixed", True)),
+    }
+    perf.update(eval_composites(perf))
+    entry["performance"] = perf
+    entry["robustness"] = {
+        "status": perf["robustness_status"],
+        "score": probe.get("score"),
+        "survived": probe.get("survived"),
+        "collapsed": probe.get("collapsed"),
+        "departments": list(probe.get("departments") or []),
+    }
+    return entry
+
+
+def probe_shortlist(
+    session: Any,
+    entries: list[dict[str, Any]],
+    *,
+    departments: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Run the same program-change scenarios on each entry.
+
+    Restores each entry before probing so results attach to that candidate only.
+    """
+    from . import archive as archive_mod
+
+    if not entries:
+        return []
+    held = archive_mod.capture(session)
+    names = list(departments) if departments is not None else shared_probe_departments(session)
+    out: list[dict[str, Any]] = []
+    try:
+        for entry in entries:
+            if not entry.get("snapshot"):
+                continue
+            archive_mod.restore_entry(session, entry)
+            probe = probe_strategy(session, departments=names)
+            attach_probe_to_entry(entry, probe)
+            out.append(entry)
+    finally:
+        archive_mod.restore_snapshot(session, held)
+    return out
+
 
 
 def _pick_departments(session: Any, cap: int = 3) -> list[str]:

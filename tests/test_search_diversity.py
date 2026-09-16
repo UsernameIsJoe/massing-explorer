@@ -302,6 +302,23 @@ class TestStoryDistance(unittest.TestCase):
         self.assertEqual(label, "stories+1")
         self.assertEqual(session.masses[0].story_count, 2)
 
+    def test_edge_overrun_clears_width_locks_first(self) -> None:
+        session = SimpleNamespace(
+            constraints={
+                "max_stories": 4,
+                "cover_envelope": "balanced",
+                "story_lock": {},
+                "a_width_ft": 80.0,
+            },
+            masses=[_mass("a", ["Art", "Admin"], 1)],
+        )
+        label = _nudge_for_violations(
+            session, {"edge_overrun": 0.2, "owners": {"edge_overrun": ["a"]}}
+        )
+        self.assertEqual(label, "clear-widths")
+        self.assertNotIn("a_width_ft", session.constraints)
+        self.assertEqual(session.masses[0].story_count, 1)
+
 
 class TestCoverPartitionBudget(unittest.TestCase):
     def _session(self, *, n_atoms: int = 5, k_min: int = 2, k_max: int = 4):

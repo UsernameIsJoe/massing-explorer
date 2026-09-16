@@ -18,9 +18,24 @@ from typing import Any, Iterator
 from .csp import describe_csp
 from .partitions import (
     COVER_PARTITION_MAX,
+    P_EXPAND_BATCH,
+    P_POOL_SOFT_MAX,
     apply_partition,
     cover_partition_budget,
     partition_signature,
+)
+from .p_pool import (
+    active_partition_indices,
+    bias_story_index_order,
+    csp_leftover_partitions,
+    deepen_vs_expand_counts,
+    demand_profile,
+    expand_p_pool,
+    partition_key,
+    persist_pool_to_session,
+    p_pool_summary,
+    seed_p_pool,
+    should_expand_p_pool,
 )
 from .strategy import grouping_is_required, partition_id
 from .topology import paired_bars_drawable, pairing_proposals, stated_frontage_ft, topology_is_required
@@ -211,6 +226,57 @@ def build_cover_plan(session: Any, *, pool_size: int = COVER_MAX) -> CoverPlan:
     return plan
 
 
+def _append_partition_samples(
+    plan: CoverPlan,
+    *,
+    partition_indices: list[int],
+    n: int,
+    session: Any,
+) -> list[CoverSample]:
+    """Demand-biased samples for specific P indices (expansion deepen/explore)."""
+    if n <= 0 or not partition_indices or not plan.partitions:
+        return []
+    s_n = max(1, len(plan.story_patterns))
+    t_n = max(1, len(plan.topologies))
+    l_n = max(1, len(plan.loadings))
+    e_n = max(1, len(plan.envelopes))
+    profiles = list(plan.plate_profiles or PLATE_PROFILES)
+    pl_n = max(1, len(profiles))
+    out: list[CoverSample] = []
+    seen: set[tuple] = set()
+    cursor = 0
+    while len(out) < n and cursor < n * 40:
+        i_p = partition_indices[cursor % len(partition_indices)]
+        groups = (plan.partitions[i_p] or {}).get("groups") or []
+        order = bias_story_index_order(
+            plan.story_patterns, demand_profile(groups, session)
+        ) or list(range(s_n))
+        i_s = order[(cursor // max(1, len(partition_indices))) % len(order)]
+        i_t = (cursor // 3) % t_n
+        i_l = (cursor // 5) % l_n
+        i_e = (cursor // 7) % e_n
+        i_pl = (cursor // 11) % pl_n
+        stories = plan.story_patterns[i_s % s_n]
+        profile = profiles[i_pl % pl_n]
+        key = (i_p, stories, plan.topologies[i_t], plan.loadings[i_l], plan.envelopes[i_e], profile)
+        cursor += 1
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(
+            CoverSample(
+                partition_index=i_p,
+                stories=stories,
+                topology=plan.topologies[i_t],
+                loading=plan.loadings[i_l],
+                envelope=plan.envelopes[i_e],
+                plate_profile=profile,
+                label=f"P{i_p}+expand{len(out)}",
+            )
+        )
+    return _canonicalize_samples(out)
+
+
 def _stratified_samples(
     plan: CoverPlan, *, pool_size: int, session: Any
 ) -> Iterator[CoverSample]:
@@ -306,8 +372,13 @@ def _stratified_samples(
         push(make(0, 0, 0, 0, i_e, 0))
     for i_pl in range(pl_n):
         push(make(0, 0, 0, 0, 0, i_pl))
+    # Demand-biased story axis for P0 (stated); other P get their own order in fill.
+    p0_groups = (plan.partitions[0] or {}).get("groups") or []
+    story_order = bias_story_index_order(
+        plan.story_patterns, demand_profile(p0_groups, session)
+    ) or list(range(s_n))
     story_axis_cap = min(s_n, max(8, pool_size // max(1, e_n * l_n * pl_n)))
-    for i_s in range(story_axis_cap):
+    for i_s in story_order[:story_axis_cap]:
         push(make(0, i_s, 0, 0, 0, 0))
 
     if len(ordered) < pool_size:
@@ -316,7 +387,11 @@ def _stratified_samples(
                 for i_pl in range(pl_n):
                     for i_t in range(t_n):
                         for i_p in range(p_n):
-                            for i_s in range(s_n):
+                            groups = (plan.partitions[i_p] or {}).get("groups") or []
+                            s_order = bias_story_index_order(
+                                plan.story_patterns, demand_profile(groups, session)
+                            ) or list(range(s_n))
+                            for i_s in s_order:
                                 if len(ordered) >= pool_size:
                                     return iter(ordered[:pool_size])
                                 push(make(i_p, i_s, i_t, i_l, i_e, i_pl))
@@ -497,6 +572,8 @@ def run_cover(
     origin = archive_mod.capture(session)
     archive["stated_partition"] = partition_id(session)
     plan = build_cover_plan(session, pool_size=max_attempts)
+    seed_p_pool(archive, plan.partitions, source="initial")
+    persist_pool_to_session(session, archive)
     archive["cover_plan"] = {
         "partitions": len(plan.partitions),
         "partition_reasons": [p.get("reason") or "" for p in plan.partitions],
@@ -507,6 +584,7 @@ def run_cover(
         "envelopes": list(plan.envelopes),
         "plate_profiles": list(plan.plate_profiles),
         "pool": len(plan.samples),
+        "p_pool": p_pool_summary(archive),
         "csp_feasible": int(
             (session.constraints.get("explore") or {}).get("csp", {}).get("feasible")
             or 0
@@ -606,6 +684,49 @@ def run_cover(
         # Stop when the batch adds neither legal regions nor feature novelty.
         # Bare new cell labels alone are not progress.
         if new_r == 0 and feat_frac < COVER_STAGNANT_FRAC:
+            # Before declaring stagnant, try expanding the P pool once.
+            if (
+                should_expand_p_pool(archive, session)
+                and len(plan.partitions) < P_POOL_SOFT_MAX
+            ):
+                known = {
+                    partition_key(p.get("groups") or [])
+                    for p in plan.partitions
+                }
+                leftovers = csp_leftover_partitions(session, known, limit=P_EXPAND_BATCH * 3)
+                admitted = expand_p_pool(
+                    session, archive, n=P_EXPAND_BATCH, csp_leftovers=leftovers
+                )
+                if admitted:
+                    old_n = len(plan.partitions)
+                    plan.partitions.extend(admitted)
+                    new_idx = list(range(old_n, len(plan.partitions)))
+                    active = active_partition_indices(plan.partitions, archive)
+                    remaining = max_attempts - int(archive.get("attempts") or 0)
+                    step = min(step_small, remaining)
+                    deepen_n, expand_n = deepen_vs_expand_counts(step)
+                    extra: list[CoverSample] = []
+                    extra.extend(
+                        _append_partition_samples(
+                            plan,
+                            partition_indices=active,
+                            n=deepen_n,
+                            session=session,
+                        )
+                    )
+                    extra.extend(
+                        _append_partition_samples(
+                            plan,
+                            partition_indices=new_idx,
+                            n=max(expand_n, 1),
+                            session=session,
+                        )
+                    )
+                    plan.samples.extend(extra)
+                    archive["cover_plan"]["partitions"] = len(plan.partitions)
+                    archive["cover_plan"]["p_pool"] = p_pool_summary(archive)
+                    batches.append(run_batch(min(len(extra), remaining), "p_expand"))
+                    continue
             stagnant = True
             break
         step = (
@@ -616,6 +737,35 @@ def run_cover(
         remaining = max_attempts - int(archive.get("attempts") or 0)
         if remaining <= 0:
             break
+        # Opportunistic P expansion while still discovering.
+        if (
+            should_expand_p_pool(archive, session)
+            and len(plan.partitions) < P_POOL_SOFT_MAX
+            and int(archive.get("attempts") or 0) >= start
+        ):
+            known = {partition_key(p.get("groups") or []) for p in plan.partitions}
+            leftovers = csp_leftover_partitions(session, known, limit=P_EXPAND_BATCH * 2)
+            admitted = expand_p_pool(
+                session, archive, n=P_EXPAND_BATCH, csp_leftovers=leftovers
+            )
+            if admitted:
+                old_n = len(plan.partitions)
+                plan.partitions.extend(admitted)
+                new_idx = list(range(old_n, len(plan.partitions)))
+                deepen_n, expand_n = deepen_vs_expand_counts(min(step, remaining))
+                active = active_partition_indices(plan.partitions, archive)
+                plan.samples.extend(
+                    _append_partition_samples(
+                        plan, partition_indices=active, n=deepen_n, session=session
+                    )
+                )
+                plan.samples.extend(
+                    _append_partition_samples(
+                        plan, partition_indices=new_idx, n=expand_n, session=session
+                    )
+                )
+                archive["cover_plan"]["partitions"] = len(plan.partitions)
+                archive["cover_plan"]["p_pool"] = p_pool_summary(archive)
         batches.append(run_batch(min(step, remaining), f"expand+{step}"))
 
     archive_mod.restore_snapshot(session, origin)
@@ -625,6 +775,9 @@ def run_cover(
         if batches
         else pool_exhausted
     )
+    persist_pool_to_session(session, archive)
+    if archive.get("cover_plan"):
+        archive["cover_plan"]["p_pool"] = p_pool_summary(archive)
     report = {
         "ran": True,
         "start": start,
@@ -638,11 +791,13 @@ def run_cover(
         "pool_exhausted": pool_exhausted,
         "samples_planned": len(plan.samples),
         "samples_used": cursor,
+        "p_pool": p_pool_summary(archive),
         "csp_truncated": bool((archive.get("cover_plan") or {}).get("csp_truncated")),
         "csp_feasible": (archive.get("cover_plan") or {}).get("csp_feasible"),
         "partition_coverage": (archive.get("cover_plan") or {}).get("partition_coverage"),
         "note": (
             "COVER samples a stratified subset of the strategy product; "
+            "the P pool may expand mid-run when outcomes repeat or gaps remain. "
             "incomplete means the adaptive budget stopped before saturation."
             + (
                 " CSP enumeration was truncated."

@@ -127,7 +127,7 @@ def _nudge_for_violations(session: Any, violations: dict[str, Any]) -> str | Non
     owners = violations.get("owners") if isinstance(violations, dict) else None
     owner_ids = []
     if isinstance(owners, dict):
-        for key in ("edge_overrun", "split", "stories", "ratio_hard", "min_edge_short"):
+        for key in ("edge_overrun", "split", "stories", "ratio_hard", "min_edge_short", "volume_collision"):
             raw = owners.get(key)
             if isinstance(raw, (list, tuple)):
                 owner_ids.extend(str(x) for x in raw)
@@ -142,14 +142,33 @@ def _nudge_for_violations(session: Any, violations: dict[str, Any]) -> str | Non
             return "envelope"
         return None
     if vec.get("edge_overrun", 0.0) >= 0.05:
+        # Dimensional miss: clear width locks when present so realize can search
+        # coordinated widths; otherwise bump stories on the owning mass.
+        if _clear_widths_for_owners(session, owner_ids):
+            return "clear-widths"
         if _bump_stories(session, +1, prefer_ids=owner_ids):
             return "stories+1"
-        if _bump_stories(session, +1):
-            return "stories+1"
+        return None
     if vec.get("ratio_hard", 0.0) >= 0.05 or vec.get("min_edge_short", 0.0) >= 0.05:
         if _flip_envelope(session):
             return "envelope"
+        if _clear_widths_for_owners(session, owner_ids):
+            return "clear-widths"
     return None
+
+
+def _clear_widths_for_owners(session: Any, owner_ids: list[str]) -> bool:
+    ids = {str(x) for x in owner_ids if x}
+    targets = [m for m in (session.masses or []) if not ids or m.id in ids]
+    if not targets:
+        targets = list(session.masses or [])
+    changed = False
+    for mass in targets:
+        key = f"{mass.id}_width_ft"
+        if key in (session.constraints or {}):
+            session.constraints.pop(key, None)
+            changed = True
+    return changed
 
 
 def _unlocked_masses(session: Any) -> list[Any]:
@@ -172,19 +191,22 @@ def _bump_stories(
     delta: int,
     *,
     prefer_ids: list[str] | None = None,
+    owners_only: bool = False,
 ) -> bool:
-    """Raise/lower stories on the violating mass when known; else try each unlocked mass."""
+    """Raise/lower stories on the violating mass when known; else try unlocked masses."""
     cap = max(1, int((session.constraints or {}).get("max_stories") or 4))
     masses = _unlocked_masses(session)
     if not masses:
         return False
     prefer = {str(x) for x in (prefer_ids or []) if x}
+    if owners_only and prefer:
+        masses = [m for m in masses if m.id in prefer] or masses
     ordered = sorted(
         masses,
         key=lambda m: (
             0 if m.id in prefer else 1,
-            -len(m.departments or []),
-            -int(m.story_count or 1),
+            int(m.story_count or 1),  # prefer shorter first when adding a floor
+            m.id,
         ),
     )
     for mass in ordered:

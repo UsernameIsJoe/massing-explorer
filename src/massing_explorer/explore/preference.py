@@ -273,8 +273,14 @@ def apply_choice(session: Any, side: str) -> dict[str, Any] | None:
     comparisons.append({"a": pair["a"], "b": pair["b"], "winner": side})
     prev_weights = dict(learning.get("weights") or {})
     weights = fit_weights(comparisons, by_id)
+    # Provisional: if the winner's traits barely move the fit, note a missing feature.
+    missing_feature = _missing_feature_note(
+        by_id[pair["a"]], by_id[pair["b"]], side, prev_weights, weights
+    )
     nxt = next_pair(schemes, weights, comparisons, prev_weights=prev_weights)
     note = describe_weights(weights)
+    if missing_feature:
+        note = f"{note} {missing_feature}"
     if nxt is None:
         note = (
             f"{note} LEARN complete ({len(comparisons)}/{MAX_LEARN_COMPARISONS} comparisons)."
@@ -285,6 +291,9 @@ def apply_choice(session: Any, side: str) -> dict[str, Any] | None:
         "pending_pair": nxt,
         "note": note,
         "max_comparisons": MAX_LEARN_COMPARISONS,
+        "provisional": True,
+        "missing_features": list(learning.get("missing_features") or [])
+        + ([missing_feature] if missing_feature else []),
     }
     store = dict(session.constraints.get("explore") or {})
     store["learning"] = learning
@@ -295,6 +304,19 @@ def apply_choice(session: Any, side: str) -> dict[str, Any] | None:
     restore_entry(session, chosen["entry"])
     store["kept_cell"] = chosen["id"]
     session.constraints["explore"] = store
+
+    # Close the loop: a short targeted refine with the new weights, keep alternatives.
+    refine_report = _learn_targeted_refine(session, archive, weights)
+    if refine_report.get("ran"):
+        store["refine"] = refine_report
+        learning["refine_after_choice"] = {
+            "tuned": refine_report.get("tuned"),
+            "improved": refine_report.get("improved"),
+            "note": refine_report.get("note"),
+        }
+        store["learning"] = learning
+        session.constraints["explore"] = store
+
     if hasattr(session, "save"):
         session.save()
     reply = (
@@ -302,6 +324,8 @@ def apply_choice(session: Any, side: str) -> dict[str, Any] | None:
         f"({chosen['id'][:48]}…) over the other. {note} "
         "Requirements and caps are unchanged."
     )
+    if refine_report.get("ran"):
+        reply += f" Targeted refine: {refine_report.get('note') or 'ran'}."
     if nxt:
         remaining = MAX_LEARN_COMPARISONS - len(comparisons)
         reply += f" Next pair ready ({nxt.get('kind') or 'pair'}; {remaining} left)."
@@ -314,7 +338,76 @@ def apply_choice(session: Any, side: str) -> dict[str, Any] | None:
         "winner": side,
         "kept_cell": chosen["id"],
         "next_pair": nxt,
+        "refine": refine_report,
     }
+
+
+def _missing_feature_note(
+    scheme_a: dict[str, Any],
+    scheme_b: dict[str, Any],
+    winner: str,
+    prev: dict[str, float],
+    nxt: dict[str, float],
+) -> str | None:
+    """When the choice barely moves axis weights, record that taste may be off-axis."""
+    drift = sum(abs(float(nxt.get(k, 0) or 0) - float(prev.get(k, 0) or 0)) for k in TRAIT_NAMES)
+    if drift >= 0.05:
+        return None
+    win = scheme_a if winner == "a" else scheme_b
+    lose = scheme_b if winner == "a" else scheme_a
+    # Surface a concrete geometric difference the axes may not capture.
+    wa = _story_signature(win.get("entry") or win)
+    la = _story_signature(lose.get("entry") or lose)
+    if wa and la and wa != la:
+        return (
+            "Recorded off-axis note: preferred story pattern "
+            f"{wa} over {la} (weights barely moved — taste may need a new feature)."
+        )
+    pa = (win.get("entry") or win).get("partition") or win.get("partition")
+    pb = (lose.get("entry") or lose).get("partition") or lose.get("partition")
+    if pa and pb and pa != pb:
+        return (
+            "Recorded off-axis note: preferred a different program organization "
+            "(weights barely moved — taste may need a new feature)."
+        )
+    return (
+        "Recorded off-axis note: choice not well explained by current soft axes "
+        "(weights barely moved)."
+    )
+
+
+def _learn_targeted_refine(
+    session: Any,
+    archive: dict[str, Any],
+    weights: dict[str, float],
+) -> dict[str, Any]:
+    """Small post-choice refine; keeps other legal cells in the archive."""
+    try:
+        from .controller import _refine
+        from .saturate import REFINE_CAP
+
+        # Temporarily shrink refine budget for a light loop close.
+        explore = dict(session.constraints.get("explore") or {})
+        budget = dict(explore.get("budget") or {})
+        prev = budget.get("refine")
+        budget["refine"] = min(4, int(prev or REFINE_CAP))
+        explore["budget"] = budget
+        # Ensure learning weights are what refine reads.
+        learn = dict(explore.get("learning") or {})
+        learn["weights"] = weights
+        explore["learning"] = learn
+        session.constraints["explore"] = explore
+        report = _refine(session, archive)
+        if prev is not None:
+            budget["refine"] = prev
+        else:
+            budget.pop("refine", None)
+        explore["budget"] = budget
+        session.constraints["explore"] = explore
+        return report if isinstance(report, dict) else {"ran": False}
+    except Exception as exc:
+        return {"ran": False, "reason": str(exc)}
+
 
 
 def _pair(left: dict[str, Any], right: dict[str, Any], kind: str) -> dict[str, Any]:
