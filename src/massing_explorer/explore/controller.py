@@ -477,6 +477,7 @@ def _cover_geometry(session: Any, archive: dict[str, Any]) -> None:
 def _evaluate(session: Any, archive: dict[str, Any], reason: str) -> None:
     result, performance = realize(session)
     # P-pool status updates inside archive.insert (shared with MCTS/REPAIR/BO).
+    # Geom fan-out (stories/loading/envelope) also runs from insert on first legal P.
     archive_mod.insert(archive, session, result, performance, reason=reason)
 
 

@@ -27,7 +27,12 @@ from .partitions import (
 from .strategy import grouping_is_required, required_mass_bounds
 
 DEEPEN_FRAC = 0.60
+# Once any organization is legal, spend more of each COVER step deepening
+# stories / loading / envelope on known-good P instead of admitting new ones.
+DEEPEN_FRAC_WHEN_FEASIBLE = 0.82
 EXPAND_FRAC = 1.0 - DEEPEN_FRAC
+# After the first legal hit on a P, try a small G/L/story fan-out once.
+GEOM_FANOUT_CAP = 8
 
 STATUS_FEASIBLE = "feasible"
 STATUS_UNRESOLVED = "unresolved"
@@ -140,6 +145,9 @@ def record_p_outcome(
         entry.pop("impossible_reason", None)
         if was_impossible:
             pool["events"].append({"type": "feasible_override", "key": key})
+        # First legal for this organization → queue a one-shot geom fan-out.
+        if int(entry.get("legal_hits") or 0) == 1 and not entry.get("geom_fanout_done"):
+            entry["geom_fanout_pending"] = True
         try:
             from .saturate import architectural_reward
 
@@ -435,14 +443,157 @@ def active_partition_indices(
     return out
 
 
-def deepen_vs_expand_counts(step: int) -> tuple[int, int]:
+def feasible_partition_indices(
+    plan_partitions: list[dict[str, Any]],
+    archive: dict[str, Any],
+) -> list[int]:
+    """Indices whose organization already has at least one legal realization."""
+    pool = ensure_p_pool(archive)
+    out: list[int] = []
+    for i, item in enumerate(plan_partitions):
+        key = partition_key(item.get("groups") or [])
+        entry = (pool.get("entries") or {}).get(key)
+        if entry and entry.get("status") == STATUS_FEASIBLE:
+            out.append(i)
+    return out
+
+
+def session_p_is_feasible(session: Any, archive: dict[str, Any] | None = None) -> bool:
+    """True when the session's current organization is marked feasible."""
+    if archive is None:
+        explore = (getattr(session, "constraints", None) or {}).get("explore") or {}
+        archive = explore.get("archive") if isinstance(explore.get("archive"), dict) else {}
+    groups = [
+        {
+            "id": m.id,
+            "name": m.name,
+            "departments": list(m.departments or []),
+            "story_count": int(m.story_count or 2),
+        }
+        for m in (getattr(session, "masses", None) or [])
+    ]
+    if not groups:
+        return False
+    entry = (ensure_p_pool(archive).get("entries") or {}).get(partition_key(groups))
+    return bool(entry and entry.get("status") == STATUS_FEASIBLE)
+
+
+def feasible_p_count(archive: dict[str, Any] | None) -> int:
+    if not archive:
+        return 0
+    entries = (ensure_p_pool(archive).get("entries") or {}).values()
+    return sum(1 for e in entries if e.get("status") == STATUS_FEASIBLE)
+
+
+def deepen_vs_expand_counts(
+    step: int, archive: dict[str, Any] | None = None
+) -> tuple[int, int]:
     """How many samples of a COVER step go to deepen vs newly admitted P."""
     step = max(0, int(step))
-    deepen = int(round(step * DEEPEN_FRAC))
+    frac = DEEPEN_FRAC_WHEN_FEASIBLE if feasible_p_count(archive) >= 1 else DEEPEN_FRAC
+    deepen = int(round(step * frac))
     expand = step - deepen
     if step > 0 and deepen == 0:
         deepen, expand = 1, max(0, step - 1)
     return deepen, expand
+
+
+def _geom_fanout_actions(session: Any) -> list[dict[str, Any]]:
+    """Nearby story / loading / envelope moves — no regrouping."""
+    actions: list[dict[str, Any]] = []
+    lock = (getattr(session, "constraints", None) or {}).get("story_lock") or {}
+    cap = max(1, int((getattr(session, "constraints", None) or {}).get("max_stories") or 4))
+    for mass in getattr(session, "masses", None) or []:
+        if mass.id in lock:
+            continue
+        current = int(mass.story_count or 2)
+        for stories in (current - 1, current + 1):
+            if 1 <= stories <= cap and stories != current:
+                actions.append({"op": "SET_STORIES", "mass": mass.id, "stories": stories})
+    constraints = getattr(session, "constraints", None) or {}
+    if not constraints.get("loading_required"):
+        loading = str(constraints.get("loading") or "double")
+        other = "single" if loading != "single" else "double"
+        actions.append({"op": "SET_LOADING", "loading": other})
+    current_env = str(constraints.get("cover_envelope") or "balanced")
+    for env in ("balanced", "compact", "elongated"):
+        if env != current_env:
+            actions.append({"op": "SET_ENVELOPE", "envelope": env})
+    return actions[:GEOM_FANOUT_CAP]
+
+
+def run_geom_fanout_if_pending(
+    session: Any,
+    archive: dict[str, Any],
+    *,
+    reason: str = "geom_fanout",
+) -> int:
+    """
+    One-shot: after the first legal hit on a P, evaluate nearby G/L/story variants.
+
+    Does not change P. Clears stale width locks so realize can refill feet.
+    """
+    explore = (getattr(session, "constraints", None) or {}).setdefault("explore", {})
+    if explore.get("_in_geom_fanout"):
+        return 0
+    groups = [
+        {
+            "id": m.id,
+            "name": m.name,
+            "departments": list(m.departments or []),
+            "story_count": int(m.story_count or 2),
+        }
+        for m in (getattr(session, "masses", None) or [])
+    ]
+    if not groups:
+        return 0
+    pool = ensure_p_pool(archive)
+    entry = (pool.get("entries") or {}).get(partition_key(groups))
+    if not entry or not entry.pop("geom_fanout_pending", False):
+        return 0
+    entry["geom_fanout_done"] = True
+    actions = _geom_fanout_actions(session)
+    if not actions:
+        return 0
+
+    from . import archive as archive_mod
+    from .actions import apply_action
+    from .realize import realize
+
+    explore["_in_geom_fanout"] = True
+    ran = 0
+    try:
+        snap = archive_mod.capture(session)
+        for action in actions:
+            archive_mod.restore_snapshot(session, snap)
+            for mass in session.masses or []:
+                session.constraints.pop(f"{mass.id}_width_ft", None)
+            explore.pop("realize_cache", None)
+            try:
+                out = apply_action(session, action)
+            except Exception:
+                continue
+            if not out.get("ok"):
+                continue
+            result, perf = realize(session)
+            op = str(action.get("op") or "geom")
+            detail = action.get("stories") or action.get("loading") or action.get("envelope") or ""
+            archive_mod.insert(
+                archive,
+                session,
+                result,
+                perf,
+                reason=f"{reason}: {op} {detail}".strip(),
+            )
+            ran += 1
+        archive_mod.restore_snapshot(session, snap)
+    finally:
+        explore.pop("_in_geom_fanout", None)
+    if ran:
+        pool.setdefault("events", []).append(
+            {"type": "geom_fanout", "key": partition_key(groups), "n": ran}
+        )
+    return ran
 
 
 def _failure_kinds(perf: dict[str, Any]) -> list[str]:

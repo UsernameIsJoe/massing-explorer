@@ -225,6 +225,7 @@ def _simulate_tree(
                     node,
                     session,
                     prior_actions if node is root else [],
+                    archive=archive,
                     probe_unsupported=False,
                 )
                 node.expanded = True
@@ -469,6 +470,7 @@ def _expand(
     session: Any,
     prior_actions: list[dict[str, Any]],
     probe_unsupported: bool = False,
+    archive: dict[str, Any] | None = None,
 ) -> None:
     catalog = catalog_actions(session, include_unsupported=probe_unsupported)
     # Drop known-unsupported ops even if a catalog leak occurs.
@@ -477,9 +479,14 @@ def _expand(
         for a in catalog
         if str(a.get("op") or "") not in UNSUPPORTED
     ]
+    from .p_pool import session_p_is_feasible
+
+    favor_geom = bool(archive is not None and session_p_is_feasible(session, archive))
     ordered: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for action in list(prior_actions) + _balance_action_categories(catalog):
+    for action in list(prior_actions) + _balance_action_categories(
+        catalog, favor_geom=favor_geom
+    ):
         key = action_key(action)
         if key in seen:
             continue
@@ -497,20 +504,38 @@ def _expand(
             prior = share / prior_n
         else:
             prior = (1.0 - share) / rest_n if prior_actions else 1.0 / len(ordered)
+        # Soft boost for geom moves when this P is already legal.
+        if favor_geom and str(action.get("op") or "") in {
+            "SET_STORIES",
+            "SET_LOADING",
+            "SET_ENVELOPE",
+        }:
+            prior *= 1.35
         child = _Node(action=action, prior=prior, parent=node)
         child.from_planner = key in prior_keys
         node.children.append(child)
 
 
-def _balance_action_categories(actions: list[dict[str, Any]], *, per_op: int = 3) -> list[dict[str, Any]]:
+def _balance_action_categories(
+    actions: list[dict[str, Any]], *, per_op: int = 3, favor_geom: bool = False
+) -> list[dict[str, Any]]:
     """Round-robin across ops so SET_STORIES cannot crowd out APPLY_PARTITION."""
     # Allow more APPLY slots: local + COVER candidates both matter for legal yield.
+    # When the current P is already feasible, favor geom variation over regrouping.
+    geom_ops = {"SET_STORIES", "SET_LOADING", "SET_ENVELOPE"}
     buckets: dict[str, list[dict[str, Any]]] = {}
     for action in actions:
         op = str(action.get("op") or "")
         buckets.setdefault(op, []).append(action)
     for op in buckets:
-        cap = 6 if op == "APPLY_PARTITION" else max(1, per_op)
+        if favor_geom and op in geom_ops:
+            cap = max(5, per_op + 2)
+        elif favor_geom and op == "APPLY_PARTITION":
+            cap = 2
+        elif op == "APPLY_PARTITION":
+            cap = 6
+        else:
+            cap = max(1, per_op)
         buckets[op] = buckets[op][:cap]
     out: list[dict[str, Any]] = []
     while any(buckets.values()):

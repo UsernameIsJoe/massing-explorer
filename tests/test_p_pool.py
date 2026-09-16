@@ -451,6 +451,14 @@ class ArchiveInsertSyncTests(unittest.TestCase):
         self.assertEqual(d + e, 10)
         self.assertGreaterEqual(d, e)
 
+    def test_deepen_bias_when_feasible(self) -> None:
+        archive: dict = {"p_pool": {"entries": {"k": {"status": "feasible", "groups": []}}}}
+        d0, e0 = deepen_vs_expand_counts(10)
+        d1, e1 = deepen_vs_expand_counts(10, archive)
+        self.assertEqual(d1 + e1, 10)
+        self.assertGreater(d1, d0)
+        self.assertLess(e1, e0)
+
 
 class ExpandTriggerTests(unittest.TestCase):
     def test_gap_in_mass_count_triggers_expand(self) -> None:

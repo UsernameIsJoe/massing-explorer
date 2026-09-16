@@ -108,6 +108,13 @@ def insert(
         cells[key] = entry
     refresh_frontier(archive)
     _sync_p_pool(archive, session, performance)
+    # First legal hit on a P → one-shot story/loading/envelope fan-out.
+    try:
+        from .p_pool import run_geom_fanout_if_pending
+
+        run_geom_fanout_if_pending(session, archive, reason=reason or "insert")
+    except Exception:
+        pass
     return cells.get(key, entry)
 
 

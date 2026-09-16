@@ -31,6 +31,7 @@ from .p_pool import (
     deepen_vs_expand_counts,
     demand_profile,
     expand_p_pool,
+    feasible_partition_indices,
     partition_key,
     persist_pool_to_session,
     p_pool_summary,
@@ -720,12 +721,14 @@ def run_cover(
                     active = active_partition_indices(plan.partitions, archive)
                     remaining = max_attempts - int(archive.get("attempts") or 0)
                     step = min(step_small, remaining)
-                    deepen_n, expand_n = deepen_vs_expand_counts(step)
+                    deepen_n, expand_n = deepen_vs_expand_counts(step, archive)
+                    feas = feasible_partition_indices(plan.partitions, archive)
+                    deepen_idx = feas if feas else active
                     extra: list[CoverSample] = []
                     extra.extend(
                         _append_partition_samples(
                             plan,
-                            partition_indices=active,
+                            partition_indices=deepen_idx,
                             n=deepen_n,
                             session=session,
                         )
@@ -768,11 +771,13 @@ def run_cover(
                 old_n = len(plan.partitions)
                 plan.partitions.extend(admitted)
                 new_idx = list(range(old_n, len(plan.partitions)))
-                deepen_n, expand_n = deepen_vs_expand_counts(min(step, remaining))
+                deepen_n, expand_n = deepen_vs_expand_counts(min(step, remaining), archive)
                 active = active_partition_indices(plan.partitions, archive)
+                feas = feasible_partition_indices(plan.partitions, archive)
+                deepen_idx = feas if feas else active
                 plan.samples.extend(
                     _append_partition_samples(
-                        plan, partition_indices=active, n=deepen_n, session=session
+                        plan, partition_indices=deepen_idx, n=deepen_n, session=session
                     )
                 )
                 plan.samples.extend(
