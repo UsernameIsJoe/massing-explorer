@@ -3,11 +3,13 @@ Expanding program-organization (P) pool.
 
 COVER starts with a diverse 12–20 batch, then may admit more P options in
 batches when outcomes repeat, failures persist, or organizational gaps remain.
-Statuses:
 
-  feasible   — at least one accepted realization
+Statuses describe the *organization* (department grouping), not one
+story/width configuration:
+
+  feasible   — at least one accepted realization (sticky)
   unresolved — tried, none accepted, not proven impossible
-  impossible — structural proof only (never “a few failed realizes”)
+  impossible — organization-wide proof only (never “failed at two floors”)
 """
 
 from __future__ import annotations
@@ -90,7 +92,16 @@ def record_p_outcome(
     *,
     groups: list[Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Update status/stats after a realize for the session's (or given) P."""
+    """
+    Update status/stats after a realize for the session's (or given) P.
+
+    Status is about the *organization* (department grouping), not one
+    story/width configuration:
+      feasible   — at least one legal realization (sticky; never downgraded)
+      unresolved — tried, none accepted, not proven impossible
+      impossible — organization-wide contradiction only
+    A later legal result always overrides a prior impossible label.
+    """
     pool = ensure_p_pool(archive)
     if groups is None:
         groups = [
@@ -111,8 +122,6 @@ def record_p_outcome(
         entry = pool["entries"].get(key)
     if entry is None:
         return None
-    if entry.get("status") == STATUS_IMPOSSIBLE:
-        return entry
 
     perf = performance or {}
     entry["attempts"] = int(entry.get("attempts") or 0) + 1
@@ -125,8 +134,12 @@ def record_p_outcome(
         entry["failure_kinds"] = prev[:12]
 
     if perf.get("fits_limitations"):
+        was_impossible = entry.get("status") == STATUS_IMPOSSIBLE
         entry["status"] = STATUS_FEASIBLE
         entry["legal_hits"] = int(entry.get("legal_hits") or 0) + 1
+        entry.pop("impossible_reason", None)
+        if was_impossible:
+            pool["events"].append({"type": "feasible_override", "key": key})
         try:
             from .saturate import architectural_reward
 
@@ -136,7 +149,8 @@ def record_p_outcome(
         best = entry.get("best_reward")
         if best is None or reward > float(best):
             entry["best_reward"] = round(reward, 4)
-    else:
+    elif entry.get("status") != STATUS_FEASIBLE:
+        # Never downgrade a proven-feasible organization.
         proof = structural_impossible(session, groups)
         if proof:
             entry["status"] = STATUS_IMPOSSIBLE
@@ -152,9 +166,10 @@ def record_p_outcome(
 
 def structural_impossible(session: Any, groups: list[Any]) -> str | None:
     """
-    Hard structural proofs only.
+    Organization-wide hard proofs only.
 
-    A handful of failed realizes never proves impossibility.
+    Current widths, story counts, or one failed realize never prove the
+    whole grouping impossible — a 2-floor miss may still work at 3 floors.
     """
     nonempty = [g for g in groups if (g.get("departments") if isinstance(g, dict) else g)]
     if not nonempty:
@@ -165,34 +180,6 @@ def structural_impossible(session: Any, groups: list[Any]) -> str | None:
         n = len(nonempty)
         if n < k_min or n > k_max:
             return f"|P|={n} outside required {k_min}–{k_max}"
-    # Required width + length caps that cannot coexist for any mass.
-    try:
-        from ..solver import required_width_ft
-        from .realize import _length_cap, _plate_of, _config_of
-
-        config = _config_of(session)
-        # Approximate with current session masses if ids match.
-        by_id = {m.id: m for m in (session.masses or [])}
-        for g in nonempty:
-            if not isinstance(g, dict):
-                continue
-            mid = str(g.get("id") or "")
-            mass = by_id.get(mid)
-            if mass is None:
-                continue
-            req = required_width_ft(session, mass)
-            cap = _length_cap(session, mass)
-            plate = _plate_of(session, mass, config)
-            if (
-                req is not None
-                and cap is not None
-                and plate > 0
-                and float(req) > 0
-                and float(plate) / float(req) > float(cap) + 1.0
-            ):
-                return f"{mid}: required width forces length over cap"
-    except Exception:
-        pass
     return None
 
 

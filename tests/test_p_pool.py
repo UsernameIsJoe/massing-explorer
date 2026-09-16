@@ -6,6 +6,7 @@ import unittest
 
 from massing_explorer.explore.p_pool import (
     STATUS_FEASIBLE,
+    STATUS_IMPOSSIBLE,
     STATUS_UNRESOLVED,
     bias_story_index_order,
     deepen_vs_expand_counts,
@@ -110,6 +111,136 @@ class StatusTests(unittest.TestCase):
         reason = structural_impossible(_S(), groups)
         self.assertIsNotNone(reason)
         self.assertIn("|P|", reason or "")
+
+    def test_fail_at_two_succeed_at_three_marks_feasible(self) -> None:
+        """Same organization: 2-floor miss stays unresolved; 3-floor legal → feasible."""
+        archive: dict = {}
+        groups_2 = [
+            {"id": "a", "name": "A", "departments": ["CORE ACADEMIC"], "story_count": 2},
+            {"id": "b", "name": "B", "departments": ["ART & MUSIC"], "story_count": 2},
+        ]
+        groups_3 = [
+            {"id": "a", "name": "A", "departments": ["CORE ACADEMIC"], "story_count": 3},
+            {"id": "b", "name": "B", "departments": ["ART & MUSIC"], "story_count": 1},
+        ]
+        self.assertEqual(partition_key(groups_2), partition_key(groups_3))
+        seed_p_pool(archive, [{"groups": groups_2}], source="initial")
+
+        class _M:
+            def __init__(self, mid: str, depts: list[str], stories: int) -> None:
+                self.id = mid
+                self.name = mid
+                self.departments = depts
+                self.story_count = stories
+
+        class _S:
+            constraints: dict = {"max_edge_ft": 196.85, "max_stories": 3}
+
+            def __init__(self, stories: dict[str, int]) -> None:
+                self.masses = [
+                    _M("a", ["CORE ACADEMIC"], stories["a"]),
+                    _M("b", ["ART & MUSIC"], stories["b"]),
+                ]
+
+        fail = record_p_outcome(
+            archive,
+            _S({"a": 2, "b": 2}),
+            {"fits_limitations": False, "failed_kinds": ["site_length"]},
+            groups=groups_2,
+        )
+        self.assertEqual(fail["status"], STATUS_UNRESOLVED)
+        self.assertEqual(fail["attempts"], 1)
+
+        ok = record_p_outcome(
+            archive,
+            _S({"a": 3, "b": 1}),
+            {"fits_limitations": True, "program_coherence": 0.7},
+            groups=groups_3,
+        )
+        self.assertEqual(ok["status"], STATUS_FEASIBLE)
+        self.assertEqual(ok["legal_hits"], 1)
+        self.assertEqual(ok["attempts"], 2)
+
+    def test_feasible_not_downgraded_by_later_fail(self) -> None:
+        archive: dict = {}
+        groups = [
+            {"id": "a", "name": "A", "departments": ["CORE ACADEMIC"], "story_count": 3},
+        ]
+        seed_p_pool(archive, [{"groups": groups}], source="initial")
+
+        class _M:
+            id = "a"
+            name = "A"
+            departments = ["CORE ACADEMIC"]
+            story_count = 3
+
+        class _S:
+            masses = [_M()]
+            constraints: dict = {}
+
+        record_p_outcome(archive, _S(), {"fits_limitations": True})
+        later = record_p_outcome(
+            archive,
+            _S(),
+            {"fits_limitations": False, "failed_kinds": ["ratio_band"]},
+        )
+        self.assertEqual(later["status"], STATUS_FEASIBLE)
+        self.assertEqual(later["legal_hits"], 1)
+        self.assertEqual(later["attempts"], 2)
+        self.assertIn("ratio_band", later["failure_kinds"])
+
+    def test_legal_overrides_prior_impossible(self) -> None:
+        archive: dict = {}
+        groups = [
+            {"id": "a", "name": "A", "departments": ["CORE ACADEMIC"], "story_count": 2},
+        ]
+        seed_p_pool(archive, [{"groups": groups}], source="initial")
+        key = partition_key(groups)
+        entry = archive["p_pool"]["entries"][key]
+        entry["status"] = STATUS_IMPOSSIBLE
+        entry["impossible_reason"] = "forced config miss"
+
+        class _M:
+            id = "a"
+            name = "A"
+            departments = ["CORE ACADEMIC"]
+            story_count = 3
+
+        class _S:
+            masses = [_M()]
+            constraints: dict = {}
+
+        out = record_p_outcome(archive, _S(), {"fits_limitations": True})
+        self.assertEqual(out["status"], STATUS_FEASIBLE)
+        self.assertEqual(out["legal_hits"], 1)
+        self.assertNotIn("impossible_reason", out)
+
+    def test_structural_ignores_current_story_length_miss(self) -> None:
+        """Plate/width/length at the current floor count is not org-impossible."""
+
+        class _M:
+            id = "gym"
+            name = "Gym"
+            departments = ["HEALTH & PHYSICAL EDUCATION"]
+            story_count = 1
+
+        class _S:
+            masses = [_M()]
+            constraints = {
+                "max_edge_ft": 50.0,
+                "department_required_width_ft": {
+                    "HEALTH & PHYSICAL EDUCATION": 80.0,
+                },
+            }
+
+        groups = [
+            {
+                "id": "gym",
+                "departments": ["HEALTH & PHYSICAL EDUCATION"],
+                "story_count": 1,
+            }
+        ]
+        self.assertIsNone(structural_impossible(_S(), groups))
 
 
 class DemandBiasTests(unittest.TestCase):
