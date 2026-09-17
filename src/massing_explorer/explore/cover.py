@@ -37,6 +37,7 @@ from .p_pool import (
     p_pool_summary,
     seed_p_pool,
     should_expand_p_pool,
+    unsaturated_feasible_partition_indices,
 )
 from .strategy import grouping_is_required, partition_id
 from .topology import paired_bars_drawable, pairing_proposals, stated_frontage_ft, topology_is_required
@@ -547,6 +548,9 @@ def apply_cover_sample(
     if not session.constraints.get("loading_required"):
         session.constraints["loading"] = sample.loading
     session.constraints["cover_envelope"] = sample.envelope
+    session.constraints["cover_plate_profile"] = str(
+        getattr(sample, "plate_profile", None) or "uniform"
+    )
     session.constraints.pop("cover_geom_rank", None)
     _apply_plate_profile(session, getattr(sample, "plate_profile", None) or "uniform")
 
@@ -722,8 +726,11 @@ def run_cover(
                     remaining = max_attempts - int(archive.get("attempts") or 0)
                     step = min(step_small, remaining)
                     deepen_n, expand_n = deepen_vs_expand_counts(step, archive)
-                    feas = feasible_partition_indices(plan.partitions, archive)
-                    deepen_idx = feas if feas else active
+                    deepen_idx = unsaturated_feasible_partition_indices(
+                        plan.partitions, archive
+                    )
+                    if not deepen_idx:
+                        deepen_idx = feasible_partition_indices(plan.partitions, archive) or active
                     extra: list[CoverSample] = []
                     extra.extend(
                         _append_partition_samples(
@@ -773,8 +780,11 @@ def run_cover(
                 new_idx = list(range(old_n, len(plan.partitions)))
                 deepen_n, expand_n = deepen_vs_expand_counts(min(step, remaining), archive)
                 active = active_partition_indices(plan.partitions, archive)
-                feas = feasible_partition_indices(plan.partitions, archive)
-                deepen_idx = feas if feas else active
+                deepen_idx = unsaturated_feasible_partition_indices(
+                    plan.partitions, archive
+                )
+                if not deepen_idx:
+                    deepen_idx = feasible_partition_indices(plan.partitions, archive) or active
                 plan.samples.extend(
                     _append_partition_samples(
                         plan, partition_indices=deepen_idx, n=deepen_n, session=session

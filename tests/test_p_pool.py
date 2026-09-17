@@ -452,12 +452,78 @@ class ArchiveInsertSyncTests(unittest.TestCase):
         self.assertGreaterEqual(d, e)
 
     def test_deepen_bias_when_feasible(self) -> None:
-        archive: dict = {"p_pool": {"entries": {"k": {"status": "feasible", "groups": []}}}}
+        archive: dict = {
+            "p_pool": {
+                "entries": {
+                    "k": {"status": "feasible", "groups": [], "depth_saturated": False}
+                }
+            }
+        }
         d0, e0 = deepen_vs_expand_counts(10)
         d1, e1 = deepen_vs_expand_counts(10, archive)
         self.assertEqual(d1 + e1, 10)
         self.assertGreater(d1, d0)
         self.assertLess(e1, e0)
+
+    def test_deepen_bias_relaxes_when_depth_saturated(self) -> None:
+        from massing_explorer.explore.p_pool import (
+            DEEPEN_FRAC,
+            deepen_vs_expand_counts,
+        )
+
+        archive: dict = {
+            "p_pool": {
+                "entries": {
+                    "k": {"status": "feasible", "groups": [], "depth_saturated": True}
+                }
+            }
+        }
+        d, e = deepen_vs_expand_counts(10, archive)
+        self.assertEqual(d + e, 10)
+        self.assertEqual(d, int(round(10 * DEEPEN_FRAC)))
+
+    def test_depth_counts_distinct_configs_only(self) -> None:
+        from massing_explorer.explore.p_pool import (
+            _record_depth_progress,
+            depth_config_key,
+        )
+
+        class _M:
+            def __init__(self, mid: str, stories: int) -> None:
+                self.id = mid
+                self.story_count = stories
+                self.name = mid
+                self.departments = ["A"]
+
+        class _S:
+            def __init__(self) -> None:
+                self.masses = [_M("a", 2), _M("b", 3)]
+                self.constraints = {
+                    "loading": "double",
+                    "cover_envelope": "balanced",
+                    "cover_plate_profile": "uniform",
+                    "explore": {},
+                }
+
+        entry: dict = {"status": "feasible", "best_reward": 0.5}
+        session = _S()
+        # Same config twice → only first counts.
+        _record_depth_progress(entry, session, {"fits_limitations": True})
+        _record_depth_progress(entry, session, {"fits_limitations": True})
+        self.assertEqual(len(entry["depth_configs"]), 1)
+        self.assertEqual(entry.get("depth_legal_configs"), 1)
+        # New distinct config without legal/quality → stale ticks.
+        session.constraints["loading"] = "single"
+        _record_depth_progress(entry, session, {"fits_limitations": False})
+        session.constraints["cover_envelope"] = "compact"
+        _record_depth_progress(entry, session, {"fits_limitations": False})
+        session.constraints["cover_envelope"] = "elongated"
+        _record_depth_progress(entry, session, {"fits_limitations": False})
+        # 1 legal + 3 non-progress distinct → saturate (MIN=4 configs, STALE=3).
+        self.assertTrue(entry.get("depth_saturated"))
+        self.assertEqual(len(entry["depth_configs"]), 4)
+        self.assertIn("Lsingle", depth_config_key(session))
+
 
 
 class ExpandTriggerTests(unittest.TestCase):

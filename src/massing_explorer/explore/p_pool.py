@@ -27,12 +27,18 @@ from .partitions import (
 from .strategy import grouping_is_required, required_mass_bounds
 
 DEEPEN_FRAC = 0.60
-# Once any organization is legal, spend more of each COVER step deepening
-# stories / loading / envelope on known-good P instead of admitting new ones.
-DEEPEN_FRAC_WHEN_FEASIBLE = 0.82
+# While a feasible P still yields new legal/quality depth, bias COVER deepen.
+DEEPEN_FRAC_WHEN_UNSATURATED = 0.82
 EXPAND_FRAC = 1.0 - DEEPEN_FRAC
-# After the first legal hit on a P, try a small G/L/story fan-out once.
+# First legal hit → one-shot G/L/story fan-out (kickstart depth).
 GEOM_FANOUT_CAP = 8
+# Smart depth: only distinct configs count; saturate after consecutive non-progress.
+DEPTH_CONFIG_CAP = 64
+DEPTH_QUALITY_EPS = 1e-4
+# After this many distinct configs with no new legal and no quality gain → pause deepen.
+DEPTH_STALE_DISTINCT = 3
+# Need at least this many distinct configs before saturation can fire.
+DEPTH_MIN_BEFORE_SATURATE = 4
 
 STATUS_FEASIBLE = "feasible"
 STATUS_UNRESOLVED = "unresolved"
@@ -148,6 +154,8 @@ def record_p_outcome(
         # First legal for this organization → queue a one-shot geom fan-out.
         if int(entry.get("legal_hits") or 0) == 1 and not entry.get("geom_fanout_done"):
             entry["geom_fanout_pending"] = True
+        # New legal re-opens depth even if a prior wave had stalled.
+        entry["depth_saturated"] = False
         try:
             from .saturate import architectural_reward
 
@@ -169,7 +177,96 @@ def record_p_outcome(
 
     profile = demand_profile(groups, session)
     entry["ground_pressure"] = profile.get("ground_pressure")
+    _record_depth_progress(entry, session, perf)
     return entry
+
+
+def depth_config_key(session: Any) -> str:
+    """
+    Distinct strategy configuration for depth accounting.
+
+    Stories × loading × envelope × plate — not feet, not cache identity.
+    """
+    masses = list(getattr(session, "masses", None) or [])
+    stories = tuple(
+        (str(m.id), int(m.story_count or 1)) for m in sorted(masses, key=lambda m: str(m.id))
+    )
+    c = getattr(session, "constraints", None) or {}
+    loading = str(c.get("loading") or "double")
+    envelope = str(c.get("cover_envelope") or "balanced")
+    plate = str(c.get("cover_plate_profile") or "uniform")
+    return f"S{stories}|L{loading}|E{envelope}|PL{plate}"
+
+
+def _record_depth_progress(
+    entry: dict[str, Any],
+    session: Any,
+    perf: dict[str, Any],
+) -> None:
+    """
+    Track distinct configs on a feasible P; saturate when depth stops paying.
+
+    Breadth admission is unchanged — this only gates further *deepen* bias.
+    """
+    if entry.get("status") != STATUS_FEASIBLE:
+        return
+    cfg = depth_config_key(session)
+    seen = [str(x) for x in (entry.get("depth_configs") or []) if x]
+    is_new = cfg not in seen
+    if not is_new:
+        # Repeats / cache hits do not count toward progress or saturation.
+        return
+    seen.append(cfg)
+    entry["depth_configs"] = seen[-DEPTH_CONFIG_CAP:]
+
+    progressed = False
+    if perf.get("fits_limitations"):
+        progressed = True
+        entry["depth_legal_configs"] = int(entry.get("depth_legal_configs") or 0) + 1
+    try:
+        from .saturate import architectural_reward
+
+        reward = float(architectural_reward(perf))
+    except Exception:
+        reward = 0.0
+    best = entry.get("best_reward")
+    if best is None or reward > float(best) + DEPTH_QUALITY_EPS:
+        progressed = True
+        entry["best_reward"] = round(reward, 4)
+
+    explore = (getattr(session, "constraints", None) or {}).get("explore") or {}
+    in_fanout = bool(explore.get("_in_geom_fanout"))
+
+    if progressed:
+        entry["depth_stale_distinct"] = 0
+        entry["depth_saturated"] = False
+        return
+    if in_fanout:
+        # Kickstart fan-out explores neighbors; do not saturate mid-batch.
+        return
+    entry["depth_stale_distinct"] = int(entry.get("depth_stale_distinct") or 0) + 1
+    if (
+        len(seen) >= DEPTH_MIN_BEFORE_SATURATE
+        and int(entry.get("depth_stale_distinct") or 0) >= DEPTH_STALE_DISTINCT
+    ):
+        entry["depth_saturated"] = True
+
+
+def p_depth_unsaturated(entry: dict[str, Any] | None) -> bool:
+    """True when this org should still receive deepen samples."""
+    if not entry or entry.get("status") != STATUS_FEASIBLE:
+        return False
+    return not bool(entry.get("depth_saturated"))
+
+
+def unsaturated_feasible_count(archive: dict[str, Any] | None) -> int:
+    if not archive:
+        return 0
+    return sum(
+        1
+        for e in (ensure_p_pool(archive).get("entries") or {}).values()
+        if p_depth_unsaturated(e)
+    )
 
 
 def structural_impossible(session: Any, groups: list[Any]) -> str | None:
@@ -458,6 +555,21 @@ def feasible_partition_indices(
     return out
 
 
+def unsaturated_feasible_partition_indices(
+    plan_partitions: list[dict[str, Any]],
+    archive: dict[str, Any],
+) -> list[int]:
+    """Feasible P that still produce depth returns (not depth-saturated)."""
+    pool = ensure_p_pool(archive)
+    out: list[int] = []
+    for i, item in enumerate(plan_partitions):
+        key = partition_key(item.get("groups") or [])
+        entry = (pool.get("entries") or {}).get(key)
+        if p_depth_unsaturated(entry):
+            out.append(i)
+    return out
+
+
 def session_p_is_feasible(session: Any, archive: dict[str, Any] | None = None) -> bool:
     """True when the session's current organization is marked feasible."""
     if archive is None:
@@ -478,6 +590,28 @@ def session_p_is_feasible(session: Any, archive: dict[str, Any] | None = None) -
     return bool(entry and entry.get("status") == STATUS_FEASIBLE)
 
 
+def session_p_depth_unsaturated(
+    session: Any, archive: dict[str, Any] | None = None
+) -> bool:
+    """True when current P is feasible and depth has not saturated."""
+    if archive is None:
+        explore = (getattr(session, "constraints", None) or {}).get("explore") or {}
+        archive = explore.get("archive") if isinstance(explore.get("archive"), dict) else {}
+    groups = [
+        {
+            "id": m.id,
+            "name": m.name,
+            "departments": list(m.departments or []),
+            "story_count": int(m.story_count or 2),
+        }
+        for m in (getattr(session, "masses", None) or [])
+    ]
+    if not groups:
+        return False
+    entry = (ensure_p_pool(archive).get("entries") or {}).get(partition_key(groups))
+    return p_depth_unsaturated(entry)
+
+
 def feasible_p_count(archive: dict[str, Any] | None) -> int:
     if not archive:
         return 0
@@ -488,9 +622,18 @@ def feasible_p_count(archive: dict[str, Any] | None) -> int:
 def deepen_vs_expand_counts(
     step: int, archive: dict[str, Any] | None = None
 ) -> tuple[int, int]:
-    """How many samples of a COVER step go to deepen vs newly admitted P."""
+    """
+    How many samples of a COVER step go to deepen vs newly admitted P.
+
+    Breadth admission rules stay as-is. Only the deepen *share* rises while
+    some feasible P still have unsaturated depth.
+    """
     step = max(0, int(step))
-    frac = DEEPEN_FRAC_WHEN_FEASIBLE if feasible_p_count(archive) >= 1 else DEEPEN_FRAC
+    frac = (
+        DEEPEN_FRAC_WHEN_UNSATURATED
+        if unsaturated_feasible_count(archive) >= 1
+        else DEEPEN_FRAC
+    )
     deepen = int(round(step * frac))
     expand = step - deepen
     if step > 0 and deepen == 0:

@@ -479,9 +479,11 @@ def _expand(
         for a in catalog
         if str(a.get("op") or "") not in UNSUPPORTED
     ]
-    from .p_pool import session_p_is_feasible
+    from .p_pool import session_p_depth_unsaturated
 
-    favor_geom = bool(archive is not None and session_p_is_feasible(session, archive))
+    favor_geom = bool(
+        archive is not None and session_p_depth_unsaturated(session, archive)
+    )
     ordered: list[dict[str, Any]] = []
     seen: set[str] = set()
     for action in list(prior_actions) + _balance_action_categories(
