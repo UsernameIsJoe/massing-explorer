@@ -185,8 +185,9 @@ def solve_partitions(
     )
     note = (
         f"CSP: {len(feasible)} feasible partition(s) of {n} atom(s){bound}; "
-        f"shortlist {len(chosen)} with |P| quotas, archetype floors, then "
-        f"quality refill (school prior ranks inside cells / refill, not alone). "
+        f"shortlist {len(chosen)} with |P| quotas then relationship-family "
+        f"minimum seats (school bars / arts+academic / arts separate / other), "
+        f"quality refill after. "
         f"Constraints filter P; they do not freeze it."
         f"{pref_note}{extra}"
     )
@@ -216,12 +217,12 @@ def _pick_shortlist(
 
     Two-level quotas against selection compression:
       1) fair shares across allowed |P|
-      2) within each |P|, archetype floors for up to half the seats
-         (arts↔academic, admin alone/bundled, school bars, …), then
-         semantic-rank refill for quality depth
+      2) within each |P|, *minimum representation* across relationship
+         families (school bars, arts+academic, arts separate, other),
+         then semantic-rank refill for quality depth
 
-    School-shaped semantic rank is a *quality signal inside each cell and
-    for post-floor refill*, not a global filter that erases other basins.
+    School prior ranks *inside* a family cell and for post-floor refill.
+    It does not choose which families appear on the shortlist.
     """
     if cap <= 0:
         return []
@@ -302,36 +303,38 @@ def _pick_shortlist(
         if quota <= 0 or not buckets[k]:
             continue
 
-        # Bucket this |P| by relationship archetype (ranked order preserved).
-        by_arch: dict[str, list[list[int]]] = {}
+        # Secondary strata: relationship families (not geometric distance).
+        by_family: dict[str, list[list[int]]] = {}
         for assign in buckets[k]:
-            arch = _relationship_archetype(atoms, assign)
-            by_arch.setdefault(arch, []).append(assign)
-        arch_keys = sorted(by_arch.keys())
-        arch_available = {a: len(by_arch[a]) for a in arch_keys}
+            fam = _relationship_family(atoms, assign)
+            by_family.setdefault(fam, []).append(assign)
 
-        # Level-2 floors: spread up to half the |P| quota across archetypes
-        # (one seat each). The other half stays for semantic-rank refill so a
-        # wide archetype set cannot starve the quality basin that actually
-        # realizes under COVER.
-        floor_budget = min(len(arch_keys), max(1, quota // 2))
-        arch_floors = _stratum_quotas(
-            arch_keys,
+        # Canonical order: guarantee alternate families before school_bars
+        # when seats are scarce.
+        family_keys = [
+            f for f in _RELATIONSHIP_FAMILIES if f in by_family
+        ] + sorted(f for f in by_family if f not in _RELATIONSHIP_FAMILIES)
+        family_available = {f: len(by_family[f]) for f in family_keys}
+
+        # Minimum representation: one seat per present family when quota
+        # allows; if quota < #families, fair-share scarce seats (alts first).
+        floor_budget = min(len(family_keys), quota)
+        family_floors = _stratum_quotas(
+            family_keys,
             floor_budget,
             preferred=None,
-            available=arch_available,
+            available=family_available,
         )
 
-        for arch in arch_keys:
-            need = int(arch_floors.get(arch, 0) or 0)
-            bag = by_arch[arch]
+        for fam in family_keys:
+            need = int(family_floors.get(fam, 0) or 0)
+            bag = by_family[fam]
             while need > 0 and bag and taken[k] < quota:
                 assign = bag.pop(0)
                 if push(assign):
                     need -= 1
 
-        # After floors: refill by semantic rank within this |P| (quality depth),
-        # then distance among whatever is still unseated.
+        # Remaining seats: semantic-rank refill (quality depth), then distance.
         for assign in buckets[k]:
             if taken[k] >= quota:
                 break
@@ -557,29 +560,37 @@ def _block_motif(atoms: list[dict[str, Any]], assign: list[int]) -> tuple[str, .
     )
 
 
-def _relationship_archetype(atoms: list[dict[str, Any]], assign: list[int]) -> str:
-    """
-    Coarse organizational relationship class for shortlist quotas.
+_RELATIONSHIP_FAMILIES: tuple[str, ...] = (
+    "arts_with_academic",
+    "arts_separate",
+    "other",
+    "school_bars",
+)
 
-    Built from generic co-location features (arts↔academic, admin alone,
-    media on/off academic, school-bar shape) — not project-specific groupings.
+
+def _relationship_family(atoms: list[dict[str, Any]], assign: list[int]) -> str:
+    """
+    Secondary shortlist stratum: coarse organizational family.
+
+    Explicit families (not partition distance, not school-prior score):
+      - school_bars
+      - arts_with_academic
+      - arts_separate
+      - other
     """
     if _is_school_bars(atoms, assign):
         return "school_bars"
-    art, media, admin = _block_motif(atoms, assign)[:3]
+    art = _block_motif(atoms, assign)[0]
     if art == "with_academic":
-        if media == "with_academic":
-            return "arts_on_academic_media_on"
-        return "arts_on_academic_media_off"
+        return "arts_with_academic"
     if art == "alone":
-        return "arts_alone"
-    if art == "with_athletics":
-        return "arts_with_athletics"
-    if art == "absent":
-        return "no_arts"
-    if admin == "alone":
-        return "arts_public_admin_alone"
-    return "arts_public"
+        return "arts_separate"
+    return "other"
+
+
+def _relationship_archetype(atoms: list[dict[str, Any]], assign: list[int]) -> str:
+    """Backward-compatible alias for relationship-family classification."""
+    return _relationship_family(atoms, assign)
 
 
 def department_atoms(session: Any) -> list[dict[str, Any]]:

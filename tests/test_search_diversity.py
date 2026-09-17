@@ -436,7 +436,7 @@ class TestCoverPartitionBudget(unittest.TestCase):
         self.assertGreater(_score(atoms, school), _score(atoms, jammed))
 
     def test_block_motif_distinguishes_art_with_academic(self) -> None:
-        from massing_explorer.explore.csp import _block_motif, _relationship_archetype
+        from massing_explorer.explore.csp import _block_motif, _relationship_family
 
         atoms = [
             {"departments": ["CORE ACADEMIC"]},
@@ -453,14 +453,12 @@ class TestCoverPartitionBudget(unittest.TestCase):
         self.assertNotEqual(_block_motif(atoms, school), _block_motif(atoms, art_on_aca))
         self.assertEqual(_block_motif(atoms, art_on_aca)[0], "with_academic")
         self.assertEqual(_block_motif(atoms, school)[0], "other")
-        self.assertEqual(_relationship_archetype(atoms, school), "school_bars")
-        self.assertEqual(
-            _relationship_archetype(atoms, art_on_aca), "arts_on_academic_media_off"
-        )
+        self.assertEqual(_relationship_family(atoms, school), "school_bars")
+        self.assertEqual(_relationship_family(atoms, art_on_aca), "arts_with_academic")
 
-    def test_shortlist_reserves_archetype_seats_not_only_school_bars(self) -> None:
-        """|P| then relationship-archetype quotas must seat non-school-bar orgs."""
-        from massing_explorer.explore.csp import _relationship_archetype
+    def test_shortlist_reserves_family_minimum_seats(self) -> None:
+        """|P| then relationship-family minimum seats must cover alternate orgs."""
+        from massing_explorer.explore.csp import _relationship_family
 
         depts = [
             "CORE ACADEMIC",
@@ -490,7 +488,7 @@ class TestCoverPartitionBudget(unittest.TestCase):
         report = describe_csp(session, cap=20)
         chosen = report.get("chosen") or []
         self.assertGreaterEqual(len(chosen), 8)
-        arches: list[str] = []
+        families: list[str] = []
         for item in chosen:
             groups = item.get("groups") or []
             flat_atoms = []
@@ -499,30 +497,28 @@ class TestCoverPartitionBudget(unittest.TestCase):
                 for d in g.get("departments") or []:
                     flat_atoms.append({"departments": [d]})
                     assign.append(bi)
-            arches.append(_relationship_archetype(flat_atoms, assign))
-        counts = Counter(arches)
+            families.append(_relationship_family(flat_atoms, assign))
+        counts = Counter(families)
         self.assertGreaterEqual(
             len(counts),
             2,
-            msg=f"expected multiple relationship archetypes; got {counts}",
+            msg=f"expected multiple relationship families; got {counts}",
         )
-        non_school = sum(v for a, v in counts.items() if a != "school_bars")
         self.assertGreaterEqual(
-            non_school,
+            int(counts.get("arts_with_academic", 0) or 0),
             1,
-            msg=f"expected a non-school-bar seat; archetypes={counts}",
+            msg=f"expected arts+academic minimum seat; families={counts}",
         )
-        arts_on = sum(v for a, v in counts.items() if a.startswith("arts_on_academic"))
         self.assertGreaterEqual(
-            arts_on,
+            int(counts.get("arts_separate", 0) or 0),
             1,
-            msg=f"expected arts-on-academic archetype seat; archetypes={counts}",
+            msg=f"expected arts-separate minimum seat; families={counts}",
         )
         school_n = int(counts.get("school_bars", 0) or 0)
         self.assertLess(
             school_n,
             len(chosen),
-            msg=f"school_bars must not take every seat; archetypes={counts}",
+            msg=f"school_bars must not take every seat; families={counts}",
         )
 
 
