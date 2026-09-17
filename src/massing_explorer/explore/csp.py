@@ -185,9 +185,8 @@ def solve_partitions(
     )
     note = (
         f"CSP: {len(feasible)} feasible partition(s) of {n} atom(s){bound}; "
-        f"shortlist {len(chosen)} with fair shares across allowed |P| "
-        f"(not proportional to how many partitions each count has), "
-        f"then main-program role diversity inside each count. "
+        f"shortlist {len(chosen)} with |P| quotas, archetype floors, then "
+        f"quality refill (school prior ranks inside cells / refill, not alone). "
         f"Constraints filter P; they do not freeze it."
         f"{pref_note}{extra}"
     )
@@ -215,16 +214,14 @@ def _pick_shortlist(
     """
     Diversity-select up to `cap` from ranked feasible assignments.
 
-    Fair across the allowed |P| range: each non-empty mass-count stratum
-    gets a near-equal share of the budget, then organizational diversity
-    runs *inside* that stratum. A denser stratum (more feasible partitions)
-    cannot crowd out a thinner one. Preferred |P| may claim leftover slots
-    only after every stratum has its equal floor.
+    Two-level quotas against selection compression:
+      1) fair shares across allowed |P|
+      2) within each |P|, archetype floors for up to half the seats
+         (arts↔academic, admin alone/bundled, school bars, …), then
+         semantic-rank refill for quality depth
 
-    Diversity half prefers underrepresented *main-program role patterns*
-    (where art / media / admin sit relative to academic), then falls back
-    to partition set-distance — same "look different" idea, focused on
-    the programs that actually change basins.
+    School-shaped semantic rank is a *quality signal inside each cell and
+    for post-floor refill*, not a global filter that erases other basins.
     """
     if cap <= 0:
         return []
@@ -242,7 +239,7 @@ def _pick_shortlist(
         active.sort(key=lambda k: (abs(k - int(preferred_mass_count)), k))
 
     available = {k: len(buckets[k]) for k in active}
-    quotas = _stratum_quotas(
+    mass_quotas = _stratum_quotas(
         active,
         cap,
         preferred=preferred_mass_count,
@@ -252,7 +249,6 @@ def _pick_shortlist(
     chosen: list[dict[str, Any]] = []
     seen: set[frozenset[frozenset[str]]] = set()
     chosen_by_k: dict[int, list[frozenset[frozenset[str]]]] = {k: [] for k in active}
-    motif_counts: dict[int, dict[tuple[str, ...], int]] = {k: {} for k in active}
     taken: dict[int, int] = {k: 0 for k in active}
 
     def push(assign: list[int]) -> bool:
@@ -266,13 +262,9 @@ def _pick_shortlist(
         if k in chosen_by_k:
             chosen_by_k[k].append(key)
             taken[k] = taken.get(k, 0) + 1
-            motif = _block_motif(atoms, assign)
-            bag = motif_counts.setdefault(k, {})
-            bag[motif] = int(bag.get(motif) or 0) + 1
         return True
 
-    # Keep the stated grouping when it is feasible — it spends its stratum's
-    # quota but always leads the shortlist for the board / COVER origin.
+    # Stated grouping leads its stratum when feasible.
     for k in list(active):
         for i, assign in enumerate(buckets[k]):
             if _reason(atoms, assign) != "stated grouping":
@@ -281,106 +273,101 @@ def _pick_shortlist(
             push(assign)
             break
 
-    def farthest_in_bucket(k: int) -> list[int] | None:
-        """
-        Next pick inside stratum k.
-
-        Prefer orgs that introduce a new *art* placement first (school bars
-        all park art off the classroom wing), then new media/admin roles,
-        then a fully new role triple, higher CSP rank, and set-distance.
-        """
-        peers = chosen_by_k.get(k) or []
-        counts = motif_counts.get(k) or {}
-        seen_art = {m[0] for m in counts}
-        seen_media = {m[1] for m in counts if len(m) > 1}
-        seen_admin = {m[2] for m in counts if len(m) > 2}
-        best: tuple[int, int, int, int, float, float] | None = None
-        best_assign: list[int] | None = None
+    def farthest_in_pool(
+        pool: list[list[int]], peers: list[frozenset[frozenset[str]]]
+    ) -> tuple[int, list[int]] | None:
+        best: tuple[float, float, int] | None = None
         best_i = -1
-        for i, assign in enumerate(buckets[k]):
+        best_assign: list[int] | None = None
+        for i, assign in enumerate(pool):
             item = _from_atoms(atoms, assign, _reason(atoms, assign))
             key = _signature(item["groups"])
             if key in seen:
                 continue
-            motif = _block_motif(atoms, assign)
-            hits = int(counts.get(motif) or 0)
-            motif_new = 1 if hits <= 0 else 0
-            art_new = 1 if motif[0] not in seen_art else 0
-            other_axis = (
-                (1 if motif[1] not in seen_media else 0)
-                + (1 if motif[2] not in seen_admin else 0)
+            novelty = (
+                min(_partition_distance(key, p) for p in peers) if peers else 1.0
             )
-            if peers:
-                novelty = min(_partition_distance(key, p) for p in peers)
-            else:
-                novelty = 1.0
             bal = _block_balance(assign)
-            score = (art_new, other_axis, motif_new, -i, novelty, bal)
+            score = (novelty, bal, -i)
             if best is None or score > best:
                 best = score
-                best_assign = assign
                 best_i = i
+                best_assign = assign
         if best_assign is None:
             return None
-        buckets[k].pop(best_i)
-        return best_assign
+        return best_i, best_assign
 
-    # Fill each stratum up to its fair quota.
-    # First half: keep semantic rank (school-shaped seeds for COVER).
-    # Second half: role-pattern diversity so alternate basins get seats.
     for k in active:
-        quota = quotas.get(k, 0)
-        if quota <= 0:
+        quota = int(mass_quotas.get(k, 0) or 0)
+        if quota <= 0 or not buckets[k]:
             continue
-        quality_slots = max(1, (quota + 1) // 2)
-        while taken[k] < quota and buckets[k]:
-            if taken[k] < quality_slots or not chosen_by_k[k]:
-                assign = buckets[k].pop(0)
-                if not push(assign):
-                    continue
-            else:
-                assign = farthest_in_bucket(k)
-                if assign is None:
-                    break
-                push(assign)
 
-    # Spillover if some strata ran dry: role / motif novelty across leftovers,
-    # preferring strata that have fewer picks so far.
+        # Bucket this |P| by relationship archetype (ranked order preserved).
+        by_arch: dict[str, list[list[int]]] = {}
+        for assign in buckets[k]:
+            arch = _relationship_archetype(atoms, assign)
+            by_arch.setdefault(arch, []).append(assign)
+        arch_keys = sorted(by_arch.keys())
+        arch_available = {a: len(by_arch[a]) for a in arch_keys}
+
+        # Level-2 floors: spread up to half the |P| quota across archetypes
+        # (one seat each). The other half stays for semantic-rank refill so a
+        # wide archetype set cannot starve the quality basin that actually
+        # realizes under COVER.
+        floor_budget = min(len(arch_keys), max(1, quota // 2))
+        arch_floors = _stratum_quotas(
+            arch_keys,
+            floor_budget,
+            preferred=None,
+            available=arch_available,
+        )
+
+        for arch in arch_keys:
+            need = int(arch_floors.get(arch, 0) or 0)
+            bag = by_arch[arch]
+            while need > 0 and bag and taken[k] < quota:
+                assign = bag.pop(0)
+                if push(assign):
+                    need -= 1
+
+        # After floors: refill by semantic rank within this |P| (quality depth),
+        # then distance among whatever is still unseated.
+        for assign in buckets[k]:
+            if taken[k] >= quota:
+                break
+            push(assign)
+
+        leftovers = [
+            a
+            for a in buckets[k]
+            if _signature(_from_atoms(atoms, a, _reason(atoms, a))["groups"]) not in seen
+        ]
+        while taken[k] < quota and leftovers:
+            picked = farthest_in_pool(leftovers, chosen_by_k.get(k) or [])
+            if picked is None:
+                break
+            idx, assign = picked
+            leftovers.pop(idx)
+            push(assign)
+
+        buckets[k] = leftovers
+
+    # Spillover across |P| if some strata ran dry.
     while len(chosen) < cap:
         best_k: int | None = None
         best_i = -1
-        best_score: tuple[int, int, int, int, float, int, float] | None = None
+        best_score: tuple[float, int, float, int] | None = None
         for k in active:
             peers = chosen_by_k.get(k) or []
-            counts = motif_counts.get(k) or {}
-            seen_art = {m[0] for m in counts}
-            seen_media = {m[1] for m in counts if len(m) > 1}
-            seen_admin = {m[2] for m in counts if len(m) > 2}
             for i, cand in enumerate(buckets[k]):
                 item = _from_atoms(atoms, cand, _reason(atoms, cand))
                 key = _signature(item["groups"])
                 if key in seen:
                     continue
-                motif = _block_motif(atoms, cand)
-                hits = int(counts.get(motif) or 0)
-                motif_new = 1 if hits <= 0 else 0
-                art_new = 1 if motif[0] not in seen_art else 0
-                other_axis = (
-                    (1 if motif[1] not in seen_media else 0)
-                    + (1 if motif[2] not in seen_admin else 0)
-                )
                 novelty = (
                     min(_partition_distance(key, p) for p in peers) if peers else 1.0
                 )
-                score = (
-                    art_new,
-                    other_axis,
-                    motif_new,
-                    -i,
-                    novelty,
-                    -taken.get(k, 0),
-                    _block_balance(cand),
-                )
+                score = (novelty, -taken.get(k, 0), _block_balance(cand), -i)
                 if best_score is None or score > best_score:
                     best_score = score
                     best_k = k
@@ -389,7 +376,6 @@ def _pick_shortlist(
             break
         push(buckets[best_k].pop(best_i))
 
-    # Stated grouping leads; then stable by |P| so the board reads as a range.
     chosen.sort(
         key=lambda item: (
             0 if (item.get("reason") or "") == "stated grouping" else 1,
@@ -400,14 +386,14 @@ def _pick_shortlist(
 
 
 def _stratum_quotas(
-    strata: list[int],
+    strata: list[Any],
     cap: int,
     *,
-    preferred: int | None = None,
-    available: dict[int, int] | None = None,
-) -> dict[int, int]:
+    preferred: Any | None = None,
+    available: dict[Any, int] | None = None,
+) -> dict[Any, int]:
     """
-    Near-equal slot shares across |P| strata.
+    Near-equal slot shares across strata (|P| or relationship archetype).
 
     Not proportional to feasible-set size — a larger Bell slice must not
     dominate the shortlist. Leftover slots go to `preferred` first when set,
@@ -569,6 +555,31 @@ def _block_motif(atoms: list[dict[str, Any]], assign: list[int]) -> tuple[str, .
             academic_block=academic_block,
         ),
     )
+
+
+def _relationship_archetype(atoms: list[dict[str, Any]], assign: list[int]) -> str:
+    """
+    Coarse organizational relationship class for shortlist quotas.
+
+    Built from generic co-location features (arts↔academic, admin alone,
+    media on/off academic, school-bar shape) — not project-specific groupings.
+    """
+    if _is_school_bars(atoms, assign):
+        return "school_bars"
+    art, media, admin = _block_motif(atoms, assign)[:3]
+    if art == "with_academic":
+        if media == "with_academic":
+            return "arts_on_academic_media_on"
+        return "arts_on_academic_media_off"
+    if art == "alone":
+        return "arts_alone"
+    if art == "with_athletics":
+        return "arts_with_athletics"
+    if art == "absent":
+        return "no_arts"
+    if admin == "alone":
+        return "arts_public_admin_alone"
+    return "arts_public"
 
 
 def department_atoms(session: Any) -> list[dict[str, Any]]:

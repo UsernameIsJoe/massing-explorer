@@ -436,7 +436,7 @@ class TestCoverPartitionBudget(unittest.TestCase):
         self.assertGreater(_score(atoms, school), _score(atoms, jammed))
 
     def test_block_motif_distinguishes_art_with_academic(self) -> None:
-        from massing_explorer.explore.csp import _block_motif
+        from massing_explorer.explore.csp import _block_motif, _relationship_archetype
 
         atoms = [
             {"departments": ["CORE ACADEMIC"]},
@@ -453,10 +453,14 @@ class TestCoverPartitionBudget(unittest.TestCase):
         self.assertNotEqual(_block_motif(atoms, school), _block_motif(atoms, art_on_aca))
         self.assertEqual(_block_motif(atoms, art_on_aca)[0], "with_academic")
         self.assertEqual(_block_motif(atoms, school)[0], "other")
+        self.assertEqual(_relationship_archetype(atoms, school), "school_bars")
+        self.assertEqual(
+            _relationship_archetype(atoms, art_on_aca), "arts_on_academic_media_off"
+        )
 
-    def test_shortlist_seats_art_with_academic_motif(self) -> None:
-        """Diversity half must seat art-on-academic, not only school-bar reshuffles."""
-        from massing_explorer.explore.csp import _block_motif
+    def test_shortlist_reserves_archetype_seats_not_only_school_bars(self) -> None:
+        """|P| then relationship-archetype quotas must seat non-school-bar orgs."""
+        from massing_explorer.explore.csp import _relationship_archetype
 
         depts = [
             "CORE ACADEMIC",
@@ -486,27 +490,39 @@ class TestCoverPartitionBudget(unittest.TestCase):
         report = describe_csp(session, cap=20)
         chosen = report.get("chosen") or []
         self.assertGreaterEqual(len(chosen), 8)
-        motifs = []
-        art_with_aca = 0
+        arches: list[str] = []
         for item in chosen:
             groups = item.get("groups") or []
-            # Rebuild assign-like motif via group membership
-            atoms = [{"departments": list(g.get("departments") or [])} for g in groups]
-            # Motif helper expects one atom per dept with assign ids — use groups as blocks.
             flat_atoms = []
             assign = []
             for bi, g in enumerate(groups):
                 for d in g.get("departments") or []:
                     flat_atoms.append({"departments": [d]})
                     assign.append(bi)
-            motif = _block_motif(flat_atoms, assign)
-            motifs.append(motif)
-            if motif[0] == "with_academic":
-                art_with_aca += 1
+            arches.append(_relationship_archetype(flat_atoms, assign))
+        counts = Counter(arches)
         self.assertGreaterEqual(
-            art_with_aca,
+            len(counts),
+            2,
+            msg=f"expected multiple relationship archetypes; got {counts}",
+        )
+        non_school = sum(v for a, v in counts.items() if a != "school_bars")
+        self.assertGreaterEqual(
+            non_school,
             1,
-            msg=f"expected art-with-academic seat; motifs={Counter(motifs)}",
+            msg=f"expected a non-school-bar seat; archetypes={counts}",
+        )
+        arts_on = sum(v for a, v in counts.items() if a.startswith("arts_on_academic"))
+        self.assertGreaterEqual(
+            arts_on,
+            1,
+            msg=f"expected arts-on-academic archetype seat; archetypes={counts}",
+        )
+        school_n = int(counts.get("school_bars", 0) or 0)
+        self.assertLess(
+            school_n,
+            len(chosen),
+            msg=f"school_bars must not take every seat; archetypes={counts}",
         )
 
 
