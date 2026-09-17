@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from collections import Counter
 from types import SimpleNamespace
 
 from massing_explorer.explore.cover import CoverSample, _canonicalize_samples, _sample_distance
@@ -433,6 +434,80 @@ class TestCoverPartitionBudget(unittest.TestCase):
         school = [0, 0, 1, 1, 2, 0, 1]  # academic+media | arts+admin+medical | gym
         jammed = [0, 0, 0, 1, 2, 0, 1]  # arts inside classroom bar
         self.assertGreater(_score(atoms, school), _score(atoms, jammed))
+
+    def test_block_motif_distinguishes_art_with_academic(self) -> None:
+        from massing_explorer.explore.csp import _block_motif
+
+        atoms = [
+            {"departments": ["CORE ACADEMIC"]},
+            {"departments": ["SPECIAL EDUCATION"]},
+            {"departments": ["ART & MUSIC"]},
+            {"departments": ["ADMINISTRATION & GUIDANCE"]},
+            {"departments": ["DINING & FOOD SERVICE", "HEALTH & PHYSICAL EDUCATION"]},
+            {"departments": ["MEDIA CENTER"]},
+            {"departments": ["MEDICAL"]},
+            {"departments": ["CUSTODIAL & MAINTENANCE"]},
+        ]
+        school = [0, 0, 1, 1, 2, 0, 1, 1]  # art off academic, media on academic
+        art_on_aca = [0, 0, 0, 0, 2, 1, 0, 1]  # art+admin on academic, media with custodial
+        self.assertNotEqual(_block_motif(atoms, school), _block_motif(atoms, art_on_aca))
+        self.assertEqual(_block_motif(atoms, art_on_aca)[0], "with_academic")
+        self.assertEqual(_block_motif(atoms, school)[0], "other")
+
+    def test_shortlist_seats_art_with_academic_motif(self) -> None:
+        """Diversity half must seat art-on-academic, not only school-bar reshuffles."""
+        from massing_explorer.explore.csp import _block_motif
+
+        depts = [
+            "CORE ACADEMIC",
+            "SPECIAL EDUCATION",
+            "ART & MUSIC",
+            "ADMINISTRATION & GUIDANCE",
+            "DINING & FOOD SERVICE",
+            "HEALTH & PHYSICAL EDUCATION",
+            "MEDIA CENTER",
+            "MEDICAL",
+            "CUSTODIAL & MAINTENANCE",
+        ]
+        masses = [_mass(f"m{i}", [d], 2) for i, d in enumerate(depts)]
+        session = SimpleNamespace(
+            masses=masses,
+            constraints={
+                "p_constraints": {
+                    "together": [["DINING & FOOD SERVICE", "HEALTH & PHYSICAL EDUCATION"]],
+                    "apart": [],
+                    "alone": [],
+                    "mass_count_min": 3,
+                    "mass_count_max": 4,
+                }
+            },
+            department_names=lambda: list(depts),
+        )
+        report = describe_csp(session, cap=20)
+        chosen = report.get("chosen") or []
+        self.assertGreaterEqual(len(chosen), 8)
+        motifs = []
+        art_with_aca = 0
+        for item in chosen:
+            groups = item.get("groups") or []
+            # Rebuild assign-like motif via group membership
+            atoms = [{"departments": list(g.get("departments") or [])} for g in groups]
+            # Motif helper expects one atom per dept with assign ids — use groups as blocks.
+            flat_atoms = []
+            assign = []
+            for bi, g in enumerate(groups):
+                for d in g.get("departments") or []:
+                    flat_atoms.append({"departments": [d]})
+                    assign.append(bi)
+            motif = _block_motif(flat_atoms, assign)
+            motifs.append(motif)
+            if motif[0] == "with_academic":
+                art_with_aca += 1
+        self.assertGreaterEqual(
+            art_with_aca,
+            1,
+            msg=f"expected art-with-academic seat; motifs={Counter(motifs)}",
+        )
 
 
 if __name__ == "__main__":

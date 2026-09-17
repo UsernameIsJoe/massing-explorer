@@ -39,6 +39,12 @@ DEPTH_QUALITY_EPS = 1e-4
 DEPTH_STALE_DISTINCT = 3
 # Need at least this many distinct configs before saturation can fire.
 DEPTH_MIN_BEFORE_SATURATE = 4
+# Discovery probes for unresolved P (experimental floor — not claimed optimal).
+PROBE_FLOOR = 4
+NEAR_MISS_BATCH = 2
+NEAR_MISS_DIST = 0.35
+PROBE_FLAT_PAUSE = 2
+PROBE_DIST_EPS = 1e-4
 
 STATUS_FEASIBLE = "feasible"
 STATUS_UNRESOLVED = "unresolved"
@@ -177,7 +183,12 @@ def record_p_outcome(
 
     profile = demand_profile(groups, session)
     entry["ground_pressure"] = profile.get("ground_pressure")
-    _record_depth_progress(entry, session, perf)
+    if entry.get("status") == STATUS_FEASIBLE:
+        if entry.get("probe_configs") and not entry.get("depth_configs"):
+            entry["depth_configs"] = list(entry.get("probe_configs") or [])[:DEPTH_CONFIG_CAP]
+        _record_depth_progress(entry, session, perf)
+    elif entry.get("status") == STATUS_UNRESOLVED:
+        _record_probe_progress(entry, session, perf)
     return entry
 
 
@@ -267,6 +278,264 @@ def unsaturated_feasible_count(archive: dict[str, Any] | None) -> int:
         for e in (ensure_p_pool(archive).get("entries") or {}).values()
         if p_depth_unsaturated(e)
     )
+
+
+def _record_probe_progress(
+    entry: dict[str, Any],
+    session: Any,
+    perf: dict[str, Any],
+) -> None:
+    """
+    Distinct discovery probes for unresolved P.
+
+    Improving feasibility distance earns near-miss credit; flat results pause
+    the org after the probe floor without marking it impossible.
+    """
+    cfg = depth_config_key(session)
+    seen = [str(x) for x in (entry.get("probe_configs") or []) if x]
+    is_new = cfg not in seen
+    if is_new:
+        seen.append(cfg)
+        entry["probe_configs"] = seen[-DEPTH_CONFIG_CAP:]
+    kinds = _failure_kinds(perf)
+    if kinds:
+        entry["last_failure_kinds"] = kinds[:8]
+
+    raw_dist = perf.get("feasibility_distance")
+    try:
+        dist = float(raw_dist) if raw_dist is not None else None
+    except (TypeError, ValueError):
+        dist = None
+    if dist is not None:
+        best = entry.get("best_distance")
+        try:
+            best_f = float(best) if best is not None else None
+        except (TypeError, ValueError):
+            best_f = None
+        improved = best_f is None or dist < best_f - PROBE_DIST_EPS
+        if improved:
+            entry["best_distance"] = round(dist, 4)
+            entry["probe_flat"] = 0
+            entry["probe_paused"] = False
+            if dist <= NEAR_MISS_DIST:
+                entry["near_miss_credit"] = max(
+                    int(entry.get("near_miss_credit") or 0), NEAR_MISS_BATCH
+                )
+        elif is_new:
+            entry["probe_flat"] = int(entry.get("probe_flat") or 0) + 1
+            if (
+                len(seen) >= PROBE_FLOOR
+                and int(entry.get("probe_flat") or 0) >= PROBE_FLAT_PAUSE
+                and int(entry.get("near_miss_credit") or 0) <= 0
+            ):
+                entry["probe_paused"] = True
+    if is_new and int(entry.get("near_miss_credit") or 0) > 0:
+        entry["near_miss_credit"] = int(entry.get("near_miss_credit") or 0) - 1
+
+
+def groups_mass_count(groups: list[Any] | None) -> int:
+    if not groups:
+        return 0
+    n = 0
+    for g in groups:
+        depts = g.get("departments") if isinstance(g, dict) else g
+        if depts:
+            n += 1
+    return n
+
+
+def probe_config_count(entry: dict[str, Any] | None) -> int:
+    if not entry:
+        return 0
+    return len([x for x in (entry.get("probe_configs") or []) if x])
+
+
+def p_needs_discovery_probe(entry: dict[str, Any] | None) -> bool:
+    """Unresolved org still owed floor probes or near-miss follow-ups."""
+    if not entry or entry.get("status") != STATUS_UNRESOLVED:
+        return False
+    if entry.get("probe_paused"):
+        return False
+    if int(entry.get("near_miss_credit") or 0) > 0:
+        return True
+    return probe_config_count(entry) < PROBE_FLOOR
+
+
+def discovery_partition_indices(
+    plan_partitions: list[dict[str, Any]],
+    archive: dict[str, Any],
+) -> list[int]:
+    """Plan indices for unresolved P that still need protected probes."""
+    pool = ensure_p_pool(archive)
+    out: list[int] = []
+    for i, item in enumerate(plan_partitions):
+        key = partition_key(item.get("groups") or [])
+        entry = (pool.get("entries") or {}).get(key)
+        if p_needs_discovery_probe(entry):
+            out.append(i)
+    return out
+
+
+def balance_indices_by_mass_count(
+    indices: list[int],
+    plan_partitions: list[dict[str, Any]],
+    session: Any,
+) -> list[int]:
+    """
+    Round-robin across allowed |P| so 3-mass and 4-mass both get real probes.
+    """
+    if not indices:
+        return []
+    bounds = required_mass_bounds(session)
+    buckets: dict[int, list[int]] = {}
+    for i in indices:
+        n = groups_mass_count((plan_partitions[i] or {}).get("groups"))
+        buckets.setdefault(n, []).append(i)
+    if bounds:
+        order = list(range(int(bounds[0]), int(bounds[1]) + 1))
+    else:
+        order = sorted(buckets.keys())
+    out: list[int] = []
+    # Prefer buckets that exist; cycle until all indices placed once.
+    cursors = {k: 0 for k in buckets}
+    while len(out) < len(indices):
+        progressed = False
+        for k in order:
+            bag = buckets.get(k) or []
+            c = cursors.get(k, 0)
+            if c < len(bag):
+                out.append(bag[c])
+                cursors[k] = c + 1
+                progressed = True
+        if not progressed:
+            # Mass counts outside bounds still get a turn.
+            for k, bag in buckets.items():
+                c = cursors.get(k, 0)
+                if c < len(bag):
+                    out.append(bag[c])
+                    cursors[k] = c + 1
+                    progressed = True
+            if not progressed:
+                break
+    return out
+
+
+def allocate_cover_step(
+    step: int,
+    archive: dict[str, Any] | None,
+    *,
+    discovery_needed: int = 0,
+    deepen_needed: int = 0,
+) -> tuple[int, int, int]:
+    """
+    Split one COVER step into discovery | deepen | expand (new P samples).
+
+    Discovery and deepen run in parallel shares so neither waits for the other
+    pool to finish. Expand keeps current breadth admission behavior.
+    """
+    step = max(0, int(step))
+    if step <= 0:
+        return 0, 0, 0
+    need_d = max(0, int(discovery_needed))
+    need_z = max(0, int(deepen_needed))
+    if need_d and need_z:
+        discovery = max(1, step // 3)
+        deepen = max(1, step // 3)
+        expand = max(0, step - discovery - deepen)
+    elif need_d:
+        discovery = max(1, int(round(step * 0.45)))
+        deepen = 0
+        expand = max(0, step - discovery)
+    elif need_z:
+        deepen, expand = deepen_vs_expand_counts(step, archive)
+        discovery = 0
+    else:
+        deepen, expand = deepen_vs_expand_counts(step, archive)
+        discovery = 0
+    # Cap discovery by how many probes are actually owed.
+    if need_d > 0:
+        discovery = min(discovery, max(need_d, 1))
+    total = discovery + deepen + expand
+    if total < step:
+        expand += step - total
+    elif total > step:
+        overflow = total - step
+        take = min(overflow, expand)
+        expand -= take
+        overflow -= take
+        if overflow > 0:
+            take = min(overflow, deepen)
+            deepen -= take
+            overflow -= take
+        if overflow > 0:
+            discovery = max(0, discovery - overflow)
+    return discovery, deepen, expand
+
+
+def informed_probe_recipe(
+    groups: list[Any],
+    session: Any,
+    entry: dict[str, Any] | None,
+    *,
+    slot: int,
+) -> dict[str, Any]:
+    """
+    Constraint-informed (stories bias, loading, envelope, plate) for probe slot.
+
+    Uses demand, soft story preference, length/width pressure, and last failures.
+    """
+    profile = demand_profile(groups, session)
+    constraints = getattr(session, "constraints", None) or {}
+    pref = constraints.get("preferred_stories")
+    kinds = {
+        str(k).split(":")[0]
+        for k in (
+            (entry or {}).get("last_failure_kinds")
+            or (entry or {}).get("failure_kinds")
+            or []
+        )
+    }
+    has_dh = bool(getattr(session, "double_height_rooms", None))
+    length_pressure = bool(
+        kinds
+        & {
+            "site_total_length",
+            "site_length",
+            "site_width",
+            "max_edge",
+            "max_building_length",
+        }
+    ) or bool(
+        constraints.get("max_edge_ft")
+        or constraints.get("max_building_length_ft")
+        or constraints.get("max_total_length_ft")
+    )
+    prefer_tall = float(profile.get("prefer_tall") or 0.0) >= 0.45 or has_dh
+    # Envelope
+    if length_pressure or "site_total_length" in kinds or "site_length" in kinds:
+        envelopes = ("compact", "balanced", "elongated")
+    elif prefer_tall:
+        envelopes = ("balanced", "elongated", "compact")
+    else:
+        envelopes = ("balanced", "compact", "elongated")
+    # Loading: double packs area; single if length failures persist.
+    if length_pressure and slot % 2 == 1:
+        loading = "single"
+    else:
+        loading = "double" if slot % 3 != 2 else "single"
+    if constraints.get("loading_required"):
+        loading = str(constraints.get("loading") or loading)
+    envelope = envelopes[slot % len(envelopes)]
+    plate = "step" if prefer_tall and slot % 2 == 1 else "uniform"
+    return {
+        "prefer_tall": prefer_tall,
+        "preferred_stories": pref,
+        "loading": loading,
+        "envelope": envelope,
+        "plate_profile": plate,
+        "length_pressure": length_pressure,
+        "kinds": sorted(kinds),
+    }
 
 
 def structural_impossible(session: Any, groups: list[Any]) -> str | None:
@@ -705,9 +974,16 @@ def run_geom_fanout_if_pending(
 
     explore["_in_geom_fanout"] = True
     ran = 0
+    budget = archive.get("_attempt_budget")
+    try:
+        budget_i = int(budget) if budget is not None else None
+    except (TypeError, ValueError):
+        budget_i = None
     try:
         snap = archive_mod.capture(session)
         for action in actions:
+            if budget_i is not None and int(archive.get("attempts") or 0) >= budget_i:
+                break
             archive_mod.restore_snapshot(session, snap)
             for mass in session.masses or []:
                 session.constraints.pop(f"{mass.id}_width_ft", None)

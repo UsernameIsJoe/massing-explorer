@@ -186,7 +186,8 @@ def solve_partitions(
     note = (
         f"CSP: {len(feasible)} feasible partition(s) of {n} atom(s){bound}; "
         f"shortlist {len(chosen)} with fair shares across allowed |P| "
-        f"(not proportional to how many partitions each count has). "
+        f"(not proportional to how many partitions each count has), "
+        f"then main-program role diversity inside each count. "
         f"Constraints filter P; they do not freeze it."
         f"{pref_note}{extra}"
     )
@@ -219,6 +220,11 @@ def _pick_shortlist(
     runs *inside* that stratum. A denser stratum (more feasible partitions)
     cannot crowd out a thinner one. Preferred |P| may claim leftover slots
     only after every stratum has its equal floor.
+
+    Diversity half prefers underrepresented *main-program role patterns*
+    (where art / media / admin sit relative to academic), then falls back
+    to partition set-distance — same "look different" idea, focused on
+    the programs that actually change basins.
     """
     if cap <= 0:
         return []
@@ -246,6 +252,7 @@ def _pick_shortlist(
     chosen: list[dict[str, Any]] = []
     seen: set[frozenset[frozenset[str]]] = set()
     chosen_by_k: dict[int, list[frozenset[frozenset[str]]]] = {k: [] for k in active}
+    motif_counts: dict[int, dict[tuple[str, ...], int]] = {k: {} for k in active}
     taken: dict[int, int] = {k: 0 for k in active}
 
     def push(assign: list[int]) -> bool:
@@ -259,6 +266,9 @@ def _pick_shortlist(
         if k in chosen_by_k:
             chosen_by_k[k].append(key)
             taken[k] = taken.get(k, 0) + 1
+            motif = _block_motif(atoms, assign)
+            bag = motif_counts.setdefault(k, {})
+            bag[motif] = int(bag.get(motif) or 0) + 1
         return True
 
     # Keep the stated grouping when it is feasible — it spends its stratum's
@@ -272,9 +282,19 @@ def _pick_shortlist(
             break
 
     def farthest_in_bucket(k: int) -> list[int] | None:
-        """Next pick inside stratum k: max distance to same-|P| chosen, then balance."""
+        """
+        Next pick inside stratum k.
+
+        Prefer orgs that introduce a new *art* placement first (school bars
+        all park art off the classroom wing), then new media/admin roles,
+        then a fully new role triple, higher CSP rank, and set-distance.
+        """
         peers = chosen_by_k.get(k) or []
-        best: tuple[float, float, int] | None = None
+        counts = motif_counts.get(k) or {}
+        seen_art = {m[0] for m in counts}
+        seen_media = {m[1] for m in counts if len(m) > 1}
+        seen_admin = {m[2] for m in counts if len(m) > 2}
+        best: tuple[int, int, int, int, float, float] | None = None
         best_assign: list[int] | None = None
         best_i = -1
         for i, assign in enumerate(buckets[k]):
@@ -282,12 +302,20 @@ def _pick_shortlist(
             key = _signature(item["groups"])
             if key in seen:
                 continue
+            motif = _block_motif(atoms, assign)
+            hits = int(counts.get(motif) or 0)
+            motif_new = 1 if hits <= 0 else 0
+            art_new = 1 if motif[0] not in seen_art else 0
+            other_axis = (
+                (1 if motif[1] not in seen_media else 0)
+                + (1 if motif[2] not in seen_admin else 0)
+            )
             if peers:
                 novelty = min(_partition_distance(key, p) for p in peers)
             else:
                 novelty = 1.0
             bal = _block_balance(assign)
-            score = (novelty, bal, -i)  # earlier rank breaks residual ties
+            score = (art_new, other_axis, motif_new, -i, novelty, bal)
             if best is None or score > best:
                 best = score
                 best_assign = assign
@@ -299,7 +327,7 @@ def _pick_shortlist(
 
     # Fill each stratum up to its fair quota.
     # First half: keep semantic rank (school-shaped seeds for COVER).
-    # Second half: organizational diversity so the map still spreads.
+    # Second half: role-pattern diversity so alternate basins get seats.
     for k in active:
         quota = quotas.get(k, 0)
         if quota <= 0:
@@ -316,23 +344,43 @@ def _pick_shortlist(
                     break
                 push(assign)
 
-    # Spillover if some strata ran dry: farthest across leftovers, preferring
-    # strata that have fewer picks so far.
+    # Spillover if some strata ran dry: role / motif novelty across leftovers,
+    # preferring strata that have fewer picks so far.
     while len(chosen) < cap:
         best_k: int | None = None
         best_i = -1
-        best_score: tuple[float, int, float, int] | None = None
+        best_score: tuple[int, int, int, int, float, int, float] | None = None
         for k in active:
             peers = chosen_by_k.get(k) or []
+            counts = motif_counts.get(k) or {}
+            seen_art = {m[0] for m in counts}
+            seen_media = {m[1] for m in counts if len(m) > 1}
+            seen_admin = {m[2] for m in counts if len(m) > 2}
             for i, cand in enumerate(buckets[k]):
                 item = _from_atoms(atoms, cand, _reason(atoms, cand))
                 key = _signature(item["groups"])
                 if key in seen:
                     continue
+                motif = _block_motif(atoms, cand)
+                hits = int(counts.get(motif) or 0)
+                motif_new = 1 if hits <= 0 else 0
+                art_new = 1 if motif[0] not in seen_art else 0
+                other_axis = (
+                    (1 if motif[1] not in seen_media else 0)
+                    + (1 if motif[2] not in seen_admin else 0)
+                )
                 novelty = (
                     min(_partition_distance(key, p) for p in peers) if peers else 1.0
                 )
-                score = (novelty, -taken.get(k, 0), _block_balance(cand), -i)
+                score = (
+                    art_new,
+                    other_axis,
+                    motif_new,
+                    -i,
+                    novelty,
+                    -taken.get(k, 0),
+                    _block_balance(cand),
+                )
                 if best_score is None or score > best_score:
                     best_score = score
                     best_k = k
@@ -443,6 +491,84 @@ def _partition_distance(
     if not union:
         return 0.0
     return len(left ^ right) / len(union)
+
+
+def _atom_blob(atom: dict[str, Any]) -> str:
+    return " ".join(str(d).lower() for d in (atom.get("departments") or []))
+
+
+def _academic_block_id(atoms: list[dict[str, Any]], assign: list[int]) -> int | None:
+    """Block id that carries core/academic program, if any."""
+    core = None
+    academic = None
+    for i, atom in enumerate(atoms):
+        blob = _atom_blob(atom)
+        if "core academic" in blob:
+            core = assign[i]
+            break
+        if academic is None and "academic" in _families(atom):
+            academic = assign[i]
+    if core is not None:
+        return core
+    return academic
+
+
+def _program_role(
+    atoms: list[dict[str, Any]],
+    assign: list[int],
+    *,
+    tokens: tuple[str, ...],
+    academic_block: int | None,
+) -> str:
+    """
+    Where one main program sits: with academic, alone, with athletics, or other.
+    """
+    idxs = [
+        i
+        for i, atom in enumerate(atoms)
+        if any(tok in _atom_blob(atom) for tok in tokens)
+    ]
+    if not idxs:
+        return "absent"
+    block = assign[idxs[0]]
+    if academic_block is not None and block == academic_block:
+        return "with_academic"
+    members = sum(1 for b in assign if b == block)
+    if members <= 1:
+        return "alone"
+    ath_blocks = {
+        assign[i]
+        for i, atom in enumerate(atoms)
+        if _families(atom) & {"athletics", "dining"}
+    }
+    if block in ath_blocks:
+        return "with_athletics"
+    return "other"
+
+
+def _block_motif(atoms: list[dict[str, Any]], assign: list[int]) -> tuple[str, ...]:
+    """
+    Coarse role pattern for shortlist diversity.
+
+    Tracks where art, media, and admin sit relative to the academic bar —
+    enough to tell school-bar variants from art-on-academic / admin-alone
+    basins without hardcoding full groupings.
+    """
+    if not atoms or not assign or len(atoms) != len(assign):
+        return ("absent", "absent", "absent")
+    academic_block = _academic_block_id(atoms, assign)
+    return (
+        _program_role(
+            atoms, assign, tokens=("art", "music"), academic_block=academic_block
+        ),
+        _program_role(atoms, assign, tokens=("media",), academic_block=academic_block),
+        _program_role(
+            atoms,
+            assign,
+            tokens=("administration", "guidance"),
+            academic_block=academic_block,
+        ),
+    )
 
 
 def department_atoms(session: Any) -> list[dict[str, Any]]:

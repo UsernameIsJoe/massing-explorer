@@ -524,6 +524,75 @@ class ArchiveInsertSyncTests(unittest.TestCase):
         self.assertEqual(len(entry["depth_configs"]), 4)
         self.assertIn("Lsingle", depth_config_key(session))
 
+    def test_allocate_cover_step_runs_discovery_beside_deepen(self) -> None:
+        from massing_explorer.explore.p_pool import allocate_cover_step
+
+        d, z, e = allocate_cover_step(12, None, discovery_needed=8, deepen_needed=3)
+        self.assertEqual(d + z + e, 12)
+        self.assertGreaterEqual(d, 1)
+        self.assertGreaterEqual(z, 1)
+
+    def test_probe_floor_and_pause(self) -> None:
+        from massing_explorer.explore.p_pool import (
+            PROBE_FLOOR,
+            _record_probe_progress,
+            p_needs_discovery_probe,
+        )
+
+        class _M:
+            def __init__(self, mid: str) -> None:
+                self.id = mid
+                self.story_count = 2
+                self.name = mid
+                self.departments = ["A"]
+
+        class _S:
+            def __init__(self) -> None:
+                self.masses = [_M("a"), _M("b")]
+                self.constraints = {
+                    "loading": "double",
+                    "cover_envelope": "balanced",
+                    "cover_plate_profile": "uniform",
+                    "explore": {},
+                }
+
+        entry: dict = {"status": "unresolved"}
+        session = _S()
+        self.assertTrue(p_needs_discovery_probe(entry))
+        # Flat high-distance probes fill the floor then pause.
+        for i, env in enumerate(("balanced", "compact", "elongated", "balanced")):
+            session.constraints["cover_envelope"] = env
+            session.constraints["loading"] = "double" if i < 2 else "single"
+            session.constraints["cover_plate_profile"] = "uniform" if i % 2 == 0 else "step"
+            _record_probe_progress(
+                entry,
+                session,
+                {"fits_limitations": False, "feasibility_distance": 0.9},
+            )
+        self.assertGreaterEqual(len(entry.get("probe_configs") or []), PROBE_FLOOR)
+        self.assertTrue(entry.get("probe_paused"))
+        self.assertFalse(p_needs_discovery_probe(entry))
+
+    def test_balance_indices_by_mass_count(self) -> None:
+        from massing_explorer.explore.p_pool import balance_indices_by_mass_count
+
+        partitions = [
+            {"groups": [{"departments": ["A"]}, {"departments": ["B"]}, {"departments": ["C"]}]},
+            {"groups": [{"departments": ["A"]}, {"departments": ["B"]}, {"departments": ["C"]}, {"departments": ["D"]}]},
+            {"groups": [{"departments": ["A"]}, {"departments": ["B"]}, {"departments": ["C"]}]},
+            {"groups": [{"departments": ["A"]}, {"departments": ["B"]}, {"departments": ["C"]}, {"departments": ["D"]}]},
+        ]
+
+        class _S:
+            constraints = {"p_constraints": {"mass_count_min": 3, "mass_count_max": 4}}
+
+        out = balance_indices_by_mass_count([0, 1, 2, 3], partitions, _S())
+        # Round-robin 3,4,3,4
+        self.assertEqual(out[0], 0)
+        self.assertEqual(out[1], 1)
+        self.assertEqual(out[2], 2)
+        self.assertEqual(out[3], 3)
+
 
 
 class ExpandTriggerTests(unittest.TestCase):

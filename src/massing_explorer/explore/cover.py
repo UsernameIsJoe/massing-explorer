@@ -26,12 +26,15 @@ from .partitions import (
 )
 from .p_pool import (
     active_partition_indices,
+    allocate_cover_step,
+    balance_indices_by_mass_count,
     bias_story_index_order,
     csp_leftover_partitions,
-    deepen_vs_expand_counts,
     demand_profile,
+    discovery_partition_indices,
     expand_p_pool,
     feasible_partition_indices,
+    informed_probe_recipe,
     partition_key,
     persist_pool_to_session,
     p_pool_summary,
@@ -279,6 +282,148 @@ def _append_partition_samples(
             )
         )
     return _canonicalize_samples(out)
+
+
+def _append_informed_probe_samples(
+    plan: CoverPlan,
+    *,
+    partition_indices: list[int],
+    n: int,
+    session: Any,
+    archive: dict[str, Any],
+) -> list[CoverSample]:
+    """
+    Protected discovery probes: distinct, constraint-informed configs per P.
+
+    Varies stories/loading/envelope/plate using demand, caps, and last failures.
+    """
+    if n <= 0 or not partition_indices or not plan.partitions:
+        return []
+    from .p_pool import ensure_p_pool, partition_key as pkey
+
+    pool = ensure_p_pool(archive)
+    s_n = max(1, len(plan.story_patterns))
+    t_n = max(1, len(plan.topologies))
+    loadings = list(plan.loadings or LOADINGS)
+    envelopes = list(plan.envelopes or ENVELOPES)
+    profiles = list(plan.plate_profiles or PLATE_PROFILES)
+    out: list[CoverSample] = []
+    seen: set[tuple] = set()
+    slot = 0
+    guard = 0
+    while len(out) < n and guard < n * 50:
+        guard += 1
+        i_p = partition_indices[slot % len(partition_indices)]
+        part = plan.partitions[i_p] or {}
+        groups = part.get("groups") or []
+        entry = (pool.get("entries") or {}).get(pkey(groups))
+        recipe = informed_probe_recipe(groups, session, entry, slot=slot)
+        order = bias_story_index_order(
+            plan.story_patterns,
+            demand_profile(groups, session),
+            preferred_stories=recipe.get("preferred_stories"),
+        ) or list(range(s_n))
+        # Deliberate spread: pick different story ranks for successive slots.
+        i_s = order[min(slot // max(1, len(partition_indices)), len(order) - 1) % len(order)]
+        if recipe.get("prefer_tall") and order:
+            i_s = order[min(slot % max(1, len(order) // 2 + 1), len(order) - 1)]
+        stories = plan.story_patterns[i_s % s_n]
+        loading = str(recipe.get("loading") or "double")
+        if loading not in loadings and loadings:
+            loading = loadings[0]
+        envelope = str(recipe.get("envelope") or "balanced")
+        if envelope not in envelopes and envelopes:
+            envelope = envelopes[slot % len(envelopes)]
+        plate = str(recipe.get("plate_profile") or "uniform")
+        if plate not in profiles and profiles:
+            plate = profiles[0]
+        topology = plan.topologies[min(slot, t_n - 1) % t_n]
+        key = (i_p, stories, topology, loading, envelope, plate)
+        slot += 1
+        if key in seen:
+            # Nudge story index to force distinctness.
+            i_s2 = order[(i_s + slot) % len(order)] if order else 0
+            stories = plan.story_patterns[i_s2 % s_n]
+            key = (i_p, stories, topology, loading, envelope, plate)
+            if key in seen:
+                continue
+        seen.add(key)
+        out.append(
+            CoverSample(
+                partition_index=i_p,
+                stories=stories,
+                topology=topology,
+                loading=loading,
+                envelope=envelope,
+                plate_profile=plate,
+                label=f"P{i_p}+probe{len(out)}",
+            )
+        )
+    return _canonicalize_samples(out)
+
+
+def _queue_discovery_and_deepen(
+    plan: CoverPlan,
+    archive: dict[str, Any],
+    session: Any,
+    *,
+    step: int,
+    new_idx: list[int] | None = None,
+) -> list[CoverSample]:
+    """Parallel discovery probes + feasible deepen + optional expand samples."""
+    discovery_idx = balance_indices_by_mass_count(
+        discovery_partition_indices(plan.partitions, archive),
+        plan.partitions,
+        session,
+    )
+    deepen_idx = unsaturated_feasible_partition_indices(plan.partitions, archive)
+    if not deepen_idx:
+        deepen_idx = feasible_partition_indices(plan.partitions, archive)
+    # How many distinct probes are still owed (approx).
+    from .p_pool import PROBE_FLOOR, ensure_p_pool, partition_key as pkey, probe_config_count
+
+    pool = ensure_p_pool(archive)
+    owed = 0
+    for i in discovery_idx:
+        groups = (plan.partitions[i] or {}).get("groups") or []
+        entry = (pool.get("entries") or {}).get(pkey(groups))
+        if entry and int(entry.get("near_miss_credit") or 0) > 0:
+            owed += int(entry.get("near_miss_credit") or 0)
+        else:
+            owed += max(0, PROBE_FLOOR - probe_config_count(entry))
+    discovery_n, deepen_n, expand_n = allocate_cover_step(
+        step,
+        archive,
+        discovery_needed=owed,
+        deepen_needed=len(deepen_idx),
+    )
+    extra: list[CoverSample] = []
+    if discovery_n and discovery_idx:
+        extra.extend(
+            _append_informed_probe_samples(
+                plan,
+                partition_indices=discovery_idx,
+                n=discovery_n,
+                session=session,
+                archive=archive,
+            )
+        )
+    if deepen_n and deepen_idx:
+        extra.extend(
+            _append_partition_samples(
+                plan, partition_indices=deepen_idx, n=deepen_n, session=session
+            )
+        )
+    expand_targets = list(new_idx or [])
+    if not expand_targets:
+        expand_targets = active_partition_indices(plan.partitions, archive)
+    if expand_n and expand_targets:
+        extra.extend(
+            _append_partition_samples(
+                plan, partition_indices=expand_targets, n=expand_n, session=session
+            )
+        )
+    return extra
 
 
 def _stratified_samples(
@@ -592,6 +737,8 @@ def run_cover(
 
     origin = archive_mod.capture(session)
     archive["stated_partition"] = partition_id(session)
+    # Cap nested geom_fanout inserts so COVER cannot overshoot max_attempts.
+    archive["_attempt_budget"] = int(max_attempts)
     plan = build_cover_plan(session, pool_size=max_attempts)
     seed_p_pool(archive, plan.partitions, source="initial")
     persist_pool_to_session(session, archive)
@@ -722,31 +869,10 @@ def run_cover(
                     old_n = len(plan.partitions)
                     plan.partitions.extend(admitted)
                     new_idx = list(range(old_n, len(plan.partitions)))
-                    active = active_partition_indices(plan.partitions, archive)
                     remaining = max_attempts - int(archive.get("attempts") or 0)
                     step = min(step_small, remaining)
-                    deepen_n, expand_n = deepen_vs_expand_counts(step, archive)
-                    deepen_idx = unsaturated_feasible_partition_indices(
-                        plan.partitions, archive
-                    )
-                    if not deepen_idx:
-                        deepen_idx = feasible_partition_indices(plan.partitions, archive) or active
-                    extra: list[CoverSample] = []
-                    extra.extend(
-                        _append_partition_samples(
-                            plan,
-                            partition_indices=deepen_idx,
-                            n=deepen_n,
-                            session=session,
-                        )
-                    )
-                    extra.extend(
-                        _append_partition_samples(
-                            plan,
-                            partition_indices=new_idx,
-                            n=max(expand_n, 1),
-                            session=session,
-                        )
+                    extra = _queue_discovery_and_deepen(
+                        plan, archive, session, step=step, new_idx=new_idx
                     )
                     plan.samples.extend(extra)
                     archive["cover_plan"]["partitions"] = len(plan.partitions)
@@ -764,6 +890,7 @@ def run_cover(
         if remaining <= 0:
             break
         # Opportunistic P expansion while still discovering.
+        queued = False
         if (
             should_expand_p_pool(archive, session)
             and len(plan.partitions) < P_POOL_SOFT_MAX
@@ -778,28 +905,29 @@ def run_cover(
                 old_n = len(plan.partitions)
                 plan.partitions.extend(admitted)
                 new_idx = list(range(old_n, len(plan.partitions)))
-                deepen_n, expand_n = deepen_vs_expand_counts(min(step, remaining), archive)
-                active = active_partition_indices(plan.partitions, archive)
-                deepen_idx = unsaturated_feasible_partition_indices(
-                    plan.partitions, archive
-                )
-                if not deepen_idx:
-                    deepen_idx = feasible_partition_indices(plan.partitions, archive) or active
                 plan.samples.extend(
-                    _append_partition_samples(
-                        plan, partition_indices=deepen_idx, n=deepen_n, session=session
-                    )
-                )
-                plan.samples.extend(
-                    _append_partition_samples(
-                        plan, partition_indices=new_idx, n=expand_n, session=session
+                    _queue_discovery_and_deepen(
+                        plan,
+                        archive,
+                        session,
+                        step=min(step, remaining),
+                        new_idx=new_idx,
                     )
                 )
                 archive["cover_plan"]["partitions"] = len(plan.partitions)
                 archive["cover_plan"]["p_pool"] = p_pool_summary(archive)
+                queued = True
+        if not queued:
+            # Still run discovery alongside deepen even when no new P is admitted.
+            plan.samples.extend(
+                _queue_discovery_and_deepen(
+                    plan, archive, session, step=min(step, remaining), new_idx=None
+                )
+            )
         batches.append(run_batch(min(step, remaining), f"expand+{step}"))
 
     archive_mod.restore_snapshot(session, origin)
+    archive.pop("_attempt_budget", None)
     pool_exhausted = cursor >= len(plan.samples) and len(plan.samples) < max_attempts
     incomplete = ((not stagnant) and int(archive.get("attempts") or 0) >= max_attempts) or (
         pool_exhausted and not stagnant and int(batches[-1].get("new_regions") or 0) > 0
