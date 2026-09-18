@@ -17,6 +17,7 @@ sets partition_locked.
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Callable
 from typing import Any
 
 from ..group import _family_of, _title
@@ -34,18 +35,36 @@ UI_PARTITION_CAP = 5  # human-facing CSP board / report shortlist
 MAX_ENUM = 25000  # practical ceiling; truncated=True when hit
 
 
-def describe_csp(session: Any, cap: int = UI_PARTITION_CAP) -> dict[str, Any]:
-    """Report for the archive, planner, and the Phase 6 board (UI shortlist)."""
+def _csp_inputs(session: Any) -> dict[str, Any]:
+    """Atoms and P constraints shared by the UI report and the ordered stream."""
     locked = grouping_is_required(session)
     atoms = [] if locked else department_atoms(session)
     if not atoms:
         atoms = atoms_from_session(session)
     apart = list(required_apart(session))
-    together = required_together(session)
     alone = required_alone(session)
-    bounds = required_mass_bounds(session)
-    preferred = preferred_mass_count(session)
     apart.extend(_alone_as_apart(atoms, alone))
+    return {
+        "locked": locked,
+        "atoms": atoms,
+        "apart": apart,
+        "together": required_together(session),
+        "alone": alone,
+        "bounds": required_mass_bounds(session),
+        "preferred": preferred_mass_count(session),
+    }
+
+
+def describe_csp(session: Any, cap: int = UI_PARTITION_CAP) -> dict[str, Any]:
+    """Report for the archive, planner, and the Phase 6 board (UI shortlist)."""
+    inputs = _csp_inputs(session)
+    locked = inputs["locked"]
+    atoms = inputs["atoms"]
+    apart = inputs["apart"]
+    together = inputs["together"]
+    alone = inputs["alone"]
+    bounds = inputs["bounds"]
+    preferred = inputs["preferred"]
     if not atoms:
         return {
             "ran": True,
@@ -117,6 +136,34 @@ def describe_csp(session: Any, cap: int = UI_PARTITION_CAP) -> dict[str, Any]:
     }
 
 
+def ordered_partition_candidates(
+    session: Any,
+    *,
+    cap: int,
+    exclude: Callable[[list[dict[str, Any]]], bool] | None = None,
+) -> list[dict[str, Any]]:
+    """
+    The same coverage-ordered stream the CSP shortlist admits, for P-pool growth.
+
+    `exclude` marks partitions the caller already holds: they never take a seat,
+    but their relationship features count as covered, so expansion reaches for
+    organizations the pool is still missing instead of rank-tail neighbours.
+    """
+    inputs = _csp_inputs(session)
+    if inputs["locked"] or not inputs["atoms"] or cap <= 0:
+        return []
+    solved = solve_partitions(
+        inputs["atoms"],
+        apart=inputs["apart"],
+        together=inputs["together"],
+        cap=cap,
+        mass_bounds=inputs["bounds"],
+        preferred_mass_count=inputs["preferred"],
+        exclude=exclude,
+    )
+    return list(solved["chosen"])
+
+
 def solve_partitions(
     atoms: list[dict[str, Any]],
     apart: list[frozenset[str]] | None = None,
@@ -124,6 +171,7 @@ def solve_partitions(
     cap: int = UI_PARTITION_CAP,
     mass_bounds: tuple[int, int] | None = None,
     preferred_mass_count: int | None = None,
+    exclude: Callable[[list[dict[str, Any]]], bool] | None = None,
 ) -> dict[str, Any]:
     """Enumerate feasible partitions, then diversity-select up to `cap`."""
     glued = _glue(atoms, together or [])
@@ -174,6 +222,7 @@ def solve_partitions(
         k_min=k_min,
         k_max=k_max,
         preferred_mass_count=preferred,
+        exclude=exclude,
     )
 
     extra = " Enumeration stopped early." if truncated else ""
@@ -185,9 +234,9 @@ def solve_partitions(
     )
     note = (
         f"CSP: {len(feasible)} feasible partition(s) of {n} atom(s){bound}; "
-        f"shortlist {len(chosen)} with |P| quotas then relationship-family "
-        f"minimum seats (school bars / arts+academic / arts separate / other), "
-        f"quality refill after. "
+        f"shortlist {len(chosen)} with |P| quotas then relationship-feature "
+        f"coverage (art / media / admin placement, gym+dining isolation, "
+        f"academic cohesion, and their pairs), quality refill after. "
         f"Constraints filter P; they do not freeze it."
         f"{pref_note}{extra}"
     )
@@ -211,27 +260,35 @@ def _pick_shortlist(
     k_min: int,
     k_max: int,
     preferred_mass_count: int | None = None,
+    exclude: Callable[[list[dict[str, Any]]], bool] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Diversity-select up to `cap` from ranked feasible assignments.
 
     Two-level quotas against selection compression:
       1) fair shares across allowed |P|
-      2) within each |P|, *minimum representation* across relationship
-         families (school bars, arts+academic, arts separate, other),
+      2) within each |P|, greedy *relationship-feature coverage* — every
+         art / media / admin placement, gym+dining isolation and academic
+         cohesion value, plus the pairwise combinations of those values —
          then semantic-rank refill for quality depth
 
-    School prior ranks *inside* a family cell and for post-floor refill.
-    It does not choose which families appear on the shortlist.
+    School prior ranks *inside* a coverage cell and for post-coverage refill.
+    It does not choose which features appear on the shortlist.
     """
     if cap <= 0:
         return []
 
     buckets: dict[int, list[list[int]]] = {k: [] for k in range(k_min, k_max + 1)}
+    # Features the caller already holds still count as covered (pool growth).
+    seeded: dict[int, set[tuple[str, ...]]] = {k: set() for k in range(k_min, k_max + 1)}
     for assign in ranked:
         n_blocks = len(set(assign))
-        if n_blocks in buckets:
-            buckets[n_blocks].append(assign)
+        if n_blocks not in buckets:
+            continue
+        if exclude is not None and exclude(_from_atoms(atoms, assign, "")["groups"]):
+            seeded[n_blocks].update(_coverage_keys(atoms, assign))
+            continue
+        buckets[n_blocks].append(assign)
 
     active = [k for k in range(k_min, k_max + 1) if buckets.get(k)]
     if not active:
@@ -281,8 +338,7 @@ def _pick_shortlist(
         best_i = -1
         best_assign: list[int] | None = None
         for i, assign in enumerate(pool):
-            item = _from_atoms(atoms, assign, _reason(atoms, assign))
-            key = _signature(item["groups"])
+            key = _assign_signature(atoms, assign)
             if key in seen:
                 continue
             novelty = (
@@ -303,36 +359,19 @@ def _pick_shortlist(
         if quota <= 0 or not buckets[k]:
             continue
 
-        # Secondary strata: relationship families (not geometric distance).
-        by_family: dict[str, list[list[int]]] = {}
-        for assign in buckets[k]:
-            fam = _relationship_family(atoms, assign)
-            by_family.setdefault(fam, []).append(assign)
-
-        # Canonical order: guarantee alternate families before school_bars
-        # when seats are scarce.
-        family_keys = [
-            f for f in _RELATIONSHIP_FAMILIES if f in by_family
-        ] + sorted(f for f in by_family if f not in _RELATIONSHIP_FAMILIES)
-        family_available = {f: len(by_family[f]) for f in family_keys}
-
-        # Minimum representation: one seat per present family when quota
-        # allows; if quota < #families, fair-share scarce seats (alts first).
-        floor_budget = min(len(family_keys), quota)
-        family_floors = _stratum_quotas(
-            family_keys,
-            floor_budget,
-            preferred=None,
-            available=family_available,
-        )
-
-        for fam in family_keys:
-            need = int(family_floors.get(fam, 0) or 0)
-            bag = by_family[fam]
-            while need > 0 and bag and taken[k] < quota:
-                assign = bag.pop(0)
-                if push(assign):
-                    need -= 1
+        # Secondary strata: relationship-feature coverage (not coarse families,
+        # not geometric distance). Coverage runs before any rank refill so a
+        # school-bar basin cannot take every seat.
+        for assign in _feature_coverage_order(
+            atoms,
+            buckets[k],
+            limit=quota - taken[k],
+            skip=seen,
+            covered=seeded.get(k),
+        ):
+            if taken[k] >= quota:
+                break
+            push(assign)
 
         # Remaining seats: semantic-rank refill (quality depth), then distance.
         for assign in buckets[k]:
@@ -340,11 +379,7 @@ def _pick_shortlist(
                 break
             push(assign)
 
-        leftovers = [
-            a
-            for a in buckets[k]
-            if _signature(_from_atoms(atoms, a, _reason(atoms, a))["groups"]) not in seen
-        ]
+        leftovers = [a for a in buckets[k] if _assign_signature(atoms, a) not in seen]
         while taken[k] < quota and leftovers:
             picked = farthest_in_pool(leftovers, chosen_by_k.get(k) or [])
             if picked is None:
@@ -363,8 +398,7 @@ def _pick_shortlist(
         for k in active:
             peers = chosen_by_k.get(k) or []
             for i, cand in enumerate(buckets[k]):
-                item = _from_atoms(atoms, cand, _reason(atoms, cand))
-                key = _signature(item["groups"])
+                key = _assign_signature(atoms, cand)
                 if key in seen:
                     continue
                 novelty = (
@@ -560,19 +594,207 @@ def _block_motif(atoms: list[dict[str, Any]], assign: list[int]) -> tuple[str, .
     )
 
 
-_RELATIONSHIP_FAMILIES: tuple[str, ...] = (
-    "arts_with_academic",
-    "arts_separate",
-    "other",
-    "school_bars",
+def _gym_dining_role(atoms: list[dict[str, Any]], assign: list[int]) -> str:
+    """Whether dining+athletics hold a mass of their own (the isolated bar)."""
+    idxs = [i for i, a in enumerate(atoms) if _families(a) & {"athletics", "dining"}]
+    if not idxs:
+        return "absent"
+    blocks = {assign[i] for i in idxs}
+    if len(blocks) > 1:
+        return "split"
+    block = next(iter(blocks))
+    riders = [i for i, b in enumerate(assign) if b == block and i not in set(idxs)]
+    return "shared" if riders else "isolated"
+
+
+def _academic_cohesion(atoms: list[dict[str, Any]], assign: list[int]) -> str:
+    """Whether the academic family (core + special ed) keeps one wing."""
+    idxs = [i for i, a in enumerate(atoms) if "academic" in _families(a)]
+    if not idxs:
+        return "absent"
+    if len(idxs) < 2:
+        return "single"
+    return "together" if len({assign[i] for i in idxs}) == 1 else "split"
+
+
+_RELATIONSHIP_FEATURES: tuple[str, ...] = (
+    "art",
+    "media",
+    "admin",
+    "gym_dining",
+    "academic",
 )
+
+# Placement roles: their joint motif is the cell the four coarse families
+# collapsed, so it earns a coverage pass of its own on top of singles/pairs.
+_ROLE_FEATURES: tuple[str, ...] = ("art", "media", "admin")
+
+
+def _relationship_features(
+    atoms: list[dict[str, Any]], assign: list[int]
+) -> dict[str, str]:
+    """
+    Generic relationship features the shortlist must cover.
+
+    Where art, media, and admin sit; whether dining+athletics keep their own
+    mass; whether the academic family stays cohesive. Token matching only —
+    no hardcoded groupings, so the same features read any program.
+    """
+    if not atoms or not assign or len(atoms) != len(assign):
+        return {}
+    art, media, admin = _block_motif(atoms, assign)
+    return {
+        "art": art,
+        "media": media,
+        "admin": admin,
+        "gym_dining": _gym_dining_role(atoms, assign),
+        "academic": _academic_cohesion(atoms, assign),
+    }
+
+
+def _coverage_keys(
+    atoms: list[dict[str, Any]], assign: list[int]
+) -> tuple[tuple[str, ...], ...]:
+    """
+    Individual feature values, pairwise combinations, and the art/media/admin
+    motif triple (the cell that used to collapse under four coarse families).
+    """
+    feats = _relationship_features(atoms, assign)
+    names = [f for f in _RELATIONSHIP_FEATURES if feats.get(f)]
+    keys: list[tuple[str, ...]] = [(f, feats[f]) for f in names]
+    for i, left in enumerate(names):
+        for right in names[i + 1 :]:
+            keys.append((left, feats[left], right, feats[right]))
+    if all(feats.get(f) for f in _ROLE_FEATURES):
+        keys.append(("motif", feats["art"], feats["media"], feats["admin"]))
+    return tuple(keys)
+
+
+def _round_robin(
+    bags: dict[Any, list[Any]], order: list[Any]
+) -> list[Any]:
+    """
+    One entry per group per round, so no feature (or pair) hogs the seats.
+
+    Rare values of a feature rank late; without this the walk would spend the
+    quota on whichever feature happened to vary first.
+    """
+    keys = [k for k in order if bags.get(k)]
+    out: list[Any] = []
+    depth = 0
+    while True:
+        added = False
+        for key in keys:
+            bag = bags[key]
+            if depth < len(bag):
+                out.append(bag[depth])
+                added = True
+        if not added:
+            return out
+        depth += 1
+
+
+def _feature_coverage_order(
+    atoms: list[dict[str, Any]],
+    pool: list[list[int]],
+    *,
+    limit: int,
+    skip: set[frozenset[frozenset[str]]] | None = None,
+    covered: set[tuple[str, ...]] | None = None,
+) -> list[list[int]]:
+    """
+    Seat relationship-feature coverage before any school-prior refill.
+
+    Critical art×media×admin motifs (art alone / art-on-academic) get seats
+    first — two admin variants per (art, media) — so rare basins are not
+    buried under school-bar singles. Structural features, remaining motifs,
+    leftover placement values, and pairs follow.
+
+    Each uncovered target takes the best-ranked candidate that carries it.
+    Motif triples are not retired by collateral singles/pairs.
+    """
+    if limit <= 0 or not pool:
+        return []
+    taken = set(skip or ())
+    cands: list[tuple[list[int], tuple[tuple[str, ...], ...]]] = []
+    for assign in pool:
+        if _assign_signature(atoms, assign) in taken:
+            continue
+        cands.append((assign, _coverage_keys(atoms, assign)))
+    if not cands:
+        return []
+
+    by_feature: dict[str, list[tuple[str, ...]]] = {}
+    by_pair: dict[tuple[str, str], list[tuple[str, ...]]] = {}
+    motifs: list[tuple[str, ...]] = []
+    known: set[tuple[str, ...]] = set()
+    for _assign, keys in cands:
+        for key in keys:
+            if key in known:
+                continue
+            known.add(key)
+            if key and key[0] == "motif":
+                motifs.append(key)
+            elif len(key) == 2:
+                by_feature.setdefault(key[0], []).append(key)
+            else:
+                by_pair.setdefault((key[0], key[2]), []).append(key)
+
+    role_pairs = [
+        (left, right)
+        for i, left in enumerate(_ROLE_FEATURES)
+        for right in _ROLE_FEATURES[i + 1 :]
+    ]
+    other_pairs = [
+        (left, right)
+        for i, left in enumerate(_RELATIONSHIP_FEATURES)
+        for right in _RELATIONSHIP_FEATURES[i + 1 :]
+        if (left, right) not in role_pairs
+    ]
+
+    # Motif cells bucketed by art placement, so a rare basin is not buried
+    # under the cousins that share the most common placement.
+    motifs_by_art: dict[str, list[tuple[str, ...]]] = {}
+    for key in motifs:
+        motifs_by_art.setdefault(key[1], []).append(key)
+
+    # Every feature value first: a handful of picks covers all of them, so
+    # gym+dining isolation and academic cohesion are never starved by the
+    # twelve placement values. Motif cells next for combination depth, then
+    # the pairs, which pool expansion keeps walking after the shortlist fills.
+    targets = _round_robin(by_feature, list(_RELATIONSHIP_FEATURES))
+    targets += _round_robin(motifs_by_art, list(motifs_by_art))
+    targets += _round_robin(by_pair, role_pairs)
+    targets += _round_robin(by_pair, other_pairs)
+
+    done = set(covered or ())
+    picked: list[list[int]] = []
+    used: set[int] = set()
+    for target in targets:
+        if len(picked) >= limit:
+            break
+        if target in done:
+            continue
+        for i, (assign, keys) in enumerate(cands):
+            if i in used or target not in keys:
+                continue
+            used.add(i)
+            for key in keys:
+                if key and key[0] == "motif" and key != target:
+                    continue
+                done.add(key)
+            picked.append(assign)
+            break
+    return picked
 
 
 def _relationship_family(atoms: list[dict[str, Any]], assign: list[int]) -> str:
     """
-    Secondary shortlist stratum: coarse organizational family.
+    Coarse organizational label for reports and diagnostics.
 
-    Explicit families (not partition distance, not school-prior score):
+    Shortlist seats come from `_relationship_features` coverage, not from these
+    four buckets — they collapse too many distinct organizations into one cell.
+    Families (not partition distance, not school-prior score):
       - school_bars
       - arts_with_academic
       - arts_separate
@@ -833,6 +1055,16 @@ def _signature(groups: list[dict[str, Any]]) -> frozenset[frozenset[str]]:
     return frozenset(frozenset(str(d) for d in g["departments"]) for g in groups)
 
 
+def _assign_signature(
+    atoms: list[dict[str, Any]], assign: list[int]
+) -> frozenset[frozenset[str]]:
+    """Same signature as `_signature`, without building the group payloads."""
+    blocks: dict[int, set[str]] = defaultdict(set)
+    for i, atom in enumerate(atoms):
+        blocks[assign[i]].update(str(d) for d in atom["departments"])
+    return frozenset(frozenset(b) for b in blocks.values())
+
+
 def _families(atom: dict[str, Any]) -> set[str]:
     return {_family_of(d) for d in atom["departments"]}
 
@@ -917,6 +1149,10 @@ def _shape_bonus(atoms: list[dict[str, Any]], assign: list[int]) -> float:
         bonus -= 1.5
     if ath and len({assign[i] for i in ath}) == 1:
         bonus += 2.0
+        # In the school-bars prior the athletics+dining bar *is* its own bar:
+        # a double-height gym does not host classrooms or offices.
+        if _gym_dining_role(atoms, assign) == "isolated":
+            bonus += 1.5
     if academic and arts:
         acad_block = assign[academic[0]]
         if all(assign[i] != acad_block for i in arts):

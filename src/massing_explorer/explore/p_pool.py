@@ -14,6 +14,7 @@ story/width configuration:
 
 from __future__ import annotations
 
+from itertools import zip_longest
 from typing import Any
 
 from .partitions import (
@@ -646,18 +647,20 @@ def expand_p_pool(
         admitted.append(payload)
         return True
 
-    # Prefer local moves that unload overloaded ground masses.
+    # Local moves unload overloaded ground masses; CSP picks carry the
+    # shortlist's relationship-feature coverage. Interleave so neither source
+    # can swallow the whole batch.
     local = local_partition_candidates(session, limit=max(8, want * 3))
     local = _rank_local_by_demand(session, archive, local)
-    for item in local:
+    for from_csp, from_local in zip_longest(csp_leftovers or [], local):
         if len(admitted) >= want:
             break
-        try_add(item, "expand_local")
-
-    for item in csp_leftovers or []:
+        if from_csp is not None:
+            try_add(from_csp, "expand_csp")
         if len(admitted) >= want:
             break
-        try_add(item, "expand_csp")
+        if from_local is not None:
+            try_add(from_local, "expand_local")
 
     if admitted:
         pool["expansions"].append(
@@ -1085,18 +1088,20 @@ def csp_leftover_partitions(
     *,
     limit: int = 20,
 ) -> list[dict[str, Any]]:
-    """Extra CSP shortlist picks not yet in the pool (for expansion)."""
-    from .csp import describe_csp
+    """
+    Next picks from the *same* ordered CSP stream the shortlist admitted.
 
-    # Ask for more than the initial band so leftovers exist.
-    report = describe_csp(session, cap=min(P_POOL_SOFT_MAX, max(COVER_PARTITION_MAX + 10, limit + 10)))
-    out: list[dict[str, Any]] = []
-    for item in report.get("chosen") or []:
-        groups = item.get("groups") or []
-        key = partition_key(groups)
-        if key in known_keys:
-            continue
-        out.append(item)
-        if len(out) >= limit:
-            break
-    return out
+    Expansion reuses the shortlist's relationship-feature coverage with what
+    the pool already holds marked as covered, so growth reaches organizations
+    the pool is missing rather than the rank tail of ones it has.
+    """
+    from .csp import ordered_partition_candidates
+
+    want = max(0, int(limit))
+    if want <= 0:
+        return []
+    return ordered_partition_candidates(
+        session,
+        cap=min(P_POOL_SOFT_MAX, max(COVER_PARTITION_MAX, want)),
+        exclude=lambda groups: partition_key(groups) in known_keys,
+    )[:want]

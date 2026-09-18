@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import tempfile
 import unittest
 from collections import Counter
+from pathlib import Path
 from types import SimpleNamespace
 
 from massing_explorer.explore.cover import CoverSample, _canonicalize_samples, _sample_distance
@@ -17,6 +19,17 @@ from massing_explorer.massing_models import ValidationCheck
 
 def _mass(mid: str, depts: list[str], stories: int = 2):
     return SimpleNamespace(id=mid, name=mid, departments=list(depts), story_count=stories)
+
+
+def _flatten(item: dict) -> tuple[list[dict], list[int]]:
+    """One atom per department plus its block index, for feature helpers."""
+    atoms: list[dict] = []
+    assign: list[int] = []
+    for bi, group in enumerate(item.get("groups") or []):
+        for dept in group.get("departments") or []:
+            atoms.append({"departments": [dept]})
+            assign.append(bi)
+    return atoms, assign
 
 
 class TestPartitionConstraints(unittest.TestCase):
@@ -456,9 +469,34 @@ class TestCoverPartitionBudget(unittest.TestCase):
         self.assertEqual(_relationship_family(atoms, school), "school_bars")
         self.assertEqual(_relationship_family(atoms, art_on_aca), "arts_with_academic")
 
-    def test_shortlist_reserves_family_minimum_seats(self) -> None:
-        """|P| then relationship-family minimum seats must cover alternate orgs."""
-        from massing_explorer.explore.csp import _relationship_family
+    def test_relationship_features_read_gym_and_academic_cohesion(self) -> None:
+        """Isolation and cohesion come from families, not department strings."""
+        from massing_explorer.explore.csp import _relationship_features
+
+        atoms = [
+            {"departments": ["CORE ACADEMIC"]},
+            {"departments": ["SPECIAL EDUCATION"]},
+            {"departments": ["ART & MUSIC"]},
+            {"departments": ["ADMINISTRATION & GUIDANCE"]},
+            {"departments": ["DINING & FOOD SERVICE", "HEALTH & PHYSICAL EDUCATION"]},
+            {"departments": ["MEDIA CENTER"]},
+            {"departments": ["MEDICAL"]},
+            {"departments": ["CUSTODIAL & MAINTENANCE"]},
+        ]
+        isolated = _relationship_features(atoms, [0, 0, 1, 1, 2, 0, 1, 1])
+        self.assertEqual(isolated["gym_dining"], "isolated")
+        self.assertEqual(isolated["academic"], "together")
+        shared = _relationship_features(atoms, [0, 0, 1, 1, 2, 0, 1, 2])
+        self.assertEqual(shared["gym_dining"], "shared")
+        split = _relationship_features(atoms, [0, 1, 1, 1, 2, 0, 1, 1])
+        self.assertEqual(split["academic"], "split")
+
+    def test_shortlist_covers_relationship_features_not_four_families(self) -> None:
+        """Secondary seats are feature coverage, so no basin monopolizes them."""
+        from massing_explorer.explore.csp import (
+            _relationship_features,
+            _relationship_family,
+        )
 
         depts = [
             "CORE ACADEMIC",
@@ -488,37 +526,261 @@ class TestCoverPartitionBudget(unittest.TestCase):
         report = describe_csp(session, cap=20)
         chosen = report.get("chosen") or []
         self.assertGreaterEqual(len(chosen), 8)
-        families: list[str] = []
-        for item in chosen:
-            groups = item.get("groups") or []
-            flat_atoms = []
-            assign = []
-            for bi, g in enumerate(groups):
-                for d in g.get("departments") or []:
-                    flat_atoms.append({"departments": [d]})
-                    assign.append(bi)
-            families.append(_relationship_family(flat_atoms, assign))
-        counts = Counter(families)
-        self.assertGreaterEqual(
-            len(counts),
-            2,
-            msg=f"expected multiple relationship families; got {counts}",
+        features = [_relationship_features(*_flatten(item)) for item in chosen]
+
+        # Every placement feature must show more than one value. Structural
+        # gym+dining must too; academic cohesion is often uniformly "together"
+        # on school programs and only needs a seat when split variants exist.
+        for name in ("art", "media", "admin", "gym_dining"):
+            values = Counter(f[name] for f in features)
+            self.assertGreaterEqual(
+                len(values), 2, msg=f"{name} collapsed to one value: {values}"
+            )
+            self.assertLess(
+                max(values.values()),
+                len(chosen),
+                msg=f"{name} monopolized by one value: {values}",
+            )
+        academic_values = {f["academic"] for f in features}
+        self.assertTrue(
+            academic_values,
+            msg="academic cohesion feature missing",
         )
-        self.assertGreaterEqual(
-            int(counts.get("arts_with_academic", 0) or 0),
-            1,
-            msg=f"expected arts+academic minimum seat; families={counts}",
+
+        # Each placement feature reaches the basins that matter; athletics
+        # riders are optional on small shortlists after motif-first seating.
+        for name in ("art", "media", "admin"):
+            values = {f[name] for f in features}
+            self.assertEqual(
+                values,
+                {"with_academic", "alone", "with_athletics", "other"},
+                msg=f"{name} placements missing from shortlist: {sorted(values)}",
+            )
+        self.assertIn("isolated", {f["gym_dining"] for f in features})
+
+        # Combinations, not just marginals. The coarse taxonomy has four
+        # buckets; feature coverage must beat that by a wide margin.
+        families = Counter(_relationship_family(*_flatten(item)) for item in chosen)
+        motifs = {(f["art"], f["media"], f["admin"]) for f in features}
+        self.assertGreater(
+            len(motifs),
+            2 * len(families),
+            msg=f"{len(motifs)} motifs vs {len(families)} families: {sorted(motifs)}",
         )
-        self.assertGreaterEqual(
-            int(counts.get("arts_separate", 0) or 0),
-            1,
-            msg=f"expected arts-separate minimum seat; families={counts}",
-        )
-        school_n = int(counts.get("school_bars", 0) or 0)
         self.assertLess(
-            school_n,
+            max(families.values()),
             len(chosen),
-            msg=f"school_bars must not take every seat; families={counts}",
+            msg=f"one coarse family took every seat; families={families}",
+        )
+
+        # The two placements the four families collapsed must each be seated
+        # alongside an isolated gym+dining bar — the motifs that went missing.
+        for role in ("with_academic", "alone"):
+            self.assertTrue(
+                any(
+                    f["art"] == role and f["gym_dining"] == "isolated" for f in features
+                ),
+                msg=f"no art={role} seat with an isolated gym+dining bar",
+            )
+
+        # Motif cells keep their own representative, so most seats carry a
+        # distinct art×media×admin combination rather than repeating one basin.
+        self.assertGreaterEqual(
+            len(motifs),
+            len(chosen) // 2,
+            msg=f"{len(motifs)} motifs across {len(chosen)} seats: {sorted(motifs)}",
+        )
+        # Coverage reaches past marginals: several art placements are seated
+        # with more than one media/admin arrangement behind them.
+        multi = [
+            role
+            for role in {m[0] for m in motifs}
+            if len([m for m in motifs if m[0] == role]) > 1
+        ]
+        self.assertGreaterEqual(
+            len(multi),
+            2,
+            msg=f"only {multi} art placements carry several motifs: {sorted(motifs)}",
+        )
+        # Each placement value that the four families collapsed is seated in
+        # more than one motif, so the selector stays generic: no scripted
+        # partition or motif triple is required, only feature coverage.
+        for role in ("with_academic", "alone"):
+            self.assertIn(
+                role,
+                {m[0] for m in motifs},
+                msg=f"no art={role} motif; have {sorted(motifs)}",
+            )
+
+    def test_pool_expansion_reuses_the_shortlist_ordering(self) -> None:
+        """P-pool growth pulls the same stream, minus what it already holds."""
+        from massing_explorer.explore.csp import (
+            _relationship_features,
+            ordered_partition_candidates,
+        )
+        from massing_explorer.explore.p_pool import (
+            csp_leftover_partitions,
+            partition_key,
+        )
+
+        depts = [
+            "CORE ACADEMIC",
+            "SPECIAL EDUCATION",
+            "ART & MUSIC",
+            "ADMINISTRATION & GUIDANCE",
+            "DINING & FOOD SERVICE",
+            "HEALTH & PHYSICAL EDUCATION",
+            "MEDIA CENTER",
+            "MEDICAL",
+            "CUSTODIAL & MAINTENANCE",
+        ]
+        session = SimpleNamespace(
+            masses=[_mass(f"m{i}", [d], 2) for i, d in enumerate(depts)],
+            constraints={
+                "p_constraints": {
+                    "together": [["DINING & FOOD SERVICE", "HEALTH & PHYSICAL EDUCATION"]],
+                    "apart": [],
+                    "alone": [],
+                    "mass_count_min": 3,
+                    "mass_count_max": 4,
+                }
+            },
+            department_names=lambda: list(depts),
+        )
+        shortlist = ordered_partition_candidates(session, cap=12)
+        self.assertEqual(len(shortlist), 12)
+        known = {partition_key(item["groups"]) for item in shortlist}
+
+        leftovers = csp_leftover_partitions(session, known, limit=8)
+        self.assertEqual(len(leftovers), 8)
+        # Never re-admits what the pool holds.
+        for item in leftovers:
+            self.assertNotIn(partition_key(item["groups"]), known)
+        # Still feature-ordered, not the raw rank tail.
+        motifs = {
+            _relationship_features(*_flatten(item))["art"] for item in leftovers
+        }
+        self.assertGreaterEqual(len(motifs), 2, msg=f"art placements={motifs}")
+
+
+ROOT = Path(__file__).resolve().parents[1]
+GSF_TWEAKED = ROOT / "examples" / "Underwood_Elementary_Space_Summary_GSF_Tweaked.xlsx"
+CONFIG = ROOT / "config" / "project.example.yaml"
+
+# Same brief and GSF as _diag_realize_step1.BRIEF_34.
+BRIEF_34 = (
+    "3-4 masses, max 3 floors. length max 60 meters. gym and dining together and "
+    "double height. art and music prefer on ground floor. media prefer on top "
+    "floor above admin. admin have to be on ground floor. core academic and "
+    "special ed width has to be 80 feet. mass ratio have to be between 2:5 and "
+    "5:8. prefer 3 floors."
+)
+
+
+def _story_patterns(n: int) -> list[tuple[int, ...]]:
+    """Uniform and one-tall-bar stackings — the usual school moves."""
+    out = [tuple([2] * n), tuple([1] * n)]
+    for i in range(n):
+        out.append(tuple(3 if j == i else 1 for j in range(n)))
+        out.append(tuple(3 if j == i else 2 for j in range(n)))
+    return out
+
+
+@unittest.skipUnless(GSF_TWEAKED.is_file(), "tweaked Underwood GSF not available")
+class UnderwoodShortlistYieldTests(unittest.TestCase):
+    """
+    The 3–4 mass Underwood brief must admit several *legal* organizations.
+
+    Diversity is worthless if none of it can be built, so this walks the
+    shortlist COVER would search and realizes each entry over a bounded
+    stacking sweep. It guards the selector, not the search allocation.
+    """
+
+    def setUp(self) -> None:
+        import massing_explorer.session as session_mod
+
+        self._orig = session_mod.STUDIES_DIR
+        self.tmp = tempfile.TemporaryDirectory()
+        session_mod.STUDIES_DIR = Path(self.tmp.name) / "studies"
+
+    def tearDown(self) -> None:
+        import massing_explorer.session as session_mod
+
+        session_mod.STUDIES_DIR = self._orig
+        self.tmp.cleanup()
+
+    def test_brief_34_shortlist_admits_four_legal_organizations(self) -> None:
+        from massing_explorer.brief import apply_brief
+        from massing_explorer.explore.partitions import (
+            apply_partition,
+            cover_partition_budget,
+            enumerate_partitions,
+        )
+        from massing_explorer.explore.realize import realize
+        from massing_explorer.load import load_program_file
+        from massing_explorer.session import StudySession
+
+        program = load_program_file(GSF_TWEAKED, config_path=CONFIG)
+        session = StudySession(
+            study_id="brief34_shortlist", program=program, config_path=str(CONFIG)
+        )
+        # Parse the brief only: the search itself is not under test here.
+        session.constraints["cover_budget"] = {
+            "start": 0,
+            "step_small": 0,
+            "step_large": 0,
+            "max": 0,
+        }
+        session.constraints["explore_budget"] = {
+            "mcts_sims": 0,
+            "mcts_depth": 0,
+            "mcts_roots": 0,
+            "bo": 0,
+            "refine": 0,
+            "repair": 0,
+        }
+        session.save()
+        apply_brief(session, BRIEF_34)
+
+        shortlist = enumerate_partitions(session, cap=cover_partition_budget(session))
+        self.assertGreaterEqual(len(shortlist), 12)
+
+        legal: set[str] = set()
+        for item in shortlist:
+            for pattern in _story_patterns(len(item["groups"])):
+                apply_partition(
+                    session,
+                    [
+                        {
+                            "id": f"m{i}",
+                            "name": f"M{i}",
+                            "departments": list(group["departments"]),
+                            "story_count": int(stories),
+                        }
+                        for i, (group, stories) in enumerate(
+                            zip(item["groups"], pattern)
+                        )
+                    ],
+                )
+                for mass in session.masses:
+                    session.constraints.pop(f"{mass.id}_width_ft", None)
+                (session.constraints.get("explore") or {}).pop("realize_cache", None)
+                _result, perf = realize(session)
+                if perf.get("fits_limitations"):
+                    legal.add(
+                        " | ".join(
+                            sorted(
+                                "+".join(sorted(str(d) for d in g["departments"]))
+                                for g in item["groups"]
+                            )
+                        )
+                    )
+                    break
+
+        self.assertGreaterEqual(
+            len(legal),
+            4,
+            msg=f"only {len(legal)} legal organization(s) in the shortlist: {legal}",
         )
 
 
