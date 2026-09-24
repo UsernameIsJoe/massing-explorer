@@ -5,6 +5,28 @@ Update this file at the end of every work session.
 
 ---
 
+## 2026-09-24 — Docs: purpose, direction, novelty, fit/drift
+
+### Done
+
+- Locked the **self-aware strategic search** thesis in
+  [CONCEPT.md](CONCEPT.md) (purpose, novelty, project law) and
+  [BLUEPRINT-search.md](BLUEPRINT-search.md) (MAP→…→STOP loop, region ledger,
+  Priority(R), **evaluation fit/drift table**, next work = ledger + controller).
+- [DECISIONS.md](DECISIONS.md), [README.md](../README.md), [WORKFLOW.md](WORKFLOW.md)
+  updated to match; direction lock: no more Underwood-only scheduling piles
+  without a shared search policy.
+- Earlier same day: round-robin per-P COVER floor + feas blend (`ffcdfc8`);
+  COVER-only ~6 orgs / full ~7 orgs / 3-mass 11 on Underwood vs 53c — good
+  scoreboard, still heuristic causal story (called out in BLUEPRINT evaluation).
+
+### Next steps
+
+- Region ledger + search controller (architectural), not more local knobs.
+- When changing search policy, report COVER-only and full-pipeline separately.
+
+---
+
 ## 2026-09-24 — Checkpoint: org collection (multi-org COVER yield)
 
 ### Done

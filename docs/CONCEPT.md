@@ -1,109 +1,162 @@
 # Concept
 
-Updated 16 Sep 2026. Project law is [BLUEPRINT-search.md](BLUEPRINT-search.md).
-This page is the product idea in plain language. Day-to-day steps:
-[WORKFLOW.md](WORKFLOW.md). Studio UI: [UI.md](UI.md).
+Updated 24 Sep 2026. Project law and search constitution:
+[BLUEPRINT-search.md](BLUEPRINT-search.md). Day-to-day steps:
+[WORKFLOW.md](WORKFLOW.md). Studio UI: [UI.md](UI.md). Fit / drift evaluation:
+[BLUEPRINT-search.md § Evaluation](BLUEPRINT-search.md#evaluation-fit-and-drift).
 
 ---
 
-## What this is
+## Purpose
 
-Massing Explorer turns a program spreadsheet into conceptual masses that have
-been dimensionally tested. It exists to make the architect smarter about the
-**design problem**: which legal strategies exist, which near-feasible ideas can
-be repaired into the same concept, which regions of the archive are empty and
-why, which brief clauses collapsed the feasible set.
+Massing Explorer is a **self-aware strategic search system**.
 
-It is not merely “Option 17.” It is not `prompt → AI shape`. It is not
-`parameters → optimizer → shape`.
+Given a finite but exhausting design space, hard constraints, soft preferences,
+and limited computation, it decides **where to look**, **how deeply to search**,
+**when to step back**, and **what uncertainty remains** — then proposes the
+best-supported strategies with **explicit trade-offs and confidence**.
 
-Architecture is a sequence of semantic decisions an LLM can reason about.
-Computation proves whether those decisions can become buildings:
+It does not need to see every point. It needs to **understand the structure of
+the space**:
 
 ```
-language reasoning
-    → design actions
-    → constraint / massing engine
-    → performance evidence
-    → reasoning again
+All possible schemes
+        ↓
+Organize into meaningful strategic regions
+        ↓
+Eliminate regions contradicted by hard constraints
+        ↓
+Probe representatives from every important region
+        ↓
+Learn which regions are feasible and promising
+        ↓
+Focus computation inside strong regions
+        ↓
+Periodically audit neglected regions
+        ↓
+Return to them when evidence or inputs change
 ```
 
-The LLM proposes. The engine owns geometry, GSF, pairing, L-shape/voids, and
-checks. Never trust the LLM for arithmetic.
-
-You can drive the same loop from **chat** or the **studio UI** (drop Excel,
-type a brief, Generate, browse the archive, click A/B preferences).
+It should not merely ask “what is the highest score I have seen?” It should
+ask: **what evidence supports this direction, what alternatives remain
+plausible, what did I skip, and what could overturn my current conclusion?**
 
 ---
 
-## Three roles in every brief clause
+## Novelty — what this is not
 
-| Role | Meaning | Example |
-|------|---------|---------|
-| **Requirement** | Must happen. Locked. | Three masses. Gym with dining. |
-| **Limitation** | A cap to check. Never a length to draw. | Max 60 m edge. At most 3 stories. |
-| **Preference** | Desired. May be met more than one way. | Prefer 3 floors. Art on the ground floor. |
+| Not this | Why |
+|----------|-----|
+| Parametric form generator | Feet are not the chromosome |
+| CAD automation / Rhino driver | Engine proves strategy; export is secondary |
+| LLM controlling geometry | LLM proposes typed actions; never owns arithmetic |
+| GA of visually varied shapes | Population ≠ structured strategic regions |
+| Brute-force optimizer | Finite space is mapped and sampled, not exhaustively scored |
 
-A ground-floor note is a **pin**, not its own mass. A later turn still cannot
-undo a required wing, pair masses so the length lands on the cap, or invent a
-dimension. Soft preferences (including “prefer N floors”) bias search; they do
-not replace hard gates.
+The pioneering claim is **search intelligence over a structured strategy
+space** — map, probe, focus, step back, explain — not any single algorithm
+(CSP, COVER, MCTS, BO) in isolation.
 
 ---
 
-## A strategy is not a width
+## Project law
 
-A strategy is a sequence of architectural decisions:
+> Massing Explorer does not attempt to inspect every possible form. It
+> structures the finite strategy space, eliminates what can be disproven,
+> samples what must be understood, focuses where evidence is strongest, and
+> continually monitors what it has deferred. It proposes the best-supported
+> strategies while explaining their trade-offs, search confidence, and the
+> conditions under which unexplored alternatives should be reopened.
+
+A probe floor, CSP quota, MCTS prior, BO kernel, or budget split is **good only
+if** it improves one of: understand the map; search it intelligently; remember
+what was skipped; know when to focus; know when to step back; explain why the
+conclusion is credible.
+
+---
+
+## Form follows strategy
+
+The search object is not arbitrary geometry. A strategy is a sequence of
+architectural decisions. In code and product language:
 
 ```
 S = (P, T, V, G, D)
 ```
 
-- **P — Program organization.** Mass count, who is together, who is apart.
-  Alternative partitions are proposed **only when the brief did not require a
-  grouping**. Search keeps a growing **P pool** (feasible / unresolved /
-  impossible on the organization), not a one-shot list of five.
-- **T — Topological strategy.** Only what layout can draw: independent bars,
-  paired bars, L leftover around a void. Courtyard, podium, and perpendicular
-  wings are named but unsupported until the drawing can realize them.
-- **V — Vertical strategy.** Ground pins, double-height, stacking from
-  allocation.
-- **G — Geometric realization.** Stories, shape family, loading, ratio. Feet
-  are filled by **`realize(s)`** after the strategy is set. A length cap is a
-  filter.
-- **D — Site disposition.** The stated rectangle and frontage. Streets,
-  neighbors, topography, and EnergyPlus wait until those inputs exist.
+COVER’s joint sample axes (stories, loading, envelope, plate profile) sit
+inside **G** (and related vertical / geometric levers). Equivalently, a
+realized search point can be written \(s = (P, S, T, L, E, F)\) then
+
+\[
+D^* = \operatorname{Realize}(s)
+\]
+
+Form and dimensions are the **deterministic realization** of the strategic
+decision. That preserves identity: **strategy first → form follows →
+performance tests the result.**
 
 Two different partitions are different strategies **before** geometry changes.
 
 ---
 
-## Value of a run
+## Hard vs soft
 
-A useful run reports:
+| Role | Meaning | Role in search |
+|------|---------|----------------|
+| **Requirement** | Must happen. Locked. | Shapes admissible organizations |
+| **Limitation** | A cap to check. Never a length to draw. | \(\operatorname{legal}(s)=\bigwedge_i C_i(s)\); prefs cannot compensate |
+| **Preference** | Desired; may be met more than one way. | Guides attention, depth, ranking, LEARN A/B — never a gate |
 
-- which **legal** strategies were found (and which P organizations paid off)
-- which COVER ideas were **almost legal** and whether REPAIR found a same-idea twin
-- which cells are **empty**, and why (unsupported vs locked vs cap-miss vs infeasible)
-- when COVER+REPAIR finds **no** legal cells, or very few plus a large frontier:
-  a **DIAGNOSE** class and **relaxation probes the architect must choose**
-- whether the kept strategy **survived** a program-area shock
-- a pending **A/B** among drawings that already fit (click the preferred scheme
-  in the UI; at most five questions; pairs chosen to be visibly different)
-
-It does not invent a courtyard, fill a cap, or call three widths of the same
-bar three concepts.
+Hard constraints eliminate impossible regions, diagnose failure, supply
+feasibility distance for near-misses, and support repair. Soft preferences
+decide which legal regions get more depth and which trade-offs LEARN asks
+about.
 
 ---
 
-## What Bayesian optimization is (and is not)
+## Value of a run (today and target)
 
-Bayesian optimization is an **evaluation-budget manager** for expensive
-simulations. After COVER and REPAIR have filled the archive, a small Gaussian
-process ranks unevaluated typed actions by expected improvement among **legal**
-schemes, evaluates one, refits, and repeats. It is not an architectural
-generator. It does not sit on invented feet — **REPAIR** and **`realize(s)`**
-own plates. It is not on the critical path until a run costs minutes.
+**Today** a useful run reports legal strategies, near-miss / REPAIR twins,
+empty cells and why, DIAGNOSE when yield collapses, robustness under
+program-area shock, and A/B among drawings that already fit.
 
-`search.py` (`balanced` / `low_rise` / `compact`) remains an experimental
-enumeration baseline, not “quality.”
+**Target confidence** (not yet fully implemented — see BLUEPRINT evaluation):
+
+- Why each finalist was selected
+- Which hard constraints it satisfies and which preferences it sacrifices
+- What competing strategy came closest
+- Which meaningful regions remain under-explored
+- What input change might cause another strategy to win
+- How stable the result was under additional budget
+
+The tool must not claim “we evaluated every scheme.” It should claim the
+selected strategies are the **strongest supported** under current inputs, with
+residual uncertainty named.
+
+---
+
+## LLM + engine
+
+```
+language reasoning
+    → design actions
+    → constraint / massing engine + realize(s)
+    → performance evidence
+    → reasoning again
+```
+
+The LLM proposes. The engine owns geometry, GSF, pairing, voids, and checks.
+Never trust the LLM for arithmetic.
+
+Drive the same loop from **chat** or the **studio UI**.
+
+---
+
+## Bayesian optimization (and what it is not)
+
+BO is an evaluation-budget manager over **legal** strategy actions already in
+the archive’s feature space. It does not invent courtyards, fill length caps,
+or replace COVER’s map of organizations. Its long-term role is uncertainty-aware
+allocation under a shared search controller — value still to be proven by
+ablation.

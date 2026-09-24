@@ -1,19 +1,20 @@
 # Massing Explorer
 
-A **program-aware massing explorer** that turns architectural program
-spreadsheets into dimensionally tested conceptual masses. A local LLM reasons
-about design decisions. A deterministic Python engine owns geometry, GSF, and
-checks.
+A **self-aware strategic search system** for conceptual massing: given a
+program spreadsheet, hard constraints, soft preferences, and limited compute,
+it maps meaningful strategy regions, probes what must be understood, focuses
+where evidence is strongest, and (increasingly) tracks what it deferred —
+then proposes best-supported schemes with trade-offs, not merely “Option 17.”
 
-The system's value is to make the architect smarter about the design problem:
-which legal strategies exist, which near-feasible ideas can be repaired into
-the same concept, which archive cells are empty and why, which brief clauses
-collapsed the feasible set. It is not merely "Option 17."
+It is **not** a parametric form generator, CAD automation toy, LLM driving
+Rhino, GA of lookalikes, or brute-force optimizer. Form follows strategy;
+`realize(s)` fills dimensions. A local LLM may propose typed actions; a
+deterministic Python engine owns geometry, GSF, and checks.
 
-**Standalone project.** Algorithm-first, with a local **studio UI** for drop /
-brief / Generate / A/B. Constitution: [docs/BLUEPRINT-search.md](docs/BLUEPRINT-search.md).
-Concept and workflow: [docs/CONCEPT.md](docs/CONCEPT.md),
-[docs/WORKFLOW.md](docs/WORKFLOW.md). Studio: [docs/UI.md](docs/UI.md).
+**Standalone project.** Constitution: [docs/BLUEPRINT-search.md](docs/BLUEPRINT-search.md)
+(purpose, direction, **fit/drift evaluation**). Concept:
+[docs/CONCEPT.md](docs/CONCEPT.md). Workflow: [docs/WORKFLOW.md](docs/WORKFLOW.md).
+Studio: [docs/UI.md](docs/UI.md).
 
 ---
 

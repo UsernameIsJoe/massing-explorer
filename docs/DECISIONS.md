@@ -2,19 +2,35 @@
 
 Decisions locked from the initial planning discussion (Sep 2026). Update this file when a decision changes.
 
-**Search constitution (9 Sep 2026):** [BLUEPRINT-search.md](BLUEPRINT-search.md). Product idea: [CONCEPT.md](CONCEPT.md). Chat path: [WORKFLOW.md](WORKFLOW.md).
+**Search constitution (24 Sep 2026):** [BLUEPRINT-search.md](BLUEPRINT-search.md)
+— purpose, direction (region ledger + controller), fit/drift evaluation.
+Product idea: [CONCEPT.md](CONCEPT.md). Chat path: [WORKFLOW.md](WORKFLOW.md).
 
 ---
 
 ## Product scope
 
-**Massing Explorer** is a standalone **program-to-massing explorer**. It is not a parametric slider toy, not a site-context exporter, and not an AI shape generator.
+**Massing Explorer** is a standalone **self-aware strategic search** over
+program-derived massing strategies. It is not a parametric slider toy, not a
+site-context exporter, not an AI shape generator, not a GA of lookalikes, and
+not a brute-force form enumerator.
 
-Primary goal: make the architect smarter about the design problem — which legal strategies exist, which near-feasible ideas can be repaired into the same concept, which archive cells are empty and why — while continuously validating GSF.
+**Primary goal:** decide where to look, how deeply, when to step back, and what
+uncertainty remains — then propose best-supported strategies with trade-offs
+and confidence (legal regions, near-miss repair, deferred space, stability).
 
-Secondary goal: export geometry to Rhino.
+**Secondary goal:** export geometry to Rhino.
 
-A strategy is `S = (P, T, V, G, D)`, not a width. The LLM emits typed design actions. The engine applies or rejects them. COVER / REPAIR / LEARN / REFINE are modes over one archive. REPAIR projects an illegal COVER idea onto the nearest legal twin of that idea; it does not regroup a must.
+A strategy is `S = (P, T, V, G, D)`, not a width. The LLM emits typed design
+actions. The engine applies or rejects them. COVER / REPAIR / LEARN / REFINE
+are modes over one archive. REPAIR projects an illegal COVER idea onto the
+nearest legal twin of that idea; it does not regroup a must.
+
+**Direction lock (24 Sep 2026):** next structural work is a **region ledger**
+and a **search controller** that chooses probe / deepen / step-back / stop.
+Do not accumulate more Underwood-only scheduling heuristics without pulling
+them under that policy. See
+[BLUEPRINT-search.md § Evaluation](BLUEPRINT-search.md#evaluation-fit-and-drift).
 
 ---
 

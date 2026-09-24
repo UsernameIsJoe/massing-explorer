@@ -1,8 +1,14 @@
 # Workflow
 
-Updated 16 Sep 2026. What happens when you run a brief (chat or studio UI).
-Constitution: [BLUEPRINT-search.md](BLUEPRINT-search.md). Concept: [CONCEPT.md](CONCEPT.md).
-Studio steps: [UI.md](UI.md).
+Updated 24 Sep 2026. What happens when you run a brief (chat or studio UI).
+Constitution (purpose, direction, fit/drift): [BLUEPRINT-search.md](BLUEPRINT-search.md).
+Concept: [CONCEPT.md](CONCEPT.md). Studio steps: [UI.md](UI.md).
+
+**Today** the default run is still a procedural sequence
+(CSP → COVER → REPAIR → planner/MCTS → BO → REFINE) over one archive.
+**Direction:** the same engines should become tools chosen by a search
+controller reading a **region ledger** (see BLUEPRINT). Until that lands,
+treat budget knobs as provisional.
 
 ---
 

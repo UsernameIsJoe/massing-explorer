@@ -1,38 +1,40 @@
 # Blueprint: hierarchical strategy search
 
-Updated 16 Sep 2026 (P pool, realize(s), studio UI LEARN). This is the
-constitution of the search. Older notes in `DISCUSSION-search-architecture.md`
-and `PLAN-search-architecture.md` describe the three *jobs* (cover, learn,
-refine). This file says how those jobs sit in the system: they are modes over
-an archive, not a one-way Stage 1 → 2 → 3 pipeline, and not a width enumerator.
+Updated 24 Sep 2026. This is the **constitution** of the search: purpose,
+direction, and how engines serve a self-aware controller. Older notes in
+`DISCUSSION-search-architecture.md` and `PLAN-search-architecture.md` describe
+the three *jobs* (cover, learn, refine). Product idea: [CONCEPT.md](CONCEPT.md).
+Workflow: [WORKFLOW.md](WORKFLOW.md). Studio: [UI.md](UI.md).
 
-The engine stays the engine. What changes is the control loop.
-
-Product pages: [CONCEPT.md](CONCEPT.md), [WORKFLOW.md](WORKFLOW.md), [UI.md](UI.md).
+The engine stays the engine. What must change next is the **control loop**:
+from a fixed procession of engines toward a shared search-state ledger that
+decides probe / deepen / step back / reopen / stop.
 
 ---
 
 ## What this project is
 
-Architecture is a sequence of semantic decisions an LLM can reason about.
-Computation proves whether those decisions can become buildings.
+Massing Explorer is a **self-aware strategic search system** over a finite
+strategy space. Architecture is a sequence of semantic decisions; computation
+proves whether those decisions can become buildings.
 
 ```
 language reasoning
     → design actions
-    → constraint / massing engine
+    → constraint / massing engine + realize(s)
     → performance evidence
-    → reasoning again
+    → update belief / next decision
 ```
 
-Not `prompt → AI shape`. Not `parameters → optimizer → shape`.
+**Not** `prompt → AI shape`. **Not** `parameters → optimizer → shape`. **Not**
+a GA of lookalikes, CAD automation, or brute-force enumeration of every form.
 
-The system's value is to make the architect smarter about the design problem:
-which legal strategies exist, which near-feasible ideas can be projected onto
-the legal set, which regions of the archive are empty and why, which brief
-clauses collapsed the feasible set. It is not merely "Option 17."
-Architectural feasibility is often a boundary you can navigate toward, not
-only a cliff.
+Value: make the architect smarter about the design problem — which legal
+strategies exist, which near-feasible ideas can be projected onto the legal
+set, which regions were deferred and why, which brief clauses collapsed the
+feasible set, and how stable the finalists are. It is not merely "Option 17."
+
+Project law (full statement): [CONCEPT.md](CONCEPT.md#project-law).
 
 ---
 
@@ -132,6 +134,151 @@ COVER → REPAIR → legal or frontier?
 
 Probes are never applied automatically. Failure patterns are stored as
 knowledge about why regions are empty.
+
+---
+
+## Direction: from engine chain to search intelligence
+
+### Target control loop
+
+```
+1. MAP      — meaningful strategic regions of the finite space
+2. FILTER   — hard organizational / geometric proofs
+3. PROBE    — representative evaluations of important regions
+4. UPDATE   — feasibility, quality, uncertainty, failure patterns
+5. FOCUS    — deepen strong evidence and improving near-misses
+6. STEP BACK — audit neglected / uncertain / structurally different regions
+7. MANEUVER — repair or change strategic actions when progress stalls
+8. STOP OR REOPEN — stop when stable; reopen when inputs or evidence change
+```
+
+CSP, COVER, REPAIR, MCTS, and BO are **mechanisms serving this loop** — not a
+fixed parade:
+
+```
+CSP → COVER → REPAIR → MCTS → BO → REFINE   ← current (procedural)
+```
+
+Desired:
+
+```
+        Region ledger (search state)
+                 ↕
+   CSP / COVER / REPAIR / MCTS / BO / REFINE
+                 ↕
+   Controller: probe | deepen | step back | predict | stop
+```
+
+### Region ledger (required next structural concept)
+
+A region is a meaningful strategic cell (e.g. 4 masses + Arts separated +
+Media with Academic + Gym/Dining isolated + cohesive Academic). For each
+region record at least:
+
+| State | Meaning |
+|-------|---------|
+| Unseen | No representative evaluated |
+| Probed | Some representatives evaluated |
+| Feasible | At least one legal basin |
+| Near-miss | Close to legality and improving |
+| Flat | Probes not improving |
+| Saturated | Extra depth adds little |
+| Impossible | Eliminated by organization-wide proof |
+| Deferred | Not worth cost now; may reopen |
+
+**Impossible, tested-and-weak, and not-yet-tested must never collapse into one
+bucket.** Each deferred region should carry: probes done vs owed, best
+feasibility distance, shared failure, why deferred, reopen if …
+
+Today’s `p_pool` sticky status and archive cells are a **partial** ledger
+(evaluated outcomes). They are not yet a complete map of skipped / deferred /
+reopen conditions.
+
+### Priority (conceptual)
+
+\[
+\operatorname{Priority}(R) =
+\text{potential} + \text{uncertainty} + \text{coverage debt}
++ \text{failure relevance} - \text{saturation} - \text{cost}
+\]
+
+Local budget knobs (probe floors, deepen fractions, story-library biases) are
+provisional only if they approximate this priority. Prefer one search policy
+over accumulating benchmark-specific patches.
+
+### Step back (when)
+
+Widen deliberately when: winners stop improving; focused regions share one
+limitation; another region stays highly uncertain; a mass count or relationship
+pattern is underrepresented; the winner is fragile under input changes; too
+much budget sits in one organization; preferences change; a constraint change
+invalidates prior rejection reasons. Step-back is **evidence-based retreat**,
+not random diversification.
+
+### What confidence should mean
+
+Not: “we evaluated every scheme.”
+
+Yes: selected strategies are the strongest supported under current inputs;
+meaningful regions received representative testing; promising basins were
+deepened; neglected regions were audited; leaders stayed stable under more
+budget; **remaining uncertainty is named**.
+
+---
+
+## Evaluation: fit and drift
+
+Judgment as of 24 Sep 2026. Core thesis **aligned**; orchestration and
+self-awareness **incomplete**; recent yield work risked **benchmark-heuristic
+drift**.
+
+| Area | Current behavior | Fit | Drift / weakness | Judgment |
+|------|------------------|-----|------------------|----------|
+| Strategy as search object | Searches P, stories, T, loading, envelope, plate | Form follows strategy | — | **Strong fit** |
+| Strategy–dimension split | `realize(s)` fills feet without changing P/T/stories | Deterministic form | Some case-sensitive width lore | **Strong fit** |
+| Hard vs soft | Limitations gate; prefs rank / bias only | Hierarchy correct | School-prior / motif proxies hardcoded | **Strong fit** |
+| CSP organizational map | Enumerates valid P; feature coverage seats | Structured P-space | Shortlist ≠ persistent explored/deferred map | **Foundation; incomplete map** |
+| Relationship ontology | Art / Media / Admin / Gym+Dining / Academic | Meaningful differences | School-specific law, not pluggable domain knowledge | **Fit domain; generality drift** |
+| Feas in coverage cells | \(S=-i+\lambda S_{\mathrm{feas}}\) (\(\lambda=0.5\)) | Diversity + realizability | Local score, not region belief | **Idea fits** |
+| COVER breadth | Joint samples; round-robin per-P story floor | Representative probes | List schedule ≠ coverage obligations + reopen | **Partial fit** |
+| COVER qualification | Probe floors, flat-pause, impossible, deepen saturate | Probe → assess → focus | Status ≠ full ledger with defer/reopen reasons | **Logic fits; memory thin** |
+| Depth | Deepen unsaturated feasible; discovery share | Evidence-based focus | Constants patched from last failure | **Mostly fit; policy drift** |
+| Step-back | Expand / discover when yield thin | Seeds of retreat | Scattered rules, not global shared-failure policy | **Partial** |
+| Failure maneuvering | Feasibility distance, REPAIR, MCTS, near-miss | Move through constraints | Failures not accumulated into region models | **Mechanism good; memory weak** |
+| MCTS / BO | After COVER; BO on legal actions | Right capabilities | Fixed order; BO value unproven by ablation | **Fit engines; isolated** |
+| Archive | Cells, legal/frontier, sticky P status | Shared evidence | Knows evaluated; weak on skipped/deferred | **Critical partial fit** |
+| Adaptive budget | Start/step/stagnation; discovery/deepen/expand | Compute as resource | Many local knobs vs one Priority(R) | **Beginning to drift** |
+| Search sequence | CSP→COVER→REPAIR→MCTS→BO→REFINE | Has the parts | Procedural chain ≠ controller | **Main architectural drift** |
+| Skipped-space knowledge | CSP counts, attempts, some statuses | Partial transparency | Cannot answer “what remains under-tested and why” | **Major gap** |
+| Finalist confidence | Legal counts, org counts, scores | Evidence on found schemes | No stability / residual-opportunity report | **Major gap** |
+| Benchmarking | Underwood GSF vs 53c | Stable regression | `school_critical` / unlock patterns overfit risk | **Overfitting risk** |
+| Recent yield | Full pipeline breadth above 53c on org count; COVER-only recovered | Engines can recover | Success from scheduling patches, not stated Priority(R) | **Good scoreboard; weak causal story** |
+
+### Strongest fits to protect
+
+Strategy–dimension separation; hard vs soft; CSP as organizational reasoning;
+shared Archive; feasibility distance / near-miss; MCTS over strategic actions;
+BO as possible uncertainty-aware budget manager.
+
+### Most important drifts
+
+1. **Pipeline as engine chain** instead of ledger ↔ controller.
+2. **Budget rules as patches** (floors, deepen fractions, school-critical
+   first) without a general Priority(R).
+3. **Underwood overfitting** — school ontology and unlock stacks as if they
+   were universal search law.
+4. **Incomplete knowledge of skipped space.**
+5. **Confidence = yield metrics** rather than stability + residual opportunity.
+
+### Next architectural work (not more local knobs)
+
+1. **Region ledger** — shared record of regions, probes, failures, deferral,
+   reopen conditions.
+2. **Search controller** — reads the ledger; chooses CSP expansion, COVER
+   probe, repair, deepen, MCTS, BO, step-back, or stop.
+
+Do not add many more Underwood-specific scheduling heuristics without pulling
+them under those two concepts.
 
 ---
 
@@ -413,7 +560,10 @@ invented foot target.
 ## Line to hold
 
 This is a way to explore among legal strategies, to project a near-miss onto
-the same idea’s legal twin, and to say why other strategies are empty or
-illegal. It is not a license to override a must, fill a cap, invent a
-courtyard, or call a width a concept. Repair does not shop for a different
-COVER idea.
+the same idea’s legal twin, to remember what was deferred, and to say why
+other strategies are empty or illegal — with explicit confidence about what
+remains uncertain. It is not a license to override a must, fill a cap, invent
+a courtyard, call a width a concept, or substitute a growing pile of
+benchmark heuristics for a search-state policy. Repair does not shop for a
+different COVER idea. Local scheduling knobs are provisional until they sit
+under a region ledger and controller.
