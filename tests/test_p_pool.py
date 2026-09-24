@@ -560,7 +560,8 @@ class ArchiveInsertSyncTests(unittest.TestCase):
         session = _S()
         self.assertTrue(p_needs_discovery_probe(entry))
         # Flat high-distance probes fill the floor then pause.
-        for i, env in enumerate(("balanced", "compact", "elongated", "balanced")):
+        for i in range(PROBE_FLOOR):
+            env = ("balanced", "compact", "elongated", "balanced", "compact")[i % 5]
             session.constraints["cover_envelope"] = env
             session.constraints["loading"] = "double" if i < 2 else "single"
             session.constraints["cover_plate_profile"] = "uniform" if i % 2 == 0 else "step"

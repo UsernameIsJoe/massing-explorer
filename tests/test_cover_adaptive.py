@@ -32,6 +32,15 @@ class StoryPatternTests(unittest.TestCase):
         self.assertIn((2, 2, 2, 2), pats)
         self.assertTrue(any(len(set(p)) > 1 for p in pats))
 
+    def test_school_critical_one_tall_patterns_included(self) -> None:
+        from massing_explorer.explore.cover import school_critical_story_patterns
+
+        crit = school_critical_story_patterns(4, 3)
+        self.assertIn((1, 3, 1, 1), crit)
+        self.assertIn((3, 2, 2, 2), crit)
+        lib = story_pattern_library(4, 3)
+        self.assertTrue(any(p == (1, 3, 1, 1) for p in lib) or (1, 3, 1, 1) in crit)
+
 
 class AdaptiveCoverTests(unittest.TestCase):
     def setUp(self) -> None:

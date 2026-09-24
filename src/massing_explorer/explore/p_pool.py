@@ -28,8 +28,9 @@ from .partitions import (
 from .strategy import grouping_is_required, required_mass_bounds
 
 DEEPEN_FRAC = 0.60
-# While a feasible P still yields new legal/quality depth, bias COVER deepen.
-DEEPEN_FRAC_WHEN_UNSATURATED = 0.82
+# While a feasible P still yields new legal/quality depth, bias COVER deepen —
+# but leave room for discovery of seated-but-never-legal orgs (was 0.82).
+DEEPEN_FRAC_WHEN_UNSATURATED = 0.72
 EXPAND_FRAC = 1.0 - DEEPEN_FRAC
 # First legal hit → one-shot G/L/story fan-out (kickstart depth).
 GEOM_FANOUT_CAP = 8
@@ -41,7 +42,7 @@ DEPTH_STALE_DISTINCT = 3
 # Need at least this many distinct configs before saturation can fire.
 DEPTH_MIN_BEFORE_SATURATE = 4
 # Discovery probes for unresolved P (experimental floor — not claimed optimal).
-PROBE_FLOOR = 4
+PROBE_FLOOR = 5  # align with cover.PER_PARTITION_STORY_FLOOR
 NEAR_MISS_BATCH = 2
 NEAR_MISS_DIST = 0.35
 PROBE_FLAT_PAUSE = 2
@@ -440,8 +441,10 @@ def allocate_cover_step(
     need_d = max(0, int(discovery_needed))
     need_z = max(0, int(deepen_needed))
     if need_d and need_z:
-        discovery = max(1, step // 3)
-        deepen = max(1, step // 3)
+        # Discovery gets half the step so seated unresolved orgs are not
+        # starved once the first school-bar goes feasible.
+        discovery = max(1, (step + 1) // 2)
+        deepen = max(1, step // 4)
         expand = max(0, step - discovery - deepen)
     elif need_d:
         discovery = max(1, int(round(step * 0.45)))

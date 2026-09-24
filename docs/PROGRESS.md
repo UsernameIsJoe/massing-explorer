@@ -5,6 +5,30 @@ Update this file at the end of every work session.
 
 ---
 
+## 2026-09-24 — Checkpoint: org collection (multi-org COVER yield)
+
+### Done
+
+- **Diagnosis:** CSP motif seats were admitted but under-evaluated (COVER
+  deepen locked onto early winners; start-40 missed school-critical stacks).
+- **COVER:** per-P story floor, school-critical one-tall patterns first,
+  diversity order that seats articulated stacks early (rotated tall mass).
+- **P-pool:** softer deepen when unsaturated; discovery gets half the step
+  when deepen is also owed; `PROBE_FLOOR` aligned with story floor.
+- **CSP:** `feasibility_potential` as within-cell tie-break; school rank still
+  primary for coverage seating.
+- **Same-budget Underwood harvest vs 53c / Try `6393b15`:**
+  - 3-mass: **8** legal (53c 3, Try 11) — above plan floor.
+  - 3–4-mass: **27** legal / **4** orgs (53c 32/4, Try 19/2). Depth still
+    thinner than 53c’s top family (~8 vs 19); org *set* differs.
+
+### Next steps
+
+- Deepen / geom fan-out on each newly feasible P (variant depth toward 53c).
+- Keep late shortlist seats from collapsing to 1 start-40 sample.
+
+---
+
 ## 2026-09-16 — Legal yield restored; studio UI LEARN polish; docs
 
 ### Done

@@ -694,6 +694,63 @@ def _round_robin(
         depth += 1
 
 
+def _feasibility_potential(
+    atoms: list[dict[str, Any]], assign: list[int]
+) -> float:
+    """
+    Cheap geometric promise for ranking *inside* a coverage cell.
+
+    Does not replace relationship diversity — callers use this only among
+    candidates that already carry the same coverage target.
+    """
+    if not atoms or not assign or len(atoms) != len(assign):
+        return 0.0
+    feats = _relationship_features(atoms, assign)
+    score = 0.0
+    if feats.get("gym_dining") == "isolated":
+        score += 3.0
+    elif feats.get("gym_dining") == "shared":
+        score -= 1.0
+    if feats.get("academic") == "together":
+        score += 2.0
+    elif feats.get("academic") == "split":
+        score -= 1.5
+
+    counts: dict[int, int] = defaultdict(int)
+    for b in assign:
+        counts[b] += 1
+    sizes = list(counts.values()) or [1]
+    n_blocks = len(sizes)
+    total = sum(sizes) or 1
+    mean = total / n_blocks
+    var = sum((s - mean) ** 2 for s in sizes) / n_blocks
+    score -= 0.35 * var
+    score -= max(0.0, max(sizes) / total - 0.55) * 4.0
+
+    ground_tokens = (
+        "administration",
+        "guidance",
+        "dining",
+        "athletics",
+        "medical",
+        "custodial",
+    )
+    ground_blocks: dict[int, int] = defaultdict(int)
+    for i, atom in enumerate(atoms):
+        text = " ".join(str(d).lower() for d in (atom.get("departments") or []))
+        if any(tok in text for tok in ground_tokens):
+            ground_blocks[assign[i]] += 1
+    if ground_blocks:
+        score -= max(0, max(ground_blocks.values()) - 2) * 1.25
+
+    art = feats.get("art")
+    if art in ("alone", "with_academic", "other"):
+        score += 0.5
+    elif art == "with_athletics":
+        score -= 0.5
+    return score
+
+
 def _feature_coverage_order(
     atoms: list[dict[str, Any]],
     pool: list[list[int]],
@@ -705,22 +762,24 @@ def _feature_coverage_order(
     """
     Seat relationship-feature coverage before any school-prior refill.
 
-    Critical art×media×admin motifs (art alone / art-on-academic) get seats
-    first — two admin variants per (art, media) — so rare basins are not
-    buried under school-bar singles. Structural features, remaining motifs,
-    leftover placement values, and pairs follow.
-
-    Each uncovered target takes the best-ranked candidate that carries it.
+    Targets: feature values, art×media×admin motifs, then pairs. Within each
+    coverage cell, pick by feasibility potential (school rank as tie-break).
     Motif triples are not retired by collateral singles/pairs.
     """
     if limit <= 0 or not pool:
         return []
     taken = set(skip or ())
-    cands: list[tuple[list[int], tuple[tuple[str, ...], ...]]] = []
+    cands: list[tuple[list[int], tuple[tuple[str, ...], ...], float]] = []
     for assign in pool:
         if _assign_signature(atoms, assign) in taken:
             continue
-        cands.append((assign, _coverage_keys(atoms, assign)))
+        cands.append(
+            (
+                assign,
+                _coverage_keys(atoms, assign),
+                _feasibility_potential(atoms, assign),
+            )
+        )
     if not cands:
         return []
 
@@ -728,7 +787,7 @@ def _feature_coverage_order(
     by_pair: dict[tuple[str, str], list[tuple[str, ...]]] = {}
     motifs: list[tuple[str, ...]] = []
     known: set[tuple[str, ...]] = set()
-    for _assign, keys in cands:
+    for _assign, keys, _feas in cands:
         for key in keys:
             if key in known:
                 continue
@@ -752,16 +811,10 @@ def _feature_coverage_order(
         if (left, right) not in role_pairs
     ]
 
-    # Motif cells bucketed by art placement, so a rare basin is not buried
-    # under the cousins that share the most common placement.
     motifs_by_art: dict[str, list[tuple[str, ...]]] = {}
     for key in motifs:
         motifs_by_art.setdefault(key[1], []).append(key)
 
-    # Every feature value first: a handful of picks covers all of them, so
-    # gym+dining isolation and academic cohesion are never starved by the
-    # twelve placement values. Motif cells next for combination depth, then
-    # the pairs, which pool expansion keeps walking after the shortlist fills.
     targets = _round_robin(by_feature, list(_RELATIONSHIP_FEATURES))
     targets += _round_robin(motifs_by_art, list(motifs_by_art))
     targets += _round_robin(by_pair, role_pairs)
@@ -775,16 +828,26 @@ def _feature_coverage_order(
             break
         if target in done:
             continue
-        for i, (assign, keys) in enumerate(cands):
+        best_i = -1
+        best_score: tuple[float, int] | None = None
+        for i, (_assign, keys, feas) in enumerate(cands):
             if i in used or target not in keys:
                 continue
-            used.add(i)
-            for key in keys:
-                if key and key[0] == "motif" and key != target:
-                    continue
-                done.add(key)
-            picked.append(assign)
-            break
+            # School rank (earlier pool index) primary; feasibility as tie-break
+            # so diversity cells stay school-shaped without ignoring geometry.
+            score = (-i, feas)
+            if best_score is None or score > best_score:
+                best_score = score
+                best_i = i
+        if best_i < 0:
+            continue
+        assign, keys, _feas = cands[best_i]
+        used.add(best_i)
+        for key in keys:
+            if key and key[0] == "motif" and key != target:
+                continue
+            done.add(key)
+        picked.append(assign)
     return picked
 
 

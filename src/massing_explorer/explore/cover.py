@@ -12,6 +12,7 @@ Adaptive budget:
 
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Iterator
 
@@ -49,6 +50,9 @@ COVER_START = 40
 COVER_STEP_SMALL = 10
 COVER_STEP_LARGE = 20
 COVER_MAX = 120
+# Minimum distinct story joints each seated partition gets in the stratified
+# pool before deep P0 axis sweeps consume remaining slots.
+PER_PARTITION_STORY_FLOOR = 8
 # Stop when a batch adds no new cells and few novel feature encodings.
 COVER_STAGNANT_FRAC = 0.08
 # COVER search pool size is adaptive (12–20); UI presentation stays separate.
@@ -80,6 +84,9 @@ class CoverPlan:
     partitions: list[dict[str, Any]] = field(default_factory=list)
     stated_signature: frozenset | None = None
     story_patterns: list[tuple[int, ...]] = field(default_factory=list)
+    # Per mass-count libraries so 3-mass and 4-mass seats are not pad/truncated
+    # from a single stated-n pattern list.
+    story_patterns_by_n: dict[int, list[tuple[int, ...]]] = field(default_factory=dict)
     topologies: list[str] = field(default_factory=list)
     loadings: list[str] = field(default_factory=list)
     envelopes: list[str] = field(default_factory=list)
@@ -92,6 +99,36 @@ def region_signature(session: Any) -> str:
     from .strategy import cell_key
 
     return cell_key(session)
+
+def school_critical_story_patterns(n: int, cap: int) -> list[tuple[int, ...]]:
+    """
+    One-tall / low stacks used by shortlist yield replay.
+
+    These are the configs that often make alternate motif orgs legal when the
+    shared mid-heavy library alone does not.
+    """
+    if n <= 0:
+        return []
+    cap = max(1, int(cap))
+    high = min(cap, 3)
+    out: list[tuple[int, ...]] = []
+    # One-tall / low stacks first — these unlock alternate orgs more often
+    # than flat mid stacks under the school prior.
+    for i in range(n):
+        out.append(tuple(high if j == i else 1 for j in range(n)))
+        out.append(tuple(high if j == i else 2 for j in range(n)))
+    out.append(tuple([2] * n))
+    out.append(tuple([1] * n))
+    # Dedup preserve order
+    seen: set[tuple[int, ...]] = set()
+    uniq: list[tuple[int, ...]] = []
+    for pat in out:
+        clipped = tuple(max(1, min(cap, int(v))) for v in pat)
+        if clipped not in seen:
+            seen.add(clipped)
+            uniq.append(clipped)
+    return uniq
+
 
 def story_pattern_library(
     n: int,
@@ -113,10 +150,14 @@ def story_pattern_library(
         clipped = [max(1, min(cap, int(v))) for v in vec]
         if locks and mass_ids:
             for i, mid_id in enumerate(mass_ids):
-                if mid_id in locks:
+                if mid_id in locks and i < len(clipped):
                     clipped[i] = int(locks[mid_id])
         raw.append(tuple(clipped))
 
+    # School-critical one-tall / all-low stacks first so the per-P seed and
+    # start-40 floor evaluate the patterns that unlock alternate orgs.
+    for pat in school_critical_story_patterns(n, cap):
+        add(list(pat))
     add([mid] * n)
     add([low] * n)
     add([high] * n)
@@ -154,6 +195,19 @@ def story_pattern_library(
             seen.add(pat)
             out.append(pat)
     return out
+
+
+def _partition_mass_count(plan: CoverPlan, i_p: int) -> int:
+    groups = (plan.partitions[i_p] or {}).get("groups") or []
+    return max(1, len([g for g in groups if g.get("departments")]))
+
+
+def _patterns_for_partition(plan: CoverPlan, i_p: int) -> list[tuple[int, ...]]:
+    n = _partition_mass_count(plan, i_p)
+    by_n = plan.story_patterns_by_n or {}
+    if n in by_n and by_n[n]:
+        return by_n[n]
+    return list(plan.story_patterns or [(2,) * n])
 
 
 def build_cover_plan(session: Any, *, pool_size: int = COVER_MAX) -> CoverPlan:
@@ -203,12 +257,27 @@ def build_cover_plan(session: Any, *, pool_size: int = COVER_MAX) -> CoverPlan:
     ]
     session.constraints["cover_partition_pool"] = pool_payload
     session.constraints["cover_partition_budget"] = len(plan.partitions)
-    # Story patterns sized to stated mass count; re-derived per partition on apply.
+    # Story patterns per mass count present in the plan (stated + shortlist).
     cap = max(1, int(session.constraints.get("max_stories") or 4))
     locks = dict(session.constraints.get("story_lock") or {})
     mass_ids = [m.id for m in session.masses]
-    n = len(session.masses)
-    plan.story_patterns = story_pattern_library(n, cap, locks=locks, mass_ids=mass_ids)
+    stated_n = len(session.masses)
+    ns = {stated_n}
+    for part in plan.partitions:
+        ns.add(len(part.get("groups") or []))
+    by_n: dict[int, list[tuple[int, ...]]] = {}
+    for nn in sorted(n for n in ns if n > 0):
+        # Only bake locks into the stated-n library when P is locked — after
+        # apply_partition mass ids/order change for alternate orgs.
+        use_locks = locked_p and nn == stated_n and locks
+        by_n[nn] = story_pattern_library(
+            nn,
+            cap,
+            locks=locks if use_locks else None,
+            mass_ids=mass_ids if use_locks else None,
+        )
+    plan.story_patterns_by_n = by_n
+    plan.story_patterns = by_n.get(stated_n) or next(iter(by_n.values()), [])
     if not plan.story_patterns:
         plan.story_patterns = [tuple(int(m.story_count) for m in session.masses)]
 
@@ -241,7 +310,6 @@ def _append_partition_samples(
     """Demand-biased samples for specific P indices (expansion deepen/explore)."""
     if n <= 0 or not partition_indices or not plan.partitions:
         return []
-    s_n = max(1, len(plan.story_patterns))
     t_n = max(1, len(plan.topologies))
     l_n = max(1, len(plan.loadings))
     e_n = max(1, len(plan.envelopes))
@@ -253,17 +321,27 @@ def _append_partition_samples(
     while len(out) < n and cursor < n * 40:
         i_p = partition_indices[cursor % len(partition_indices)]
         groups = (plan.partitions[i_p] or {}).get("groups") or []
-        order = bias_story_index_order(
-            plan.story_patterns,
+        pats = _patterns_for_partition(plan, i_p)
+        s_n = max(1, len(pats))
+        n_mass = max(1, len([g for g in groups if g.get("departments")]))
+        cap_stories = max((max(p) if p else 1) for p in pats) if pats else 2
+        critical = set(school_critical_story_patterns(n_mass, cap_stories))
+        crit_order = [i for i, p in enumerate(pats) if p in critical]
+        biased = bias_story_index_order(
+            pats,
             demand_profile(groups, session),
             preferred_stories=(session.constraints or {}).get("preferred_stories"),
         ) or list(range(s_n))
+        order: list[int] = []
+        for i in crit_order + biased:
+            if i not in order:
+                order.append(i)
         i_s = order[(cursor // max(1, len(partition_indices))) % len(order)]
         i_t = (cursor // 3) % t_n
         i_l = (cursor // 5) % l_n
         i_e = (cursor // 7) % e_n
         i_pl = (cursor // 11) % pl_n
-        stories = plan.story_patterns[i_s % s_n]
+        stories = pats[i_s % s_n]
         profile = profiles[i_pl % pl_n]
         key = (i_p, stories, plan.topologies[i_t], plan.loadings[i_l], plan.envelopes[i_e], profile)
         cursor += 1
@@ -302,7 +380,6 @@ def _append_informed_probe_samples(
     from .p_pool import ensure_p_pool, partition_key as pkey
 
     pool = ensure_p_pool(archive)
-    s_n = max(1, len(plan.story_patterns))
     t_n = max(1, len(plan.topologies))
     loadings = list(plan.loadings or LOADINGS)
     envelopes = list(plan.envelopes or ENVELOPES)
@@ -316,10 +393,12 @@ def _append_informed_probe_samples(
         i_p = partition_indices[slot % len(partition_indices)]
         part = plan.partitions[i_p] or {}
         groups = part.get("groups") or []
+        pats = _patterns_for_partition(plan, i_p)
+        s_n = max(1, len(pats))
         entry = (pool.get("entries") or {}).get(pkey(groups))
         recipe = informed_probe_recipe(groups, session, entry, slot=slot)
         order = bias_story_index_order(
-            plan.story_patterns,
+            pats,
             demand_profile(groups, session),
             preferred_stories=recipe.get("preferred_stories"),
         ) or list(range(s_n))
@@ -327,7 +406,7 @@ def _append_informed_probe_samples(
         i_s = order[min(slot // max(1, len(partition_indices)), len(order) - 1) % len(order)]
         if recipe.get("prefer_tall") and order:
             i_s = order[min(slot % max(1, len(order) // 2 + 1), len(order) - 1)]
-        stories = plan.story_patterns[i_s % s_n]
+        stories = pats[i_s % s_n]
         loading = str(recipe.get("loading") or "double")
         if loading not in loadings and loadings:
             loading = loadings[0]
@@ -343,7 +422,7 @@ def _append_informed_probe_samples(
         if key in seen:
             # Nudge story index to force distinctness.
             i_s2 = order[(i_s + slot) % len(order)] if order else 0
-            stories = plan.story_patterns[i_s2 % s_n]
+            stories = pats[i_s2 % s_n]
             key = (i_p, stories, topology, loading, envelope, plate)
             if key in seen:
                 continue
@@ -431,12 +510,15 @@ def _stratified_samples(
 ) -> Iterator[CoverSample]:
     """Latin-ish cover of the axis product; stated combo first."""
     p_n = max(1, len(plan.partitions))
-    s_n = max(1, len(plan.story_patterns))
     t_n = max(1, len(plan.topologies))
     l_n = max(1, len(plan.loadings))
     e_n = max(1, len(plan.envelopes))
     profiles = list(plan.plate_profiles or PLATE_PROFILES)
     pl_n = max(1, len(profiles))
+    pref_stories = session.constraints.get("preferred_stories")
+
+    def patterns(i_p: int) -> list[tuple[int, ...]]:
+        return _patterns_for_partition(plan, i_p)
 
     def make(
         i_p: int,
@@ -446,7 +528,9 @@ def _stratified_samples(
         i_e: int,
         i_pl: int = 0,
     ) -> CoverSample:
-        stories = plan.story_patterns[i_s % s_n]
+        pats = patterns(i_p)
+        s_n = max(1, len(pats))
+        stories = pats[i_s % s_n]
         profile = profiles[i_pl % pl_n]
         return CoverSample(
             partition_index=i_p % p_n,
@@ -479,7 +563,7 @@ def _stratified_samples(
         seen.add(key)
         ordered.append(sample)
 
-    stated_stories = tuple(int(m.story_count) for m in session.masses) or plan.story_patterns[0]
+    stated_stories = tuple(int(m.story_count) for m in session.masses) or patterns(0)[0]
     pref = session.constraints.get("preferred_stories")
     if pref is not None:
         want = max(1, int(round(float(pref))))
@@ -511,8 +595,52 @@ def _stratified_samples(
         )
     )
 
+    # One seed per partition (story index 0 of that P's library).
     for i_p in range(p_n):
         push(make(i_p, 0, 0, 0, 0, 0))
+
+    # Per-P evaluation floor: each seated org gets several story joints (and a
+    # couple loadings) before deep P0 axis sweeps consume the pool. Pin
+    # school-critical stacks first — demand bias alone prefers mid-heavy means
+    # and skips the one-tall/low patterns that unlock alternate orgs.
+    floor = max(1, int(PER_PARTITION_STORY_FLOOR))
+    for i_p in range(p_n):
+        pats = patterns(i_p)
+        groups = (plan.partitions[i_p] or {}).get("groups") or []
+        n_mass = max(1, len([g for g in groups if g.get("departments")]))
+        cap_stories = max((max(p) if p else 1) for p in pats) if pats else 2
+        critical = set(school_critical_story_patterns(n_mass, cap_stories))
+        # Prefer rest-1 one-talls (every tall index) before rest-2 / flat stacks
+        # so the floor covers the school-sweep unlock set, not just tall@0.
+        def _unlock_key(idx: int) -> tuple[int, int]:
+            pat = pats[idx]
+            spread = max(pat) - min(pat) if pat else 0
+            if spread < 2:
+                return (2, idx)
+            if min(pat) <= 1:
+                return (0, idx)
+            return (1, idx)
+
+        crit_order = sorted(
+            (i for i, p in enumerate(pats) if p in critical),
+            key=_unlock_key,
+        )
+        biased = bias_story_index_order(
+            pats,
+            demand_profile(groups, session),
+            preferred_stories=pref_stories,
+        ) or list(range(len(pats)))
+        s_order: list[int] = []
+        for i in crit_order + biased:
+            if i not in s_order:
+                s_order.append(i)
+        for rank, i_s in enumerate(s_order[:floor]):
+            push(make(i_p, i_s, 0, 0, 0, 0))
+            if rank < 2 and l_n > 1:
+                push(make(i_p, i_s, 0, 1, 0, 0))
+            if rank < 1 and e_n > 1:
+                push(make(i_p, i_s, 0, 0, 1, 0))
+
     for i_t in range(t_n):
         push(make(0, 0, i_t, 0, 0, 0))
     for i_l in range(l_n):
@@ -521,15 +649,15 @@ def _stratified_samples(
         push(make(0, 0, 0, 0, i_e, 0))
     for i_pl in range(pl_n):
         push(make(0, 0, 0, 0, 0, i_pl))
-    # Demand-biased story axis for P0 (stated); other P get their own order in fill.
+    # Demand-biased story axis for P0 (stated); other P already floored above.
+    p0_pats = patterns(0)
     p0_groups = (plan.partitions[0] or {}).get("groups") or []
-    pref_stories = session.constraints.get("preferred_stories")
     story_order = bias_story_index_order(
-        plan.story_patterns,
+        p0_pats,
         demand_profile(p0_groups, session),
         preferred_stories=pref_stories,
-    ) or list(range(s_n))
-    story_axis_cap = min(s_n, max(8, pool_size // max(1, e_n * l_n * pl_n)))
+    ) or list(range(len(p0_pats)))
+    story_axis_cap = min(len(p0_pats), max(8, pool_size // max(1, e_n * l_n * pl_n)))
     for i_s in story_order[:story_axis_cap]:
         push(make(0, i_s, 0, 0, 0, 0))
 
@@ -539,12 +667,13 @@ def _stratified_samples(
                 for i_pl in range(pl_n):
                     for i_t in range(t_n):
                         for i_p in range(p_n):
+                            pats = patterns(i_p)
                             groups = (plan.partitions[i_p] or {}).get("groups") or []
                             s_order = bias_story_index_order(
-                                plan.story_patterns,
+                                pats,
                                 demand_profile(groups, session),
                                 preferred_stories=pref_stories,
-                            ) or list(range(s_n))
+                            ) or list(range(len(pats)))
                             for i_s in s_order:
                                 if len(ordered) >= pool_size:
                                     return iter(ordered[:pool_size])
@@ -612,14 +741,84 @@ def _sample_distance(a: CoverSample, b: CoverSample) -> float:
     return dist
 
 
+def _stories_are_school_critical(stories: tuple[int, ...] | list[int] | None) -> bool:
+    """True for one-tall / low unlock stacks — not flat all-2s / all-1s."""
+    pat = tuple(int(s) for s in (stories or ()))
+    if not pat:
+        return False
+    if max(pat) - min(pat) < 2:
+        return False
+    return pat in set(school_critical_story_patterns(len(pat), max(pat) if pat else 2))
+
+
 def _order_by_diversity(samples: list[CoverSample], *, pool_size: int) -> list[CoverSample]:
-    """Greedy farthest-point order. The stated sample stays first."""
+    """
+    Greedy farthest-point order with a per-partition floor up front.
+
+    The stated sample stays first. Then each seated P gets a school-critical
+    story sample (when present) before mid-heavy seeds, so start-40 actually
+    evaluates the stacks that unlock alternate orgs. Remaining floor slots and
+    farthest-point fill the rest.
+    """
     if len(samples) <= 2:
         return samples[:pool_size]
     chosen = [samples[0]]
     rest = list(samples[1:])
+    by_p: dict[int, list[CoverSample]] = defaultdict(list)
+    for sample in rest:
+        by_p[sample.partition_index].append(sample)
+    # Phase A: articulated school stacks per P, preferring distinct tall-mass
+    # positions so start-40 is not stuck on tall-at-index-0 for every org.
+    for i_p in sorted(by_p.keys()):
+        if len(chosen) >= pool_size:
+            break
+        bag = by_p[i_p]
+        n_mass = 0
+        for s in bag:
+            n_mass = max(n_mass, len(tuple(s.stories or ())))
+        prefer_order = [
+            (n_mass - 1 - i_p + k) % n_mass for k in range(max(1, n_mass))
+        ]
+        peaks_used: set[int] = set()
+        target = min(2, max(1, n_mass))
+        while len(peaks_used) < target and len(chosen) < pool_size:
+            pick = None
+            for want_peak in prefer_order:
+                if want_peak in peaks_used:
+                    continue
+                for j, s in enumerate(bag):
+                    if not _stories_are_school_critical(s.stories):
+                        continue
+                    stories = tuple(int(x) for x in (s.stories or ()))
+                    peak = max(range(len(stories)), key=lambda k: stories[k])
+                    if peak != want_peak:
+                        continue
+                    pick = j
+                    peaks_used.add(peak)
+                    break
+                if pick is not None:
+                    break
+            if pick is None:
+                break
+            sample = bag.pop(pick)
+            if sample in rest:
+                rest.remove(sample)
+            chosen.append(sample)
+    floor = max(1, int(PER_PARTITION_STORY_FLOOR))
+    for depth in range(floor):
+        for i_p in sorted(by_p.keys()):
+            bag = by_p[i_p]
+            if depth >= len(bag) or len(chosen) >= pool_size:
+                continue
+            sample = bag[depth]
+            if sample not in rest:
+                continue
+            chosen.append(sample)
+            rest.remove(sample)
     while rest and len(chosen) < pool_size:
-        nxt = max(rest, key=lambda sample: min(_sample_distance(sample, kept) for kept in chosen))
+        nxt = max(
+            rest, key=lambda sample: min(_sample_distance(sample, kept) for kept in chosen)
+        )
         chosen.append(nxt)
         rest.remove(nxt)
     return chosen
