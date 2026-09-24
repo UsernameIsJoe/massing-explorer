@@ -202,8 +202,82 @@ class AdaptiveCoverTests(unittest.TestCase):
         self.assertEqual(int(archive.get("legal") or 0), 0)
 
     def test_defaults_match_policy(self) -> None:
+        from massing_explorer.explore.cover import PER_PARTITION_STORY_FLOOR
+        from massing_explorer.explore.p_pool import PROBE_FLOOR
+
         self.assertEqual(COVER_START, 40)
         self.assertEqual(COVER_MAX, 120)
+        self.assertEqual(PER_PARTITION_STORY_FLOOR, PROBE_FLOOR)
+        self.assertEqual(PER_PARTITION_STORY_FLOOR, 5)
+
+
+GSF_TWEAKED = ROOT / "examples" / "Underwood_Elementary_Space_Summary_GSF_Tweaked.xlsx"
+BRIEF_34 = (
+    "3-4 masses, max 3 floors. length max 60 meters. gym and dining together and "
+    "double height. art and music prefer on ground floor. media prefer on top "
+    "floor above admin. admin have to be on ground floor. core academic and "
+    "special ed width has to be 80 feet. mass ratio have to be between 2:5 and "
+    "5:8. prefer 3 floors."
+)
+
+
+@unittest.skipUnless(GSF_TWEAKED.is_file(), "tweaked Underwood GSF not available")
+class PerPartitionFloorGuaranteeTests(unittest.TestCase):
+    """Round-robin floor must land in the capped plan, not just be intended."""
+
+    def setUp(self) -> None:
+        import massing_explorer.session as session_mod
+        from massing_explorer.brief import apply_brief
+
+        self._orig = session_mod.STUDIES_DIR
+        self.tmp = tempfile.TemporaryDirectory()
+        session_mod.STUDIES_DIR = Path(self.tmp.name) / "studies"
+        program = load_program_file(GSF_TWEAKED, config_path=CONFIG)
+        self.session = StudySession(
+            study_id="floor_guarantee", program=program, config_path=str(CONFIG)
+        )
+        self.session.constraints["cover_budget"] = {
+            "start": 0,
+            "step_small": 0,
+            "step_large": 0,
+            "max": 0,
+        }
+        self.session.constraints["explore_budget"] = {
+            "mcts_sims": 0,
+            "mcts_depth": 0,
+            "mcts_roots": 0,
+            "bo": 0,
+            "refine": 0,
+            "repair": 0,
+        }
+        self.session.save()
+        apply_brief(self.session, BRIEF_34)
+
+    def tearDown(self) -> None:
+        import massing_explorer.session as session_mod
+
+        session_mod.STUDIES_DIR = self._orig
+        self.tmp.cleanup()
+
+    def test_every_seated_p_gets_floor_samples_under_cover_max(self) -> None:
+        from collections import Counter
+
+        from massing_explorer.explore.cover import (
+            PER_PARTITION_STORY_FLOOR,
+            build_cover_plan,
+        )
+
+        plan = build_cover_plan(self.session, pool_size=COVER_MAX)
+        self.assertGreaterEqual(len(plan.partitions), 12)
+        by_p = Counter(s.partition_index for s in plan.samples)
+        floor = PER_PARTITION_STORY_FLOOR
+        for i_p in range(len(plan.partitions)):
+            self.assertGreaterEqual(
+                by_p.get(i_p, 0),
+                floor,
+                msg=f"P{i_p} has {by_p.get(i_p, 0)} samples; floor={floor}; "
+                f"counts={dict(sorted(by_p.items()))}",
+            )
 
 
 if __name__ == "__main__":

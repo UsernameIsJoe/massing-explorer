@@ -694,6 +694,12 @@ def _round_robin(
         depth += 1
 
 
+# Within a coverage cell: S = -school_index + λ * feas_potential.
+# λ=0.5 lets a clear geometry edge reorder near school neighbors without
+# jumping far down the school list (feas-first previously starved yield).
+FEAS_BLEND_IN_CELL = 0.5
+
+
 def _feasibility_potential(
     atoms: list[dict[str, Any]], assign: list[int]
 ) -> float:
@@ -763,8 +769,9 @@ def _feature_coverage_order(
     Seat relationship-feature coverage before any school-prior refill.
 
     Targets: feature values, art×media×admin motifs, then pairs. Within each
-    coverage cell, pick by feasibility potential (school rank as tie-break).
-    Motif triples are not retired by collateral singles/pairs.
+    coverage cell, pick by S = -school_index + λ * feasibility_potential so
+    geometry can reorder near school neighbors without overriding coverage
+    or the school list. Motif triples are not retired by collateral singles/pairs.
     """
     if limit <= 0 or not pool:
         return []
@@ -829,13 +836,11 @@ def _feature_coverage_order(
         if target in done:
             continue
         best_i = -1
-        best_score: tuple[float, int] | None = None
+        best_score: float | None = None
         for i, (_assign, keys, feas) in enumerate(cands):
             if i in used or target not in keys:
                 continue
-            # School rank (earlier pool index) primary; feasibility as tie-break
-            # so diversity cells stay school-shaped without ignoring geometry.
-            score = (-i, feas)
+            score = -float(i) + float(FEAS_BLEND_IN_CELL) * float(feas)
             if best_score is None or score > best_score:
                 best_score = score
                 best_i = i

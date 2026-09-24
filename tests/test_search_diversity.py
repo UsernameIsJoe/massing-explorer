@@ -667,6 +667,48 @@ ROOT = Path(__file__).resolve().parents[1]
 GSF_TWEAKED = ROOT / "examples" / "Underwood_Elementary_Space_Summary_GSF_Tweaked.xlsx"
 CONFIG = ROOT / "config" / "project.example.yaml"
 
+class FeasBlendCellTests(unittest.TestCase):
+    """Within-cell score must let feas move near school neighbors."""
+
+    def test_feas_blend_reorders_adjacent_school_ranks(self) -> None:
+        from unittest.mock import patch
+
+        from massing_explorer.explore.csp import (
+            FEAS_BLEND_IN_CELL,
+            _feature_coverage_order,
+        )
+
+        atoms = [{"id": f"a{i}", "name": f"A{i}", "departments": [f"D{i}"]} for i in range(3)]
+        # Pool order = school rank (earlier = better). Two assigns; shared keys.
+        pool = [[0, 0, 1], [0, 1, 1]]
+        shared = (("art", "alone"), ("motif", "alone", "other", "other"))
+
+        self.assertEqual(FEAS_BLEND_IN_CELL, 0.5)
+        # Adjacent: i=1 with feas=4 beats i=0 with feas=0 → -1+2 > 0.
+        with (
+            patch("massing_explorer.explore.csp._coverage_keys", return_value=shared),
+            patch(
+                "massing_explorer.explore.csp._feasibility_potential",
+                side_effect=[0.0, 4.0],
+            ),
+        ):
+            picked = _feature_coverage_order(atoms, pool, limit=1)
+        self.assertEqual(picked, [pool[1]])
+
+        # Far: i=5 with feas=4 still loses to i=0 ( -5+2 < 0 ).
+        far_pool = [[0, 0, 1]] + [[0, 1, 1]] * 5
+        feas = [0.0] + [0.0] * 4 + [4.0]
+        with (
+            patch("massing_explorer.explore.csp._coverage_keys", return_value=shared),
+            patch(
+                "massing_explorer.explore.csp._feasibility_potential",
+                side_effect=feas,
+            ),
+        ):
+            picked_far = _feature_coverage_order(atoms, far_pool, limit=1)
+        self.assertEqual(picked_far, [far_pool[0]])
+
+
 # Same brief and GSF as _diag_realize_step1.BRIEF_34.
 BRIEF_34 = (
     "3-4 masses, max 3 floors. length max 60 meters. gym and dining together and "

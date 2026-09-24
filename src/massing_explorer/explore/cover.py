@@ -51,8 +51,9 @@ COVER_STEP_SMALL = 10
 COVER_STEP_LARGE = 20
 COVER_MAX = 120
 # Minimum distinct story joints each seated partition gets in the stratified
-# pool before deep P0 axis sweeps consume remaining slots.
-PER_PARTITION_STORY_FLOOR = 8
+# pool. Kept at 5 so 19×5=95 fits under COVER_MAX=120 with room for stated /
+# seeds / axis fill. Must stay aligned with p_pool.PROBE_FLOOR.
+PER_PARTITION_STORY_FLOOR = 5
 # Stop when a batch adds no new cells and few novel feature encodings.
 COVER_STAGNANT_FRAC = 0.08
 # COVER search pool size is adaptive (12–20); UI presentation stays separate.
@@ -599,21 +600,24 @@ def _stratified_samples(
     for i_p in range(p_n):
         push(make(i_p, 0, 0, 0, 0, 0))
 
-    # Per-P evaluation floor: each seated org gets several story joints (and a
-    # couple loadings) before deep P0 axis sweeps consume the pool. Pin
-    # school-critical stacks first — demand bias alone prefers mid-heavy means
-    # and skips the one-tall/low patterns that unlock alternate orgs.
+    # Per-P evaluation floor — depth-major round-robin so late seats are not
+    # starved when early orgs would otherwise fill the pool first.
+    # Scale floor when pool_size is tight so loading/envelope axes still fit
+    # (full COVER_MAX keeps floor=5: 19×5 + stated + seeds ≤ 120).
     floor = max(1, int(PER_PARTITION_STORY_FLOOR))
+    axis_budget = min(4, max(0, pool_size // 10))
+    story_budget = max(0, pool_size - 2 - p_n - axis_budget)
+    effective_floor = min(floor, max(1, story_budget // max(1, p_n)))
+    s_orders: list[list[int]] = []
     for i_p in range(p_n):
         pats = patterns(i_p)
         groups = (plan.partitions[i_p] or {}).get("groups") or []
         n_mass = max(1, len([g for g in groups if g.get("departments")]))
         cap_stories = max((max(p) if p else 1) for p in pats) if pats else 2
         critical = set(school_critical_story_patterns(n_mass, cap_stories))
-        # Prefer rest-1 one-talls (every tall index) before rest-2 / flat stacks
-        # so the floor covers the school-sweep unlock set, not just tall@0.
-        def _unlock_key(idx: int) -> tuple[int, int]:
-            pat = pats[idx]
+
+        def _unlock_key(idx: int, _pats: list[tuple[int, ...]] = pats) -> tuple[int, int]:
+            pat = _pats[idx]
             spread = max(pat) - min(pat) if pat else 0
             if spread < 2:
                 return (2, idx)
@@ -634,12 +638,14 @@ def _stratified_samples(
         for i in crit_order + biased:
             if i not in s_order:
                 s_order.append(i)
-        for rank, i_s in enumerate(s_order[:floor]):
-            push(make(i_p, i_s, 0, 0, 0, 0))
-            if rank < 2 and l_n > 1:
-                push(make(i_p, i_s, 0, 1, 0, 0))
-            if rank < 1 and e_n > 1:
-                push(make(i_p, i_s, 0, 0, 1, 0))
+        s_orders.append(s_order)
+
+    for depth in range(effective_floor):
+        for i_p in range(p_n):
+            order = s_orders[i_p]
+            if depth >= len(order):
+                continue
+            push(make(i_p, order[depth], 0, 0, 0, 0))
 
     for i_t in range(t_n):
         push(make(0, 0, i_t, 0, 0, 0))
